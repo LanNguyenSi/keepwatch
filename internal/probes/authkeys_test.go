@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"strings"
 	"testing"
 
@@ -202,26 +201,34 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 		// the options come first and hold a blank inside quotes; the key follows
 		wantStatus(t, run(`command="ssh-rsa AAAA foo" ssh-ed25519 `+blob+"\n"), result.Pass)
 	})
-	bad := map[string]string{
-		"garbage":                "this is not a key",
-		"unterminated quote":     `command="echo ssh-ed25519 ` + blob,
-		"option then nothing":    `no-pty`,
-		"unknown key type":       "ssh-foo " + blob,
-		"type without data":      "ssh-ed25519",
-		"data not base64":        "ssh-ed25519 !!!notbase64!!!",
-		"data unpadded":          "ecdsa-sha2-nistp256 " + strings.TrimRight(strings.Fields(loadKey(t, v, "ecdsa").line)[1], "="),
-		"blob of another type":   "ssh-ed25519 " + rblob,
-		"rsa type, ed25519 blob": "ssh-rsa " + blob,
-		"empty data":             "ssh-ed25519 =",
-		"shadow-like line":       "root:$6$abc$def:19000:0:99999:7:::",
-		"certificate":            strings.Join([]string{"ssh-ed25519-cert-v01@openssh.com", blob}, " "),
-		"blob too large":         "ssh-ed25519 " + strings.Repeat("A", 17000),
-		"nul in the blob":        "ssh-ed25519 " + blob[:20] + "\x00" + blob[20:],
+	// A line that cannot be read is a warning, unless it starts with the name
+	// of a key type that sshd reads: sshd may accept a key from it, so it is a
+	// fail (the safety net).
+	bad := map[string]struct {
+		line string
+		want result.Status
+		why  string
+	}{
+		"garbage":                           {"this is not a key", result.Warn, "no known key type"},
+		"unterminated quote":                {`command="echo ssh-ed25519 ` + blob, result.Warn, "unterminated quote in the options"},
+		"option then nothing":               {`no-pty`, result.Warn, "no known key type"},
+		"unknown key type":                  {"ssh-foo " + blob, result.Warn, "no known key type"},
+		"shadow-like line":                  {"root:$6$abc$def:19000:0:99999:7:::", result.Warn, ""},
+		"certificate":                       {strings.Join([]string{"ssh-ed25519-cert-v01@openssh.com", blob}, " "), result.Warn, "no known key type"},
+		"type without data":                 {"ssh-ed25519", result.Fail, "no key data"},
+		"data not base64":                   {"ssh-ed25519 !!!notbase64!!!", result.Fail, "key data is not valid base64"},
+		"data unpadded":                     {"ecdsa-sha2-nistp256 " + strings.TrimRight(strings.Fields(loadKey(t, v, "ecdsa").line)[1], "="), result.Fail, "key data is not valid base64"},
+		"blob of another type":              {"ssh-ed25519 " + rblob, result.Fail, "key data is not valid base64"},
+		"rsa type, ed25519 blob":            {"ssh-rsa " + blob, result.Fail, "key data is not valid base64"},
+		"empty data":                        {"ssh-ed25519 =", result.Fail, ""},
+		"blob too large":                    {"ssh-ed25519 " + strings.Repeat("A", 17000), result.Fail, "key data is not valid base64"},
+		"nul in the blob":                   {"ssh-ed25519 " + blob[:20] + "\x00" + blob[20:], result.Fail, ""},
+		"options, then a type without data": {`no-pty ssh-ed25519`, result.Fail, ""},
 	}
-	for name, line := range bad {
+	for name, c := range bad {
 		t.Run("bad "+name, func(t *testing.T) {
-			o := run(ed.line + "\nline two\n" + line + "\n")
-			wantStatus(t, o, result.Warn)
+			o := run(ed.line + "\nline two\n" + c.line + "\n")
+			wantStatus(t, o, c.want)
 			var sub string
 			for _, e := range o.Evidence {
 				if strings.HasPrefix(e.Subject, "alice:.ssh/authorized_keys:3") {
@@ -232,34 +239,41 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 				}
 			}
 			if sub == "" {
-				t.Fatalf("no warning for line 3: %+v", o.Evidence)
+				t.Fatalf("no evidence for line 3: %+v", o.Evidence)
 			}
-			// the reason is one of a fixed set
-			reason := map[string]string{
-				"garbage":                "no known key type",
-				"unknown key type":       "no known key type",
-				"option then nothing":    "no known key type",
-				"unterminated quote":     "unterminated quote in the options",
-				"type without data":      "no key data",
-				"data not base64":        "key data is not valid base64",
-				"blob of another type":   "key data is not valid base64",
-				"blob too large":         "key data is not valid base64",
-				"rsa type, ed25519 blob": "key data is not valid base64",
-			}[name]
-			if reason != "" && !strings.Contains(sub, reason) {
-				t.Fatalf("reason %q, want it to contain %q", sub, reason)
+			if c.want == result.Fail && !strings.Contains(sub, "may hold an unchecked key") {
+				t.Fatalf("detail %q", sub)
+			}
+			if c.why != "" && !strings.Contains(sub, c.why) {
+				t.Fatalf("reason %q, want it to contain %q", sub, c.why)
 			}
 		})
+	}
+	// wantUnreadable: the line is not listed as a key and is a failing item
+	wantUnreadable := func(t *testing.T, o probes.Outcome) {
+		t.Helper()
+		wantStatus(t, o, result.Fail)
+		if !eq(subjects(o), []string{"alice:.ssh/authorized_keys:2"}) || !strings.Contains(o.Evidence[0].Detail, "may hold an unchecked key") {
+			t.Fatalf("evidence %+v", o.Evidence)
+		}
+	}
+	// wantListed: the line is a key that is not the expected one
+	wantListed := func(t *testing.T, o probes.Outcome) {
+		t.Helper()
+		wantStatus(t, o, result.Fail)
+		if len(o.Evidence) != 1 || !strings.HasPrefix(o.Evidence[0].Subject, "alice:SHA256:") {
+			t.Fatalf("evidence %+v", o.Evidence)
+		}
 	}
 	t.Run("a blob over the size limit is refused whatever its shape", func(t *testing.T) {
 		big := base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", strings.Repeat("n", 17000)))
 		small := base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", strings.Repeat("n", 1000)))
-		wantStatus(t, run(ed.line+"\nssh-rsa "+big+"\n"), result.Warn)
-		wantStatus(t, run(ed.line+"\nssh-rsa "+small+"\n"), result.Fail)
+		wantUnreadable(t, run(ed.line+"\nssh-rsa "+big+"\n"))
+		wantListed(t, run(ed.line+"\nssh-rsa "+small+"\n"))
 	})
 	t.Run("the blob must name its own type", func(t *testing.T) {
 		line := "ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-foo", "e", "n"))
-		wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Warn)
+		wantUnreadable(t, run(ed.line+"\n"+line+"\n"))
 	})
 	t.Run("a bad line does not hide the keys around it", func(t *testing.T) {
 		o := run("garbage\n" + ed.line + "\n" + rsa.line + "\n")
@@ -271,21 +285,23 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 	})
 	t.Run("the shape of a key blob must be the one OpenSSH reads", func(t *testing.T) {
 		curve := func(typ, name string) string {
-			return typ + " " + base64.StdEncoding.EncodeToString(wire(typ, name, "point"))
+			return typ + " " + base64.StdEncoding.EncodeToString(wire(typ, name, ecPoint(name)))
 		}
 		for name, line := range map[string]string{
-			"ed25519 key of 31 bytes":      "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")[:31])),
-			"ed25519 key of 33 bytes":      "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")+"x")),
-			"ed25519 blob with a field":    "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a"), "more")),
-			"ecdsa nistp256, curve p384":   curve("ecdsa-sha2-nistp256", "nistp384"),
-			"ecdsa nistp384, curve p256":   curve("ecdsa-sha2-nistp384", "nistp256"),
-			"ecdsa curve of another name":  curve("ecdsa-sha2-nistp521", "other"),
-			"sk-ecdsa with a wrong curve":  "sk-ecdsa-sha2-nistp256@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ecdsa-sha2-nistp256@openssh.com", "nistp384", "p", "app")),
-			"sk-ed25519 with a short key":  "sk-ssh-ed25519@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ssh-ed25519@openssh.com", "short", "app")),
-			"rsa blob with one field":      "ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e")),
-			"dss blob with too few fields": "ssh-dss " + base64.StdEncoding.EncodeToString(wire("ssh-dss", "p", "q", "g")),
+			"ed25519 key of 31 bytes":       "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")[:31])),
+			"ed25519 key of 33 bytes":       "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")+"x")),
+			"ed25519 blob with a field":     "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a"), "more")),
+			"ecdsa nistp256, curve p384":    curve("ecdsa-sha2-nistp256", "nistp384"),
+			"ecdsa nistp384, curve p256":    curve("ecdsa-sha2-nistp384", "nistp256"),
+			"ecdsa curve of another name":   curve("ecdsa-sha2-nistp521", "other"),
+			"ecdsa point of the wrong size": "ecdsa-sha2-nistp256 " + base64.StdEncoding.EncodeToString(wire("ecdsa-sha2-nistp256", "nistp256", ecPoint("nistp384"))),
+			"ecdsa compressed point":        "ecdsa-sha2-nistp256 " + base64.StdEncoding.EncodeToString(wire("ecdsa-sha2-nistp256", "nistp256", "\x02"+strings.Repeat("a", 32))),
+			"sk-ecdsa with a wrong curve":   "sk-ecdsa-sha2-nistp256@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ecdsa-sha2-nistp256@openssh.com", "nistp384", ecPoint("nistp384"), "app")),
+			"sk-ed25519 with a short key":   "sk-ssh-ed25519@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ssh-ed25519@openssh.com", "short", "app")),
+			"rsa blob with one field":       "ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e")),
+			"dss blob with too few fields":  "ssh-dss " + base64.StdEncoding.EncodeToString(wire("ssh-dss", "p", "q", "g")),
 		} {
-			t.Run(name, func(t *testing.T) { wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Warn) })
+			t.Run(name, func(t *testing.T) { wantUnreadable(t, run(ed.line+"\n"+line+"\n")) })
 		}
 		// the same shapes, right: ecdsa curves, rsa with e and n, dss with four numbers
 		for _, line := range []string{
@@ -294,14 +310,14 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 			"ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", "n")),
 			"ssh-dss " + base64.StdEncoding.EncodeToString(wire("ssh-dss", "p", "q", "g", "y")),
 		} {
-			wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Fail)
+			wantListed(t, run(ed.line+"\n"+line+"\n"))
 		}
 	})
 	t.Run("the sk key types", func(t *testing.T) {
 		for _, typ := range []string{"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"} {
 			b := wire(typ, pk32("x"), "application")
 			if typ == "sk-ecdsa-sha2-nistp256@openssh.com" {
-				b = wire(typ, "nistp256", "point", "application")
+				b = wire(typ, "nistp256", ecPoint("nistp256"), "application")
 			}
 			line := typ + " " + base64.StdEncoding.EncodeToString(b)
 			sum := sha256.Sum256(b)
@@ -314,9 +330,14 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 	t.Run("a blob whose length prefix is a lie", func(t *testing.T) {
 		b := []byte{0, 0, 1, 0, 'a'}
 		line := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(b)
-		wantStatus(t, run(line+"\n"), result.Warn)
-		wantStatus(t, run("ssh-ed25519 "+base64.StdEncoding.EncodeToString([]byte{0, 1})+"\n"), result.Warn)
+		wantStatus(t, run(line+"\n"), result.Fail)
+		wantStatus(t, run("ssh-ed25519 "+base64.StdEncoding.EncodeToString([]byte{0, 1})+"\n"), result.Fail)
 	})
+}
+
+// ecPoint is an uncompressed point (0x04, x, y) of the size of the curve.
+func ecPoint(curve string) string {
+	return "\x04" + strings.Repeat("p", 2*map[string]int{"nistp256": 32, "nistp384": 48, "nistp521": 66}[curve])
 }
 
 // pk32 pads s to the 32 bytes of an ed25519 public key.
@@ -727,73 +748,292 @@ func TestAuthorizedKeysPrepareTakesNoParameters(t *testing.T) {
 	prepareErr(t, "authorized_keys", map[string]any{"x": 1})
 }
 
-// TestAuthorizedKeysLinesMatchSSHKeygen is the differential test of the line
-// parser. Every case under testdata/<release>/keycases is one authorized_keys
-// line (see keycases.sh) together with what "ssh-keygen -lf" printed for it on
-// that release. ssh-keygen reads the line the way sshd does, so the contract
-// is: keepwatch finds the very key ssh-keygen finds, or, where ssh-keygen finds
-// none, none. The only line keepwatch deliberately does not list although
-// ssh-keygen does is a certificate, which it reports as a line that is not a
-// key.
-func TestAuthorizedKeysLinesMatchSSHKeygen(t *testing.T) {
-	const dummy = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	for _, v := range versions {
-		dir := "testdata/" + v + "/keycases"
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cases := 0
-		for _, e := range entries {
-			id, ok := strings.CutSuffix(e.Name(), ".keys")
-			if !ok {
-				continue
-			}
-			cases++
-			t.Run(v+"/"+id, func(t *testing.T) {
-				content := fixtureFile(t, v+"/keycases/"+id+".keys")
-				about := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".about"))
-				exit := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".exit"))
-				fsys := keyHost(t, v, map[string]string{aliceAK: content})
-				run := func(fp string) probes.Outcome {
-					return execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": {fp}})
-				}
-				if exit != "0" {
-					o := run(dummy)
-					wantStatus(t, o, result.Warn)
-					for _, ev := range o.Evidence {
-						if ev.Subject != "alice:"+dummy && !strings.Contains(ev.Detail, "line is not a public key") {
-							t.Fatalf("%s: ssh-keygen finds no key, keepwatch says %+v", about, ev)
-						}
-					}
-					if len(o.Evidence) < 2 {
-						t.Fatalf("%s: the line is not reported as unparseable: %+v", about, o.Evidence)
-					}
-					return
-				}
-				out := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".fp"))
-				fields := strings.Fields(out)
-				fp := fields[1]
-				if strings.HasSuffix(out, "-CERT)") {
-					o := run(fp)
-					wantStatus(t, o, result.Warn)
-					if strings.Contains(allText(o), "ssh-keygen") || len(o.Evidence) < 2 {
-						t.Fatalf("%s: %+v", about, o.Evidence)
-					}
-					return
-				}
-				// the line holds exactly the key ssh-keygen found: expecting it passes,
-				// expecting something else fails with that key as the subject
-				wantStatus(t, run(fp), result.Pass)
-				o := run(dummy)
-				wantStatus(t, o, result.Fail)
-				if !eq(subjects(o), []string{"alice:" + fp}) {
-					t.Fatalf("%s: ssh-keygen lists %s, keepwatch lists %v", about, fp, subjects(o))
-				}
-			})
-		}
-		if cases < 40 {
-			t.Fatalf("%s: only %d key line cases found", v, cases)
+// ---- key types, integers and whitespace as sshd reads them (F2, F3)
+
+// blobOf returns the decoded blob of a public key line.
+func blobOf(t *testing.T, line string) []byte {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(strings.Fields(line)[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// splitWire reads the strings of a wire format blob.
+func splitWire(t *testing.T, b []byte) [][]byte {
+	t.Helper()
+	var f [][]byte
+	for len(b) > 0 {
+		n := binary.BigEndian.Uint32(b)
+		f = append(f, b[4:4+n])
+		b = b[4+n:]
+	}
+	return f
+}
+
+func joinWire(fields ...[]byte) []byte {
+	var b []byte
+	for _, f := range fields {
+		b = binary.BigEndian.AppendUint32(b, uint32(len(f)))
+		b = append(b, f...)
+	}
+	return b
+}
+
+func fpOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+}
+
+// keyLineOutcome runs the probe on a file with the expected key of ed and the
+// given extra line (the user alice expects only ed25519 key ed).
+func keyLineOutcome(t *testing.T, v string, expect []string, lines ...string) probes.Outcome {
+	t.Helper()
+	fsys := keyHost(t, v, map[string]string{aliceAK: strings.Join(lines, "\n") + "\n"})
+	return execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": expect})
+}
+
+// listedKey: the one extra line is a key with this fingerprint, expected or not.
+func wantKeyFP(t *testing.T, v, what, line, fp string) {
+	t.Helper()
+	o := keyLineOutcome(t, v, []string{fp}, line)
+	if o.Status != result.Pass {
+		t.Errorf("%s: %s (%s): %+v", what, o.Status, o.Summary, o.Evidence)
+	}
+}
+
+func wantNotAKey(t *testing.T, v, what, line string, want result.Status) {
+	t.Helper()
+	ed := loadKey(t, v, "ed25519")
+	o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, line)
+	if o.Status != want {
+		t.Errorf("%s: %s (%s), want %s: %+v", what, o.Status, o.Summary, want, o.Evidence)
+		return
+	}
+	for _, e := range o.Evidence {
+		if strings.HasPrefix(e.Subject, "alice:SHA256:") {
+			t.Errorf("%s: listed as the key %s", what, e.Subject)
 		}
 	}
+}
+
+// The key type names that sshd reads at the start of a key (the table of key
+// types of OpenSSH 8.9 and 9.6; sshkey_read compares the whole word exactly,
+// case sensitive) and the ones it does not.
+func TestAuthorizedKeysKeyTypeNames(t *testing.T) {
+	for _, v := range versions {
+		ed, rs, ec := loadKey(t, v, "ed25519"), loadKey(t, v, "rsa"), loadKey(t, v, "ecdsa")
+		edb, rsb, ecb := strings.Fields(ed.line)[1], strings.Fields(rs.line)[1], strings.Fields(ec.line)[1]
+		sk := joinWire([]byte("sk-ecdsa-sha2-nistp256@openssh.com"), []byte("nistp256"), []byte(ecPoint("nistp256")), []byte("ssh:"))
+		sked := joinWire([]byte("sk-ssh-ed25519@openssh.com"), []byte(pk32("k")), []byte("ssh:"))
+		for _, c := range []struct{ name, blob, fp string }{
+			{"ssh-ed25519", edb, ed.fp},
+			{"ssh-rsa", rsb, rs.fp},
+			{"rsa-sha2-256", rsb, rs.fp},
+			{"rsa-sha2-512", rsb, rs.fp},
+			{"ecdsa-sha2-nistp256", ecb, ec.fp},
+			{"sk-ecdsa-sha2-nistp256@openssh.com", base64.StdEncoding.EncodeToString(sk), fpOf(sk)},
+			{"webauthn-sk-ecdsa-sha2-nistp256@openssh.com", base64.StdEncoding.EncodeToString(sk), fpOf(sk)},
+			{"sk-ssh-ed25519@openssh.com", base64.StdEncoding.EncodeToString(sked), fpOf(sked)},
+		} {
+			wantKeyFP(t, v, v+" "+c.name, c.name+" "+c.blob+" comment", c.fp)
+		}
+		for _, name := range []string{
+			"ED25519", "Ed25519", "SSH-ED25519", "Ssh-ed25519", "ssh-Ed25519", "RSA", "rsa", "ECDSA", "ED25519-SK", "DSA",
+			"rsa-sha2-384", "RSA-SHA2-256", "ssh-ed448", "ssh-xmss@openssh.com", "sk-ssh-ed25519", "webauthn-sk-ecdsa-sha2-nistp256",
+			"ssh-ed25519-cert-v01@openssh.com", "ssh-rsa-cert-v01@openssh.com", "rsa-sha2-256-cert-v01@openssh.com",
+			"sk-ssh-ed25519-cert-v01@openssh.com", "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+		} {
+			wantNotAKey(t, v, v+" "+name, name+" "+rsb+" x", result.Warn)
+			wantNotAKey(t, v, v+" "+name+" with an ed25519 blob", name+" "+edb+" x", result.Warn)
+		}
+	}
+}
+
+// OpenSSH computes the fingerprint of the key it parsed, written back in its
+// canonical form, and not of the text it read.
+func TestAuthorizedKeysCanonicalIntegers(t *testing.T) {
+	for _, v := range versions {
+		rs := loadKey(t, v, "rsa")
+		f := splitWire(t, blobOf(t, rs.line))
+		typ, e, n := f[0], f[1], f[2]
+		if n[0] != 0 || n[1]&0x80 == 0 {
+			t.Fatalf("%s: the fixture key has an unexpected modulus", v)
+		}
+		z := func(k int) []byte { return make([]byte, k) }
+		line := func(fields ...[]byte) string {
+			return "ssh-rsa " + base64.StdEncoding.EncodeToString(joinWire(fields...))
+		}
+		wantKeyFP(t, v, "canonical", line(typ, e, n), rs.fp)
+		wantKeyFP(t, v, "one zero byte in front of e", line(typ, append(z(1), e...), n), rs.fp)
+		wantKeyFP(t, v, "five zero bytes in front of e, three in front of n", line(typ, append(z(5), e...), append(z(3), n...)), rs.fp)
+		wantKeyFP(t, v, "e of zero bytes only before the value", line(typ, append(z(40), e...), n), rs.fp)
+		// a modulus that fills 2048 bytes behind a zero byte is still read; the
+		// fingerprint is of the integer, so it differs from the key's
+		big := append([]byte{0x7f}, z(2047)...)
+		wantKeyFP(t, v, "a modulus of 2048 bytes", line(typ, e, big), fpOf(joinWire(typ, e, big)))
+		wantKeyFP(t, v, "a modulus of 2048 bytes behind a zero byte", line(typ, e, append(z(1), append([]byte{0x80}, z(2047)...)...)), fpOf(joinWire(typ, e, append(z(1), append([]byte{0x80}, z(2047)...)...))))
+		// refused by OpenSSH: negative integers and integers over 2048 bytes
+		unreadable := func(what, l string) {
+			ed := loadKey(t, v, "ed25519")
+			o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, l)
+			if o.Status != result.Fail || len(o.Evidence) != 1 || !strings.Contains(o.Evidence[0].Detail, "may hold an unchecked key") {
+				t.Errorf("%s %s: %s %+v", v, what, o.Status, o.Evidence)
+			}
+		}
+		unreadable("a negative modulus", line(typ, e, n[1:]))
+		unreadable("a negative e", line(typ, []byte{0x80, 1}, n))
+		unreadable("a modulus of 2049 bytes", line(typ, e, append([]byte{1}, z(2048)...)))
+		unreadable("a modulus of 2050 bytes", line(typ, e, append(z(1), append([]byte{1}, z(2048)...)...)))
+		// the same for DSA: four integers, each canonicalised
+		d := [][]byte{{0x80, 1}, {0x7f}, {0x9e, 2}, {3}}
+		canon := joinWire([]byte("ssh-dss"), append(z(1), d[0]...), d[1], append(z(1), d[2]...), d[3])
+		padded := joinWire([]byte("ssh-dss"), append(z(4), append(z(1), d[0]...)...), append(z(2), d[1]...), append(z(3), append(z(1), d[2]...)...), d[3])
+		wantKeyFP(t, v, "dss with padded integers", "ssh-dss "+base64.StdEncoding.EncodeToString(padded), fpOf(canon))
+		unreadable("a negative dss integer", "ssh-dss "+base64.StdEncoding.EncodeToString(joinWire([]byte("ssh-dss"), d[0], d[1], d[2], d[3])))
+	}
+}
+
+// The type string at the start of a blob goes through sshkey_type_from_name,
+// which knows every name of the type and the short names in any case; for
+// ECDSA the name must be exact.
+func TestAuthorizedKeysTypeStringInTheBlob(t *testing.T) {
+	for _, v := range versions {
+		rs, ed, ec := loadKey(t, v, "rsa"), loadKey(t, v, "ed25519"), loadKey(t, v, "ecdsa")
+		rf, ef, cf := splitWire(t, blobOf(t, rs.line)), splitWire(t, blobOf(t, ed.line)), splitWire(t, blobOf(t, ec.line))
+		with := func(f [][]byte, name string) string {
+			return base64.StdEncoding.EncodeToString(joinWire(append([][]byte{[]byte(name)}, f[1:]...)...))
+		}
+		for _, name := range []string{"ssh-rsa", "rsa-sha2-256", "rsa-sha2-512", "RSA", "rsa", "Rsa"} {
+			wantKeyFP(t, v, "ssh-rsa line, blob type "+name, "ssh-rsa "+with(rf, name), rs.fp)
+			wantKeyFP(t, v, "rsa-sha2-512 line, blob type "+name, "rsa-sha2-512 "+with(rf, name), rs.fp)
+		}
+		for _, name := range []string{"ssh-ed25519", "ED25519", "ed25519", "Ed25519"} {
+			wantKeyFP(t, v, "ssh-ed25519 line, blob type "+name, "ssh-ed25519 "+with(ef, name), ed.fp)
+		}
+		unreadable := func(what, l string) {
+			o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, l)
+			if o.Status != result.Fail || len(o.Evidence) != 1 || !strings.Contains(o.Evidence[0].Detail, "may hold an unchecked key") {
+				t.Errorf("%s %s: %s %+v", v, what, o.Status, o.Evidence)
+			}
+		}
+		for _, name := range []string{"ssh-ed25519", "ssh-dss", "DSA", "ssh-rsa-cert-v01@openssh.com", "rsa-sha2-384", "ssh-rsa ", ""} {
+			unreadable("ssh-rsa line, blob type "+name, "ssh-rsa "+with(rf, name))
+		}
+		for _, name := range []string{"ssh-rsa", "ED", "ssh-ed25519 ", "ED25519-SK", "ssh-ed25519-cert-v01@openssh.com"} {
+			unreadable("ssh-ed25519 line, blob type "+name, "ssh-ed25519 "+with(ef, name))
+		}
+		wantKeyFP(t, v, "ecdsa, exact name", "ecdsa-sha2-nistp256 "+with(cf, "ecdsa-sha2-nistp256"), ec.fp)
+		for _, name := range []string{"ECDSA", "ecdsa", "ecdsa-sha2-nistp384", "nistp256", "ECDSA-SK"} {
+			unreadable("ecdsa line, blob type "+name, "ecdsa-sha2-nistp256 "+with(cf, name))
+		}
+		// sk-ecdsa: the two names of the type; the short name is not accepted
+		sk := func(name string) string {
+			return base64.StdEncoding.EncodeToString(joinWire([]byte(name), []byte("nistp256"), []byte(ecPoint("nistp256")), []byte("ssh:")))
+		}
+		canon := joinWire([]byte("sk-ecdsa-sha2-nistp256@openssh.com"), []byte("nistp256"), []byte(ecPoint("nistp256")), []byte("ssh:"))
+		wantKeyFP(t, v, "sk-ecdsa", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
+		wantKeyFP(t, v, "sk-ecdsa, webauthn blob type", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("webauthn-sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
+		wantKeyFP(t, v, "webauthn line, sk-ecdsa blob type", "webauthn-sk-ecdsa-sha2-nistp256@openssh.com "+sk("sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
+		unreadable("sk-ecdsa, short blob type", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("ECDSA-SK"))
+		skEd := joinWire([]byte("sk-ssh-ed25519@openssh.com"), []byte(pk32("k")), []byte("ssh:"))
+		skEdShort := joinWire([]byte("Ed25519-SK"), []byte(pk32("k")), []byte("ssh:"))
+		wantKeyFP(t, v, "sk-ed25519, short blob type", "sk-ssh-ed25519@openssh.com "+base64.StdEncoding.EncodeToString(skEdShort), fpOf(skEd))
+	}
+}
+
+// b64_pton skips every isspace byte anywhere in the text, including around the
+// padding, and refuses anything else it cannot decode.
+func TestAuthorizedKeysBase64LikeB64Pton(t *testing.T) {
+	for _, v := range versions {
+		ed, ec := loadKey(t, v, "ed25519"), loadKey(t, v, "ecdsa")
+		eb, cb := strings.Fields(ed.line)[1], strings.Fields(ec.line)[1]
+		if !strings.HasSuffix(cb, "=") || strings.HasSuffix(cb, "==") {
+			t.Fatalf("%s: the ecdsa fixture has no single padding byte", v)
+		}
+		for _, sp := range []string{"\v", "\f", "\r", "\v\f\r", "\v\v"} {
+			wantKeyFP(t, v, "blank inside the text", "ssh-ed25519 "+eb[:20]+sp+eb[20:], ed.fp)
+			wantKeyFP(t, v, "blank at the start", "ssh-ed25519 "+sp+eb, ed.fp)
+			wantKeyFP(t, v, "blank at the end", "ssh-ed25519 "+eb+sp+" comment", ed.fp)
+			wantKeyFP(t, v, "blank in front of the padding", "ecdsa-sha2-nistp256 "+strings.TrimSuffix(cb, "=")+sp+"=", ec.fp)
+		}
+		wantKeyFP(t, v, "blank in the text of a padded key", "ecdsa-sha2-nistp256 "+cb[:10]+"\v"+cb[10:], ec.fp)
+		// not decodable: refused as sshd refuses it
+		unreadable := func(what, l string) {
+			o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, l)
+			if o.Status != result.Fail || len(o.Evidence) != 1 || !strings.Contains(o.Evidence[0].Detail, "may hold an unchecked key") {
+				t.Errorf("%s %s: %s %+v", v, what, o.Status, o.Evidence)
+			}
+		}
+		unreadable("a blank after the padding and more text", "ecdsa-sha2-nistp256 "+cb+"\vAAAA")
+		unreadable("unpadded", "ecdsa-sha2-nistp256 "+strings.TrimSuffix(cb, "="))
+		unreadable("a stray character", "ssh-ed25519 "+eb[:20]+"!"+eb[20:])
+		unreadable("a space-like non-ASCII character", "ssh-ed25519 "+eb[:20]+" "+eb[20:])
+		unreadable("padding bits set", "ecdsa-sha2-nistp256 "+cb[:len(cb)-2]+"B=")
+		// the separator between the type and the text is a blank or a tab only
+		wantNotAKey(t, v, "vertical tab after the type", "ssh-ed25519\v"+eb, result.Warn)
+		wantNotAKey(t, v, "carriage return before the type", "\rssh-ed25519 "+eb, result.Warn)
+	}
+}
+
+// A line that cannot be read but starts with a key type that sshd reads is a
+// failing item, not a harmless one; any other unreadable line is a warning.
+func TestAuthorizedKeysUnreadableKeyLinesFail(t *testing.T) {
+	v := "ubuntu2404"
+	ed := loadKey(t, v, "ed25519")
+	eb := strings.Fields(ed.line)[1]
+	fail := map[string]string{
+		"key type and a bad blob":                  "ssh-ed25519 AAAA",
+		"every key type name":                      "ecdsa-sha2-nistp521 AAAA",
+		"webauthn type with a bad blob":            "webauthn-sk-ecdsa-sha2-nistp256@openssh.com AAAA",
+		"key type and nothing":                     "ssh-rsa",
+		"key type and blanks":                      "ssh-rsa   ",
+		"after options":                            `no-pty ssh-ed25519 AAAA`,
+		"after options with quoted blanks":         `command="a b c",from="x y" rsa-sha2-256 AAAA`,
+		"after options, tabs":                      "no-pty\tssh-dss\tAAAA",
+		"the word after the first word":            "host ssh-ed25519 AAAA",
+		"a good key in the comment does not count": "ssh-ed25519 AAAA ssh-ed25519 " + eb,
+	}
+	for name, line := range fail {
+		t.Run("fail "+name, func(t *testing.T) {
+			o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, line)
+			if o.Status != result.Fail || !eq(subjects(o), []string{"alice:.ssh/authorized_keys:2"}) {
+				t.Fatalf("%s %+v", o.Status, o.Evidence)
+			}
+			wantSummary(t, o, "1 unexpected authorized key(s) (1 of them lines that start with a key type but cannot be read)")
+			if strings.Contains(allText(o), "AAAA") {
+				t.Fatalf("the line is quoted: %+v", o.Evidence)
+			}
+		})
+	}
+	warn := map[string]string{
+		"no key type at all":                 "AAAA",
+		"options only":                       `command="ssh-ed25519 AAAA"`,
+		"a key type inside quotes":           `command="x ssh-ed25519 AAAA" no-pty`,
+		"a key type that is no key type":     "ssh-ed25519x AAAA",
+		"the key type after two words":       "a b ssh-ed25519 AAAA",
+		"an unterminated quote":              `command="x ssh-ed25519 ` + eb,
+		"a lone quote in the first word":     `"x ssh-ed25519 AAAA`,
+		"a certificate type":                 "ssh-ed25519-cert-v01@openssh.com AAAA",
+		"a short key type after options":     "no-pty ED25519 " + eb,
+		"a key type after a carriage return": "\rssh-ed25519 " + eb,
+	}
+	for name, line := range warn {
+		t.Run("warn "+name, func(t *testing.T) {
+			o := keyLineOutcome(t, v, []string{ed.fp}, ed.line, line)
+			if o.Status != result.Warn {
+				t.Fatalf("%s %+v", o.Status, o.Evidence)
+			}
+		})
+	}
+	t.Run("a readable line with a key after options is not unreadable", func(t *testing.T) {
+		wantKeyFP(t, v, "options", `no-pty ssh-ed25519 `+eb, ed.fp)
+	})
+	t.Run("an unreadable line is listed beside the keys, and is excepted by its subject", func(t *testing.T) {
+		o := keyLineOutcome(t, v, []string{ed.fp}, "ssh-ed25519 AAAA", ed.line)
+		if o.Status != result.Fail || !eq(subjects(o), []string{"alice:.ssh/authorized_keys:1"}) {
+			t.Fatalf("%s %+v", o.Status, o.Evidence)
+		}
+	})
 }

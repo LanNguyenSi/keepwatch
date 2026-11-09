@@ -169,9 +169,16 @@ installed one, even if the version the simulation would install comes from
 own, the check compares no version strings. One evidence item per package. It
 also reports how old the package lists are and warns when they are older than
 `max_list_age_hours` or missing, because then it cannot see newer updates.
-Held-back and phased packages are counted in the summary, not judged (a held
-package with a security fix is not seen). At most 2000 upgraded packages are
-looked up; with more the result is `error`.
+Packages that apt does not upgrade (held with `apt-mark hold`, blocked by a
+dependency that cannot be met, or deferred by Ubuntu's phased updates; apt names
+them under "kept back" or, with apt 2.8, "deferred due to phasing") are counted
+in the summary and looked up the same way: a held package with a newer security
+version fails the check, and its detail says apt keeps it back. The output of
+both apt commands must be understood line by line (the phased marker
+` (phased N%)` that apt prints on a version row is one of the known shapes); a
+line of any other shape, or a kept back list that does not match the count in
+the summary, makes the result `error`. Together at most 2000 upgraded and kept
+back packages are looked up; with more the result is `error`.
 
 `docker_exposure` fails when the daemon listens on TCP (an entry in
 `daemon.json` `hosts`, or `-H`/`--host` on the running dockerd's command line,
@@ -199,18 +206,43 @@ that does not have exactly seven fields is a `warn` and its user is not
 examined. The files come from `AuthorizedKeysFile` in `sshd -T`. A key that is
 not expected is a `fail` (subject `user:SHA256:...`); an expected key that is
 missing, a file that could not be read or has lines that are not keys, and an
-`AuthorizedKeysCommand` (whose keys cannot be checked) are `warn`. Lines are
-read the way OpenSSH reads them (a port of `sshkey_advance_past_options`: quotes
-and backslash-quote in the options, a line ends at a NUL, the options are
-stepped over and not interpreted) and a comment of any length is ignored; the
-fingerprints equal those of `ssh-keygen -l` for every line of the test set
-captured on both releases. The users own their files and every directory below
+`AuthorizedKeysCommand` (whose keys cannot be checked) are `warn`.
+
+A line is read the way OpenSSH 8.9 and 9.6 read it, and the differences are
+stated here. Mirrored (ports of `check_authkey_line`, `sshkey_read`,
+`sshkey_advance_past_options`, `b64_pton` and the integer rules of
+`sshkey_from_blob`): a line ends at a NUL; a key at the start of the line, else
+the options are stepped over (quotes, backslash-quote; they are not
+interpreted) and a key follows; the key type must be one of the names `sshkey_read`
+accepts (`ssh-ed25519`, `ssh-rsa`, `rsa-sha2-256`, `rsa-sha2-512`, `ssh-dss`,
+`ecdsa-sha2-nistp256`/`384`/`521`, `sk-ssh-ed25519@openssh.com`,
+`sk-ecdsa-sha2-nistp256@openssh.com`,
+`webauthn-sk-ecdsa-sha2-nistp256@openssh.com`), compared exactly and
+case-sensitively (`ED25519`, `RSA` are not key types in this file); the base64
+text may hold any C whitespace character (vertical tab, form feed, carriage
+return) and must decode strictly; the fingerprint is taken over the key as
+OpenSSH writes it back (RSA and DSA integers with extra leading zero bytes give
+the fingerprint of their canonical form), so it equals the one `ssh-keygen -l`
+prints; a comment of any length is ignored. Not mirrored: the options are not
+parsed, so a line that sshd refuses because of a bad option is still listed (a
+key may be listed that cannot log in); an ECDSA point is checked for its size
+and uncompressed form, not for lying on the curve, and an RSA key is not checked
+for its length; certificates (`-cert-v01@openssh.com` types) are read by sshd but
+never match a login key, so they count as lines that are not keys (a `warn`).
+A line that cannot be read but starts with the name of a key type that sshd
+reads (as its first word, or as the first word after the options) is a `fail`
+and not a `warn`: sshd may accept a key from it that is not checked (subject
+`user:path:line`, the reason is a fixed text, the line is never quoted).
+The test set holds 83 lines on each release with what `ssh-keygen -lf` printed
+and which keys a real sshd accepted for them (`testdata/ubuntuXXXX/keycases`,
+`keycases.sh`), and a test asserts: a key that sshd accepts is listed with
+exactly its fingerprint, and no key is listed that neither sshd accepts nor
+`ssh-keygen` lists. The users own their files and every directory below
 their home, so a path inside the home is resolved by the kernel inside the home:
 a symbolic link that leaves it (sshd would follow it), a file that is not a
 regular file, one owned by somebody else, and one over 256 KiB are refused and
 reported as a `warn`, never read, so their keys are not listed. A line that is
-not a key is reported by line number and never quoted. Certificates in
-`authorized_keys` are not compared and count as lines that are not keys.
+not a key is reported by line number and never quoted.
 Limits: `Match` blocks of `sshd_config` are not evaluated, and a `warn` of this
 check deserves attention, because it can stand for keys that were not checked.
 

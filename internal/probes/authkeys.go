@@ -190,6 +190,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 	warns = append(warns, cmdWarn...)
 
 	var fails []result.Evidence
+	unreadable := 0 // fails that are lines which start with a key type but cannot be read
 	total := 0
 	for _, a := range accounts {
 		if !a.has {
@@ -223,10 +224,18 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 			}
 			keys, bad := parseAuthorizedKeys(string(data))
 			for _, line := range bad {
-				warns = append(warns, result.Evidence{
+				ev := result.Evidence{
 					Subject: fmt.Sprintf("%s:%s:%d", a.name, clean(shown, 80), line.n),
 					Detail:  "line is not a public key: " + line.why,
-				})
+				}
+				if line.keyish {
+					// sshd may accept a key from this line: it is not a harmless line
+					ev.Detail = "line starts with a key type that sshd reads, but it cannot be read here (" + line.why + "), so it may hold an unchecked key"
+					unreadable++
+					fails = append(fails, ev)
+					continue
+				}
+				warns = append(warns, ev)
 			}
 			for _, k := range keys {
 				if _, dup := found[k.fp]; !dup {
@@ -255,7 +264,11 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		return o
 	case len(fails) > 0:
 		shown, hidden := limitEvidence(fails)
-		s := fmt.Sprintf("%d unexpected authorized key(s): %s", len(fails), subjectList(shown, 5))
+		what := fmt.Sprintf("%d unexpected authorized key(s)", len(fails))
+		if unreadable > 0 {
+			what += fmt.Sprintf(" (%d of them lines that start with a key type but cannot be read)", unreadable)
+		}
+		s := what + ": " + subjectList(shown, 5)
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; also %d warning(s): %s", len(warns), subjectList(sortedEvidence(warns), 5))
 		}
@@ -439,6 +452,10 @@ type authKey struct {
 type badLine struct {
 	n   int
 	why string
+	// keyish: the line starts with the name of a key type that sshd reads (as
+	// the first word, or as the first word after the options), so sshd may
+	// well accept a key from it although it could not be read here.
+	keyish bool
 }
 
 // parseAuthorizedKeys reads an authorized keys file. Blank lines and comment
@@ -451,9 +468,9 @@ func parseAuthorizedKeys(content string) (keys []authKey, bad []badLine) {
 		if trimmed == "" || trimmed[0] == '#' {
 			continue
 		}
-		typ, fp, err := keyFingerprint(trimmed)
+		typ, fp, keyish, err := keyFingerprint(trimmed)
 		if err != nil {
-			bad = append(bad, badLine{i + 1, err.Error()})
+			bad = append(bad, badLine{n: i + 1, why: err.Error(), keyish: keyish})
 			continue
 		}
 		keys = append(keys, authKey{typ: typ, fp: fp, line: i + 1})
@@ -461,7 +478,32 @@ func parseAuthorizedKeys(content string) (keys []authKey, bad []badLine) {
 	return keys, bad
 }
 
-var keyTypeRe = regexp.MustCompile(`^(?:ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$`)
+// keyBlobTypes are the key type names that sshd reads at the start of a key
+// in an authorized keys file, with the type name that the key's blob carries.
+// The list is the table of key types in sshkey.c (keytypes[] in OpenSSH 8.9,
+// the implementations in keyimpls[] in 9.6) for plain keys: sshkey_read
+// matches the name with peek_type_nid, which compares the whole word byte for
+// byte against the name of each type. So the match is case sensitive, and the
+// short names that sshkey_type_from_name accepts case-insensitively (ED25519,
+// RSA, ECDSA, ...) are not key types in this file. Three names differ from the
+// blob's: rsa-sha2-256 and rsa-sha2-512 stand for an ssh-rsa key, and
+// webauthn-sk-ecdsa-sha2-nistp256@openssh.com for an sk-ecdsa one. XMSS is not
+// compiled into the Ubuntu 22.04 and 24.04 packages. A certificate type
+// (-cert-v01@openssh.com) is read by sshd as well, but it never matches a key
+// that logs in, so such a line is reported as not being a key.
+var keyBlobTypes = map[string]string{
+	"ssh-ed25519":                        "ssh-ed25519",
+	"sk-ssh-ed25519@openssh.com":         "sk-ssh-ed25519@openssh.com",
+	"ssh-rsa":                            "ssh-rsa",
+	"rsa-sha2-256":                       "ssh-rsa",
+	"rsa-sha2-512":                       "ssh-rsa",
+	"ssh-dss":                            "ssh-dss",
+	"ecdsa-sha2-nistp256":                "ecdsa-sha2-nistp256",
+	"ecdsa-sha2-nistp384":                "ecdsa-sha2-nistp384",
+	"ecdsa-sha2-nistp521":                "ecdsa-sha2-nistp521",
+	"sk-ecdsa-sha2-nistp256@openssh.com": "sk-ecdsa-sha2-nistp256@openssh.com",
+	"webauthn-sk-ecdsa-sha2-nistp256@openssh.com": "sk-ecdsa-sha2-nistp256@openssh.com",
+}
 
 // The reasons a line is not a key. They are fixed texts: a reason never quotes
 // the line.
@@ -474,8 +516,9 @@ var (
 
 // keyFingerprint returns the key type and the "SHA256:..." fingerprint of an
 // authorized_keys line (without leading blanks), reading the line the way
-// OpenSSH does (auth_check_authkey_line in auth2-pubkeyfile.c, and
-// do_fingerprint in ssh-keygen.c, which lists the same key):
+// OpenSSH does (check_authkey_line in auth2-pubkey.c of OpenSSH 8.9, the same
+// function in auth2-pubkeyfile.c of 9.6, and do_fingerprint in ssh-keygen.c,
+// which lists the same key):
 //
 //  1. The line is a C string: it ends at the first NUL byte.
 //  2. A key is read at the start of the line (sshkey_read): a key type, blanks,
@@ -492,46 +535,72 @@ var (
 // refuse because of an unknown or malformed option is still listed (OpenSSH
 // applies the option rules after finding the key); the worst case is a key
 // that is listed although it cannot log in.
-func keyFingerprint(line string) (typ, fp string, err error) {
+//
+// keyish is true for a line that cannot be read although it starts, as its
+// first word or as the first word after the options, with the name of a key
+// type that sshd reads (keyBlobTypes): sshd may accept a key from such a line
+// that this code does not understand, so the caller must not treat it as a
+// harmless line.
+func keyFingerprint(line string) (typ, fp string, keyish bool, err error) {
 	if i := strings.IndexByte(line, 0); i >= 0 {
 		line = line[:i]
 	}
 	typ, fp, err = readKey(line)
 	if err == nil {
-		return typ, fp, nil
+		return typ, fp, false, nil
 	}
 	first, _ := splitToken(line)
+	_, firstIsKey := keyBlobTypes[first]
 	end, ok := advancePastOptions(line)
 	if !ok {
-		return "", "", errQuote
+		// the quote opens inside the first word, which is then no key type
+		return "", "", false, errQuote
 	}
-	typ2, fp2, err2 := readKey(strings.TrimLeft(line[end:], " \t"))
+	after := strings.TrimLeft(line[end:], " \t")
+	typ2, fp2, err2 := readKey(after)
 	if err2 == nil {
-		return typ2, fp2, nil
+		return typ2, fp2, false, nil
 	}
-	if keyTypeRe.MatchString(first) {
-		return "", "", err // the line starts with a key type, so that is the problem
+	nextWord, _ := splitToken(after)
+	_, nextIsKey := keyBlobTypes[nextWord]
+	if firstIsKey {
+		return "", "", true, err // the line starts with a key type, so that is the problem
 	}
-	return "", "", err2
+	return "", "", nextIsKey, err2
 }
 
 // readKey mirrors sshkey_read: a key type, blanks, a base64 blob. s is a
 // C string without NUL.
 func readKey(s string) (typ, fp string, err error) {
 	typ, rest := splitToken(s)
-	if !keyTypeRe.MatchString(typ) {
+	blobType, known := keyBlobTypes[typ]
+	if !known {
 		return "", "", errNoKeyType
 	}
 	b64, _ := splitToken(strings.TrimLeft(rest, " \t"))
 	if b64 == "" {
 		return "", "", errNoKeyData
 	}
-	// Strict: OpenSSH refuses text whose padding bits are not zero.
+	// sshbuf_b64tod -> b64_pton skips every isspace byte anywhere in the text
+	// (the word ends only at a blank or a tab, so \v, \f and \r stay in it),
+	// then decodes strictly: padding is required, bits past the last byte must
+	// be zero.
+	b64 = strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\v', '\f', '\r', ' ':
+			return -1
+		}
+		return r
+	}, b64)
 	blob, derr := base64.StdEncoding.Strict().DecodeString(b64)
-	if derr != nil || len(blob) == 0 || len(blob) > maxKeyBlob || !wellFormedBlob(typ, blob) {
+	if derr != nil || len(blob) == 0 || len(blob) > maxKeyBlob {
 		return "", "", errBadBlob
 	}
-	sum := sha256.Sum256(blob)
+	canon, ok := canonicalBlob(blobType, blob)
+	if !ok {
+		return "", "", errBadBlob
+	}
+	sum := sha256.Sum256(canon)
 	return typ, "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]), nil
 }
 
@@ -563,38 +632,118 @@ func advancePastOptions(s string) (end int, ok bool) {
 	return i, !(i == len(s) && quoted)
 }
 
-// wellFormedBlob reports whether blob is exactly the wire format OpenSSH
-// reads for the key type: the type name first, then the fields of the type,
-// and nothing after them.
-func wellFormedBlob(typ string, blob []byte) bool {
+// innerTypeOK reports whether name, the type string at the start of a blob,
+// is one that OpenSSH takes for the key type typ (the name sshkey_to_blob
+// writes). sshkey_from_blob_internal looks the string up with
+// sshkey_type_from_name, which accepts every name of the type (an ssh-rsa key
+// may call itself rsa-sha2-256) and, for the plain types, the short name in any
+// case ("RSA", "ed25519"). For the ECDSA types the name must be exact: the
+// curve is derived from it by sshkey_ecdsa_nid_from_name.
+func innerTypeOK(typ, name string) bool {
+	switch typ {
+	case "ssh-rsa":
+		if name == "ssh-rsa" || name == "rsa-sha2-256" || name == "rsa-sha2-512" {
+			return true
+		}
+	case "sk-ecdsa-sha2-nistp256@openssh.com":
+		if name == typ || name == "webauthn-sk-ecdsa-sha2-nistp256@openssh.com" {
+			return true
+		}
+	default:
+		if name == typ {
+			return true
+		}
+	}
+	short := map[string]string{"ssh-ed25519": "ED25519", "sk-ssh-ed25519@openssh.com": "ED25519-SK", "ssh-rsa": "RSA", "ssh-dss": "DSA"}[typ]
+	return short != "" && strings.EqualFold(name, short)
+}
+
+// canonicalBlob checks that blob is exactly the wire format OpenSSH reads for
+// the key type (the type name first, then the fields of the type, nothing
+// after them) and returns the blob as OpenSSH writes the key back, which is
+// what its fingerprint is computed over (sshkey_fingerprint serialises the
+// parsed key; it does not hash the text it read). The two differ for the
+// integers of RSA and DSA keys: they are read after dropping any number of
+// leading zero bytes and written with the fewest bytes, plus one zero byte in
+// front when the top bit is set (sshbuf_get_bignum2_bytes_direct,
+// sshbuf_put_bignum2). A blob with a padded integer is a key that sshd
+// accepts and ssh-keygen lists under the fingerprint of the canonical form. An
+// integer with its top bit set and no zero byte before it is negative, and
+// refused, as are integers over 2048 bytes. The other types have no integers
+// (an EC point is a string, and must be an uncompressed point of the curve's
+// size). ok is false for anything else.
+func canonicalBlob(typ string, blob []byte) (canon []byte, ok bool) {
 	var fields [][]byte
-	for len(blob) > 0 {
-		if len(blob) < 4 {
-			return false
+	for rest := blob; len(rest) > 0; {
+		if len(rest) < 4 {
+			return nil, false
 		}
-		n := binary.BigEndian.Uint32(blob)
-		if n > uint32(len(blob)-4) {
-			return false
+		n := binary.BigEndian.Uint32(rest)
+		if n > uint32(len(rest)-4) {
+			return nil, false
 		}
-		fields = append(fields, blob[4:4+n])
-		blob = blob[4+n:]
+		fields = append(fields, rest[4:4+n])
+		rest = rest[4+n:]
 	}
-	if len(fields) == 0 || string(fields[0]) != typ {
-		return false
+	if len(fields) == 0 || !innerTypeOK(typ, string(fields[0])) {
+		return nil, false
 	}
+	fields[0] = []byte(typ) // written back under the type's own name
+	mpints := 0             // fields 1 to mpints are integers
 	switch typ {
 	case "ssh-ed25519":
-		return len(fields) == 2 && len(fields[1]) == 32
+		ok = len(fields) == 2 && len(fields[1]) == 32
 	case "sk-ssh-ed25519@openssh.com":
-		return len(fields) == 3 && len(fields[1]) == 32
+		ok = len(fields) == 3 && len(fields[1]) == 32
 	case "ssh-rsa":
-		return len(fields) == 3
+		ok, mpints = len(fields) == 3, 2
 	case "ssh-dss":
-		return len(fields) == 5
+		ok, mpints = len(fields) == 5, 4
 	case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521":
-		return len(fields) == 3 && "ecdsa-sha2-"+string(fields[1]) == typ
+		ok = len(fields) == 3 && "ecdsa-sha2-"+string(fields[1]) == typ && ecPointOK(string(fields[1]), fields[2])
 	case "sk-ecdsa-sha2-nistp256@openssh.com":
-		return len(fields) == 4 && string(fields[1]) == "nistp256"
+		ok = len(fields) == 4 && string(fields[1]) == "nistp256" && ecPointOK("nistp256", fields[2])
 	}
-	return false
+	if !ok {
+		return nil, false
+	}
+	for i := 1; i <= mpints; i++ {
+		f, good := canonicalMPInt(fields[i])
+		if !good {
+			return nil, false
+		}
+		fields[i] = f
+	}
+	for _, f := range fields {
+		canon = binary.BigEndian.AppendUint32(canon, uint32(len(f)))
+		canon = append(canon, f...)
+	}
+	return canon, true
+}
+
+// canonicalMPInt reads an SSH mpint the way sshbuf_get_bignum2_bytes_direct
+// does and returns its canonical encoding.
+func canonicalMPInt(f []byte) ([]byte, bool) {
+	const maxBignum = 16384 / 8
+	if len(f) != 0 && f[0]&0x80 != 0 {
+		return nil, false // negative
+	}
+	if len(f) > maxBignum+1 || (len(f) == maxBignum+1 && f[0] != 0) {
+		return nil, false
+	}
+	for len(f) > 0 && f[0] == 0 {
+		f = f[1:]
+	}
+	if len(f) > 0 && f[0]&0x80 != 0 {
+		f = append([]byte{0}, f...)
+	}
+	return f, true
+}
+
+// ecPointOK: an uncompressed point (0x04, x, y) with the size of the curve's
+// coordinates. OpenSSH also checks that the point lies on the curve, which is
+// not done here: a point off the curve is listed although sshd refuses it.
+func ecPointOK(curve string, pt []byte) bool {
+	size := map[string]int{"nistp256": 32, "nistp384": 48, "nistp521": 66}[curve]
+	return size != 0 && len(pt) == 1+2*size && pt[0] == 4
 }
