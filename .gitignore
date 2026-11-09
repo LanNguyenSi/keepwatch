@@ -1,0 +1,5 @@
+/.ai/run
+/bin/
+/dist/
+*.test
+*.out
