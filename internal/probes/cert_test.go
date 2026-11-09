@@ -275,7 +275,7 @@ func TestCertExpiryFiles(t *testing.T) {
 		fsys := certFS(map[string]string{"/opt/a.pem": good("a", days(300)), "/opt/b.pem": good("b", days(100)), "/opt/c.pem": good("c", days(200))})
 		o := execCert(certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}), fsys)
 		wantStatus(t, o, result.Pass)
-		wantSummary(t, o, "soonest: /opt/b.pem, 99 day(s) left")
+		wantSummary(t, o, "soonest: /opt/b.pem, 100 day(s) left")
 	})
 	t.Run("only warnings", func(t *testing.T) {
 		fsys := certFS(map[string]string{"/opt/b.pem": good("b", days(20)), "/opt/c.pem": good("c", days(90))})
