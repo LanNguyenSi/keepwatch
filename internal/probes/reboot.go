@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +38,15 @@ const (
 // is unknown. A missing needrestart skips only this part. Any other problem
 // with needrestart, or a file that cannot be read for a reason other than
 // not existing, is error, and an error wins over a fail: an incomplete
-// picture is never reported as a clean failure.
+// picture is never reported as a clean failure. Both sources are always
+// read; the reasons already confirmed stay in the evidence of an error
+// result and the summary names them ("also found") and says the picture is
+// partial.
+//
+// The paths keep the /var/run spelling the update tooling uses. On Ubuntu
+// /var/run is a symbolic link to /run; OSFS follows links in the directories
+// of a path and refuses only a link (or FIFO, device) as the file itself, so
+// a marker that is a link is an error rather than something to follow.
 type rebootRequired struct{}
 
 func (rebootRequired) Name() string       { return "reboot_required" }
@@ -57,7 +64,7 @@ type rebootProbe struct{}
 
 func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 	var ev []result.Evidence
-	var notes []string
+	var notes, failures []string
 
 	_, err := env.FS.ReadFile(rebootFile, maxRebootFile)
 	switch {
@@ -69,12 +76,12 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 			detail += "; packages: " + pkgList(string(pkgs))
 		case errors.Is(perr, fs.ErrNotExist):
 		default:
-			return *errorOutcome("cannot read %s: %s", rebootPkgsFile, clean(perr.Error(), 150))
+			failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootPkgsFile, clean(perr.Error(), 150)))
 		}
 		ev = append(ev, result.Evidence{Subject: "reboot-required", Detail: detail})
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return *errorOutcome("cannot read %s: %s", rebootFile, clean(err.Error(), 150))
+		failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootFile, clean(err.Error(), 150)))
 	}
 
 	res, out := run(ctx, env, []string{"needrestart", "-b", "-k", "-r", "l"}, 30*time.Second)
@@ -82,13 +89,14 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 	case out != nil && out.Status == result.Skipped:
 		notes = append(notes, "needrestart not installed, kernel status not checked")
 	case out != nil:
-		return *out
+		failures = append(failures, out.Summary)
 	case res.ExitCode != 0:
-		return *unexpectedExit("needrestart", res)
+		failures = append(failures, unexpectedExit("needrestart", res).Summary)
 	default:
 		item, note, err := parseNeedrestart(string(res.Stdout))
 		if err != nil {
-			return *errorOutcome("needrestart: %v", err)
+			failures = append(failures, fmt.Sprintf("needrestart: %v", err))
+			break
 		}
 		if item != nil {
 			ev = append(ev, *item)
@@ -98,7 +106,10 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 		}
 	}
 
-	if len(ev) > 0 {
+	switch {
+	case len(failures) > 0:
+		return partialError(failures, ev)
+	case len(ev) > 0:
 		return Outcome{Status: result.Fail, Summary: fmt.Sprintf("a reboot is required (%d reason(s))", len(ev)), Evidence: ev}
 	}
 	summary := "no reboot is required"
@@ -135,12 +146,17 @@ func pkgList(content string) string {
 
 // parseNeedrestart reads needrestart batch output. It returns an evidence
 // item when a kernel upgrade is pending, and a note when the kernel status
-// is unknown.
+// is unknown. A NEEDRESTART-* key that appears twice is an error (which of
+// the two values counts would be a guess), and so is a KSTA value that is
+// not exactly one digit from 0 to 3.
 func parseNeedrestart(out string) (*result.Evidence, string, error) {
 	kv := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
 		k, v, ok := strings.Cut(line, ":")
 		if ok && strings.HasPrefix(k, "NEEDRESTART-") {
+			if _, dup := kv[k]; dup {
+				return nil, "", fmt.Errorf("output has %s more than once", k)
+			}
 			kv[k] = strings.TrimSpace(v)
 		}
 	}
@@ -151,10 +167,11 @@ func parseNeedrestart(out string) (*result.Evidence, string, error) {
 	if !ok {
 		return nil, "kernel status not reported by needrestart", nil
 	}
-	ksta, err := strconv.Atoi(raw)
-	if err != nil || ksta < 0 || ksta > 3 {
+	// Exactly one digit from 0 to 3: no sign, no padding.
+	if len(raw) != 1 || raw[0] < '0' || raw[0] > '3' {
 		return nil, "", fmt.Errorf("unexpected NEEDRESTART-KSTA value %q", clean(raw, 20))
 	}
+	ksta := int(raw[0] - '0')
 	switch ksta {
 	case 0:
 		return nil, "kernel status unknown to needrestart", nil

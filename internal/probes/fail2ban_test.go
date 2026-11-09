@@ -7,7 +7,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
-func jailArgv(jail string) []string { return []string{"fail2ban-client", "status", jail} }
+func jailArgv(jail string) []string { return []string{"fail2ban-client", "--", "status", jail} }
 
 func TestFail2banJailFixtures(t *testing.T) {
 	cases := []struct {
@@ -77,8 +77,8 @@ func TestFail2banJailParams(t *testing.T) {
 	for _, s := range []string{"sshd", "nginx-http-auth", "a", "my_jail.2", "Jail1"} {
 		prepare(t, "fail2ban_jail", map[string]any{"jail": s})
 	}
-	// fail2ban-client has no "--": the leading dash is what keeps the value
-	// from being read as an option.
+	// the command is run after "--"; the rejected leading dash is a second
+	// guard that keeps the value from being read as an option.
 	bad := []string{"-x", "--help", "-v", "-", "", " ", "a b", "a;b", "$(id)", "a/b", "a\nb", ".hidden", "_x", strings.Repeat("a", 65)}
 	for _, s := range bad {
 		t.Run("jail="+s, func(t *testing.T) {
@@ -91,4 +91,15 @@ func TestFail2banJailParams(t *testing.T) {
 	prepareErr(t, "fail2ban_jail", nil)
 	prepareErr(t, "fail2ban_jail", map[string]any{"jail": 1})
 	prepareErr(t, "fail2ban_jail", map[string]any{"jail": "sshd", "x": 1})
+}
+
+// The jail name is passed after "--" and "status", never as the first
+// argument: the argv is pinned.
+func TestFail2banJailArgv(t *testing.T) {
+	r := newRunner().Add(jailArgv("sshd"), "ubuntu2404/fail2ban_status_sshd")
+	exec(prepare(t, "fail2ban_jail", map[string]any{"jail": "sshd"}), r, nil)
+	calls := r.Calls()
+	if len(calls) != 1 || strings.Join(calls[0].Argv, " ") != "fail2ban-client -- status sshd" {
+		t.Fatalf("calls = %+v", calls)
+	}
 }

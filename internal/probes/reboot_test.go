@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
 	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
@@ -149,6 +150,18 @@ func TestRebootRequiredNeedrestart(t *testing.T) {
 		{"ksta negative", needrestartOut("-1"), 0, result.Error, "KSTA"},
 		{"ksta not a number", needrestartOut("current"), 0, result.Error, "KSTA"},
 		{"ksta empty", needrestartOut(""), 0, result.Error, "KSTA"},
+		{"ksta with a plus sign", needrestartOut("+1"), 0, result.Error, "KSTA"},
+		{"ksta with a plus sign, upgrade pending", needrestartOut("+3"), 0, result.Error, "KSTA"},
+		{"ksta with a leading zero", needrestartOut("01"), 0, result.Error, "KSTA"},
+		{"ksta with two digits", needrestartOut("10"), 0, result.Error, "KSTA"},
+		{"ksta with two values", needrestartOut("1 3"), 0, result.Error, "KSTA"},
+		{"ksta in hex", needrestartOut("0x1"), 0, result.Error, "KSTA"},
+		{"version line twice", "NEEDRESTART-VER: 3.6\nNEEDRESTART-VER: 3.6\nNEEDRESTART-KSTA: 1\n", 0, result.Error, "NEEDRESTART-VER more than once"},
+		{"ksta twice, same value", needrestartOut("1") + "NEEDRESTART-KSTA: 1\n", 0, result.Error, "NEEDRESTART-KSTA more than once"},
+		{"ksta twice, current then upgrade", needrestartOut("1") + "NEEDRESTART-KSTA: 3\n", 0, result.Error, "more than once"},
+		{"ksta twice, upgrade then current", needrestartOut("3") + "NEEDRESTART-KSTA: 1\n", 0, result.Error, "more than once"},
+		{"kernel version twice", needrestartOut("3") + "NEEDRESTART-KCUR: 1.0\n", 0, result.Error, "NEEDRESTART-KCUR more than once"},
+		{"other keys may repeat if they are not NEEDRESTART", needrestartOut("1") + "X-OTHER: 1\nX-OTHER: 2\n", 0, result.Pass, "no reboot"},
 		{"no version line", "NEEDRESTART-KSTA: 1\n", 0, result.Error, "NEEDRESTART-VER"},
 		{"empty output", "", 0, result.Error, "NEEDRESTART-VER"},
 		{"garbage", "<html>502</html>\n", 0, result.Error, "NEEDRESTART-VER"},
@@ -202,9 +215,73 @@ func TestRebootRequiredCombinations(t *testing.T) {
 			t.Fatalf("subjects = %v", subjects(o))
 		}
 	})
-	t.Run("needrestart broken beats the marker file", func(t *testing.T) {
+	t.Run("needrestart broken beats the marker file, which stays as evidence", func(t *testing.T) {
 		r := newRunner().AddResult(needrestartArgv, inline("", 2))
-		wantStatus(t, exec(rebootProbe(t), r, marker), result.Error)
+		o := exec(rebootProbe(t), r, marker)
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, "needrestart exited with status 2")
+		wantSummary(t, o, "partial, also found: reboot-required")
+		if len(o.Evidence) != 1 || o.Evidence[0].Subject != "reboot-required" {
+			t.Fatalf("evidence = %+v", o.Evidence)
+		}
+	})
+	t.Run("needrestart broken, no marker: an error without evidence", func(t *testing.T) {
+		r := newRunner().AddResult(needrestartArgv, inline("", 2))
+		o := exec(rebootProbe(t), r, probestest.MemFS{})
+		wantStatus(t, o, result.Error)
+		if len(o.Evidence) != 0 || strings.Contains(o.Summary, "partial") {
+			t.Fatalf("outcome = %+v", o)
+		}
+	})
+	t.Run("every needrestart failure keeps the marker", func(t *testing.T) {
+		failures := map[string]*fake.FakeRunner{
+			"timeout":         newRunner().AddError(needrestartArgv, execx.ErrTimeout),
+			"io timeout":      newRunner().AddError(needrestartArgv, execx.ErrIOTimeout),
+			"not allowlisted": newRunner().AddError(needrestartArgv, execx.ErrNotAllowed),
+			"truncated":       newRunner().AddResult(needrestartArgv, execx.Result{Stdout: []byte(needrestartOut("1")), Truncated: true}),
+			"killed":          newRunner().AddResult(needrestartArgv, execx.Result{ExitCode: -1, Signaled: true}),
+			"exit 255":        newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 255)),
+			"garbage":         newRunner().AddResult(needrestartArgv, inline("<html>502</html>\n", 0)),
+			"duplicate key":   newRunner().AddResult(needrestartArgv, inline(needrestartOut("1")+"NEEDRESTART-KSTA: 3\n", 0)),
+			"bad ksta":        newRunner().AddResult(needrestartArgv, inline(needrestartOut("+1"), 0)),
+		}
+		for name, r := range failures {
+			t.Run(name, func(t *testing.T) {
+				o := exec(rebootProbe(t), r, marker)
+				wantStatus(t, o, result.Error)
+				wantSummary(t, o, "partial, also found: reboot-required")
+				if !eq(subjects(o), []string{"reboot-required"}) {
+					t.Fatalf("subjects = %v", subjects(o))
+				}
+			})
+		}
+	})
+	t.Run("marker unreadable, kernel upgrade pending: the kernel stays as evidence", func(t *testing.T) {
+		r := newRunner().AddResult(needrestartArgv, inline(needrestartOut("3"), 0))
+		o := exec(rebootProbe(t), r, probestest.ErrFS{Err: fs.ErrPermission})
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, rebootFile)
+		wantSummary(t, o, "partial, also found: kernel")
+		if !eq(subjects(o), []string{"kernel"}) {
+			t.Fatalf("subjects = %v", subjects(o))
+		}
+	})
+	t.Run("marker found, package list unreadable: the marker stays as evidence", func(t *testing.T) {
+		r := newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 0))
+		o := exec(rebootProbe(t), r, &pkgsErrFS{MemFS: probestest.MemFS{rebootFile: "x"}})
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, pkgsFile)
+		if !eq(subjects(o), []string{"reboot-required"}) {
+			t.Fatalf("subjects = %v", subjects(o))
+		}
+	})
+	t.Run("both sources fail after the marker was found: marker and kernel are kept", func(t *testing.T) {
+		r := newRunner().AddResult(needrestartArgv, inline(needrestartOut("3"), 0))
+		o := exec(rebootProbe(t), r, &pkgsErrFS{MemFS: probestest.MemFS{rebootFile: "x"}})
+		wantStatus(t, o, result.Error)
+		if !eq(subjects(o), []string{"reboot-required", "kernel"}) {
+			t.Fatalf("subjects = %v", subjects(o))
+		}
 	})
 	t.Run("needrestart timeout", func(t *testing.T) {
 		r := newRunner().AddError(needrestartArgv, execx.ErrTimeout)

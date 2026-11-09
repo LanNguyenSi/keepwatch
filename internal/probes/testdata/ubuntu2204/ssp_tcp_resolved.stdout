@@ -1,0 +1,3 @@
+LISTEN 0      4096   127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=4279,fd=14))
+LISTEN 0      128          0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=4288,fd=3))            
+LISTEN 0      128             [::]:22    [::]:* users:(("sshd",pid=4288,fd=4))            

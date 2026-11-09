@@ -1,0 +1,7 @@
+LISTEN 0      5        0.0.0.0:8080 0.0.0.0:* users:(("perl",pid=4741,fd=3))
+LISTEN 0      5      127.0.0.1:5432 0.0.0.0:* users:(("perl",pid=4741,fd=4))
+LISTEN 0      128      0.0.0.0:22   0.0.0.0:* users:(("sshd",pid=4349,fd=3))
+LISTEN 0      5          [::1]:6379    [::]:* users:(("perl",pid=4741,fd=6))
+LISTEN 0      5              *:3000       *:* users:(("perl",pid=4741,fd=7))
+LISTEN 0      128         [::]:22      [::]:* users:(("sshd",pid=4349,fd=4))
+LISTEN 0      5           [::]:8443    [::]:* users:(("perl",pid=4741,fd=5))

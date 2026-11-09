@@ -55,13 +55,16 @@ func mini(t *testing.T) *catalog.Catalog {
 var (
 	svcArgv  = []string{"systemctl", "is-active", "--", "ssh.service"}
 	sshdArgv = []string{"sshd", "-T"}
-	ssTCP    = []string{"ss", "-Hltnp"}
-	ssUDP    = []string{"ss", "-Hlunp"}
+	ssTCP    = []string{"ss", "-Hltn"}
+	ssUDP    = []string{"ss", "-Hlun"}
+	ssTCPp   = []string{"ss", "-Hltnp"}
+	ssUDPp   = []string{"ss", "-Hlunp"}
 )
 
 const (
-	ssTwoListeners = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:* users:((\"web\",pid=1,fd=3))\nLISTEN 0 5 [::]:8080 [::]:* users:((\"web\",pid=1,fd=4))\n"
-	ssOneListener  = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:* users:((\"web\",pid=1,fd=3))\n"
+	ssTwoListeners  = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:*\nLISTEN 0 5 [::]:8080 [::]:*\n"
+	ssOneListener   = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:*\n"
+	ssTwoListenersP = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:* users:((\"web\",pid=1,fd=3))\nLISTEN 0 5 [::]:8080 [::]:* users:((\"web\",pid=1,fd=4))\n"
 )
 
 func res(stdout string, exit int) execx.Result {
@@ -75,7 +78,9 @@ func host() *fake.FakeRunner {
 		AddResult(svcArgv, res("inactive\n", 3)).
 		AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)).
 		AddResult(ssTCP, res(ssTwoListeners, 0)).
-		AddResult(ssUDP, res("", 0))
+		AddResult(ssUDP, res("", 0)).
+		AddResult(ssTCPp, res(ssTwoListenersP, 0)).
+		AddResult(ssUDPp, res("", 0))
 }
 
 var day = time.Date(2026, 11, 9, 12, 0, 0, 0, time.Local)
@@ -414,9 +419,9 @@ func TestBaseCatalogAgainstCapturedHost(t *testing.T) {
 				AddResult([]string{"dpkg-query", "-W", "-f=${Status}\t${Version}\n", "--", "needrestart"},
 					execx.Result{ExitCode: 1, Stderr: []byte("dpkg-query: no packages found matching needrestart\n")}).
 				Add(sshdArgv, v+"/sshd_T_dropin_open").
-				Add([]string{"fail2ban-client", "status", "sshd"}, v+"/fail2ban_status_sshd").
+				Add([]string{"fail2ban-client", "--", "status", "sshd"}, v+"/fail2ban_status_sshd").
 				Add(ssTCP, v+"/ss_tcp_sshd_only").
-				Add(ssUDP, v+"/ss_udp_none").
+				Add(ssUDP, v+"/ss_udp_sshd_only").
 				Add([]string{"needrestart", "-b", "-k", "-r", "l"}, v+"/needrestart_kernel")
 			cfg := &config.Config{Listeners: config.Listeners{Allow: []config.Listener{{Port: 22, Proto: "tcp", Bind: "*"}}}}
 			rs, err := engine.Run(context.Background(), base, cfg, deps(r, day))
@@ -465,25 +470,61 @@ func TestBaseCatalogAgainstCapturedHost(t *testing.T) {
 	}
 }
 
-// The allowlist engine.Programs derives is enough for every command the
-// probes issue: no check may end in a "not on the allowlist" error. The
-// commands are read-only; their results depend on the host and are not
-// examined.
-func TestRealRunnerAllowlistCoversAllProbes(t *testing.T) {
+// Every command a probe issues starts with a program that its kind declares,
+// and engine.Programs (the allowlist production hands to execx.NewReal) holds
+// all of them as bare base names, which is how execx matches. The test
+// records the commands through the fake runner and runs nothing on the host.
+func TestProbeCommandsAreCoveredByTheAllowlist(t *testing.T) {
 	base, err := catalog.Base()
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := execx.NewReal(engine.Programs(base))
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	rs, err := engine.Run(ctx, base, &config.Config{}, engine.Deps{Runner: runner, FS: probes.OSFS{}, Now: time.Now})
-	if err != nil {
-		t.Fatal(err)
+	allowlist := map[string]bool{}
+	for _, p := range engine.Programs(base) {
+		if strings.ContainsRune(p, '/') {
+			t.Errorf("allowlist entry %q is not a bare base name", p)
+		}
+		allowlist[p] = true
 	}
-	for _, r := range rs {
-		if strings.Contains(r.Summary, "allowlist") {
-			t.Errorf("%s: %s", r.CheckID, r.Summary)
+	fx := os.DirFS("../probes/testdata")
+	used := map[string]bool{}
+	for _, e := range base.Entries() {
+		kind, ok := probes.Lookup(e.Kind)
+		if !ok {
+			t.Fatalf("%s: unknown kind %q", e.ID, e.Kind)
+		}
+		declared := map[string]bool{}
+		for _, p := range kind.Programs() {
+			declared[p] = true
+		}
+		probe, err := kind.Prepare(e.Params)
+		if err != nil {
+			t.Fatalf("%s: %v", e.ID, err)
+		}
+		// ss answers from captured output with an unallowed listener and
+		// the process names, so the listeners probe runs all its commands;
+		// every other command finds no program.
+		r := fake.New(fx).
+			Add(ssTCP, "ubuntu2404/ss_tcp_mixed").Add(ssUDP, "ubuntu2404/ss_udp_mixed").
+			Add(ssTCPp, "ubuntu2404/ssp_tcp_mixed").Add(ssUDPp, "ubuntu2404/ssp_udp_mixed")
+		probe.Run(context.Background(), &probes.Env{Runner: r, FS: probestest.MemFS{}})
+		if len(r.Calls()) == 0 {
+			t.Errorf("%s: the probe ran no command", e.ID)
+		}
+		for _, c := range r.Calls() {
+			prog := c.Argv[0]
+			used[prog] = true
+			if !declared[prog] {
+				t.Errorf("%s runs %q, which kind %s does not declare", e.ID, prog, e.Kind)
+			}
+			if !allowlist[prog] {
+				t.Errorf("%s runs %q, which is not on the allowlist engine.Programs returns", e.ID, prog)
+			}
+		}
+	}
+	for prog := range allowlist {
+		if !used[prog] {
+			t.Errorf("%q is on the allowlist but no probe ever runs it", prog)
 		}
 	}
 }

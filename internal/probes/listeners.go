@@ -29,23 +29,44 @@ import (
 // itself is not a parameter: it is the top-level listeners.allow section,
 // where conf.d lists append.
 //
-// It runs "ss -Hltnp" (tcp) and "ss -Hlunp" (udp). Only exit status 0 is
-// interpreted. Every output line must be "STATE RECV SEND LOCAL PEER
-// [PROCESS]" with state LISTEN (tcp) or UNCONN (udp) and a local address of
-// the form host:port, where host is "*", an IPv4 address, an IPv6 address in
-// brackets, optionally with a "%interface" suffix. Anything else is error.
-// ss prints nothing when nothing listens; if both protocols print nothing
-// the result is error, because on a reachable host that is far more likely a
-// broken ss than a host without a single listener.
+// The socket set comes from "ss -Hltn" (tcp) and "ss -Hlun" (udp) alone,
+// without -p. Only exit status 0 is interpreted. Every output line must be
+// exactly "STATE RECV SEND LOCAL PEER" with state LISTEN (tcp) or UNCONN
+// (udp) and a local address of the form host:port, where host is "*", an
+// IPv4 address or an IPv6 address in brackets, optionally followed by a
+// "%interface" suffix OUTSIDE the brackets, which is how ss prints a socket
+// bound to a device: "0.0.0.0%lo:80", "[::]%lo:80", "[fe80::1]%eth0:546",
+// "*%lo:80". A suffix inside the brackets is not a form ss prints and is
+// error. Anything else is error. ss prints nothing when nothing listens; if
+// both protocols print nothing the result is error, because on a reachable
+// host that is far more likely a broken ss than a host without a single
+// listener.
+//
+// Process names are text any local process can choose (the name may even
+// hold a newline) and must never decide what the check sees. They are read
+// from a separate, best-effort run of "ss -Hltnp" / "ss -Hlunp" that is made
+// only when some listener is not allowed, is used only for the detail text,
+// and is matched to the sockets of the first run by local address. A line of
+// that output that does not parse is skipped; a failed, timed out, truncated
+// or unparseable run only makes the detail say the processes are unknown.
+// It cannot add, remove or change a socket, and it never changes the status.
+//
+// If one protocol cannot be read, the result is error, but the listeners
+// that the other protocol confirmed as not allowed stay in the evidence and
+// the summary says that the picture is partial.
 //
 // A listener is allowed when an allowlist entry has the same port and
 // protocol and a bind that is "*" (any address) or the same address. The
-// address "*" that ss prints for a dual-stack socket only matches an entry
-// with bind "*". Each listener that is not allowed is one evidence item with
-// subject "<proto>/<address>:<port>" (IPv6 in brackets, interface suffix kept)
-// and the owning process names in the detail. Process names are text
-// chosen by whoever runs the process: they are shown quoted and sanitised
-// and never interpreted.
+// allowlist cannot name an interface, so a listener with an interface suffix
+// is matched without it: an entry for "::" allows "[::]%lo", and only an
+// entry with bind "*" allows "*" and "*%lo" (the dual-stack socket that ss
+// prints with no address). A socket bound to a device is not thereby a
+// loopback listener: only a loopback ADDRESS is allowed by allow_loopback.
+// Each listener that is not allowed is one evidence item with subject
+// "<proto>/<address>:<port>" (IPv6 in brackets, the interface suffix kept
+// after the address, for example "udp/[fe80::1]%eth0:546") and the owning
+// process names in the detail, shown quoted and sanitised, never
+// interpreted.
 type listeners struct{}
 
 func (listeners) Name() string       { return "listeners" }
@@ -76,77 +97,96 @@ type socket struct {
 	proto string
 	any   bool // the "*" address
 	addr  netip.Addr
-	zone  string
+	zone  string // "%interface" as ss prints it after the address, or ""
 	port  int
-	procs []string
 }
 
 func (s socket) subject() string {
 	return fmt.Sprintf("%s/%s:%d", s.proto, s.host(), s.port)
 }
 
+// host renders the address the way ss does: "*", an IPv4 address, or an IPv6
+// address in brackets, each followed by the interface suffix if there is one.
 func (s socket) host() string {
 	if s.any {
-		return "*"
+		return "*" + s.zone
 	}
-	h := s.addr.String() + s.zone
+	h := s.addr.String()
 	if s.addr.Is6() {
-		return "[" + h + "]"
+		h = "[" + h + "]"
 	}
-	return h
+	return h + s.zone
 }
 
 func (s socket) loopback() bool {
 	return !s.any && s.addr.IsLoopback()
 }
 
+// protoSpec is how one protocol is listed.
+type protoSpec struct {
+	state       string // LISTEN or UNCONN
+	flag, pflag string // ss options without and with -p
+}
+
+func specFor(proto string) protoSpec {
+	if proto == "udp" {
+		return protoSpec{"UNCONN", "-Hlun", "-Hlunp"}
+	}
+	return protoSpec{"LISTEN", "-Hltn", "-Hltnp"}
+}
+
 func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	var socks []socket
-	for _, proto := range l.protos {
-		flag, state := "-Hltnp", "LISTEN"
-		if proto == "udp" {
-			flag, state = "-Hlunp", "UNCONN"
-		}
-		res, out := run(ctx, env, []string{"ss", flag}, 0)
+	var failures []string
+	for i, proto := range l.protos {
+		sp := specFor(proto)
+		res, out := run(ctx, env, []string{"ss", sp.flag}, 0)
 		if out != nil {
-			return *out
+			if out.Status == result.Skipped && i == 0 {
+				return *out
+			}
+			failures = append(failures, proto+": "+out.Summary)
+			continue
 		}
 		if res.ExitCode != 0 {
-			return *unexpectedExit("ss", res)
+			failures = append(failures, proto+": "+unexpectedExit("ss", res).Summary)
+			continue
 		}
-		got, err := parseSS(string(res.Stdout), proto, state)
+		got, err := parseSS(string(res.Stdout), proto, sp.state)
 		if err != nil {
-			return *errorOutcome("ss %s: %v", flag, err)
+			failures = append(failures, fmt.Sprintf("ss %s: %v", sp.flag, err))
+			continue
 		}
 		socks = append(socks, got...)
 	}
-	if len(socks) == 0 {
+	if len(failures) == 0 && len(socks) == 0 {
 		return *errorOutcome("ss reported no listening sockets at all, which cannot be told apart from a broken ss")
 	}
 
-	bySubject := map[string]*result.Evidence{}
-	var order []string
+	var bad []socket // the sockets that are not allowed, one per subject
+	seen := map[string]bool{}
 	for _, s := range socks {
-		if (l.allowLoopback && s.loopback()) || allowed(env.ListenerAllow, s) {
+		if (l.allowLoopback && s.loopback()) || allowed(env.ListenerAllow, s) || seen[s.subject()] {
 			continue
 		}
-		subj := s.subject()
-		detail := "listening, processes: " + procList(s.procs)
-		if e, ok := bySubject[subj]; ok {
-			// Several sockets on the same address (SO_REUSEPORT): one item.
-			e.Detail = detail + " (and others)"
-			continue
-		}
-		bySubject[subj] = &result.Evidence{Subject: subj, Detail: detail}
-		order = append(order, subj)
+		seen[s.subject()] = true
+		bad = append(bad, s)
 	}
-	if len(order) == 0 {
+	sort.Slice(bad, func(i, j int) bool { return bad[i].subject() < bad[j].subject() })
+
+	var ev []result.Evidence
+	if len(bad) > 0 {
+		procs, note := l.processes(ctx, env)
+		for _, s := range bad {
+			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()], note)})
+		}
+	}
+
+	switch {
+	case len(failures) > 0:
+		return partialError(failures, ev)
+	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
-	}
-	sort.Strings(order)
-	ev := make([]result.Evidence, len(order))
-	for i, subj := range order {
-		ev[i] = *bySubject[subj]
 	}
 	return Outcome{
 		Status:   result.Fail,
@@ -155,9 +195,48 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	}
 }
 
+// processes asks ss for the process names of the listening sockets. It is
+// best effort and feeds the detail text only: it returns the names by socket
+// subject and a note that is empty when the answer is complete. Whatever
+// goes wrong here, the caller has the sockets already.
+func (l listenersProbe) processes(ctx context.Context, env *Env) (map[string][]string, string) {
+	names := map[string][]string{}
+	var problems []string
+	for _, proto := range l.protos {
+		sp := specFor(proto)
+		res, out := run(ctx, env, []string{"ss", sp.pflag}, 0)
+		switch {
+		case out != nil:
+			problems = append(problems, proto+": "+out.Summary)
+			continue
+		case res.ExitCode != 0:
+			problems = append(problems, proto+": "+unexpectedExit("ss", res).Summary)
+			continue
+		}
+		complete := parseProcesses(string(res.Stdout), proto, sp.state, names)
+		if !complete {
+			problems = append(problems, proto+": ss -p output not understood in full")
+		}
+	}
+	if len(problems) == 0 {
+		return names, ""
+	}
+	return names, "process names may be missing, " + clean(strings.Join(problems, "; "), 200)
+}
+
+// processDetail renders the detail of one listener.
+func processDetail(names []string, note string) string {
+	d := "listening, processes: " + procList(names)
+	if note != "" {
+		d += " (" + note + ")"
+	}
+	return d
+}
+
 // allowed reports whether an allowlist entry covers the socket. The "*" that
 // ss prints for a dual-stack socket has no address (the zero netip.Addr, which
-// no entry parses to), so only an entry with bind "*" covers it.
+// no entry parses to), so only an entry with bind "*" covers it. The interface
+// suffix is not part of the address: the allowlist cannot express it.
 func allowed(rules []ListenerRule, s socket) bool {
 	for _, r := range rules {
 		if r.Port != s.port || r.Proto != s.proto {
@@ -182,7 +261,8 @@ var zonePattern = regexp.MustCompile(`^%[A-Za-z0-9._@-]{1,32}$`)
 
 var procEntry = regexp.MustCompile(`\("(.*?)",pid=[0-9]+,fd=[0-9]+\)`)
 
-// parseSS parses "ss -H" output for one protocol.
+// parseSS parses the output of "ss -H" without -p for one protocol. The
+// format is strict: exactly five columns per line.
 func parseSS(out, proto, wantState string) ([]socket, error) {
 	var socks []socket
 	for i, line := range strings.Split(out, "\n") {
@@ -190,7 +270,7 @@ func parseSS(out, proto, wantState string) ([]socket, error) {
 			continue
 		}
 		f := strings.Fields(line)
-		if len(f) < 5 || f[0] != wantState {
+		if len(f) != 5 || f[0] != wantState {
 			return nil, fmt.Errorf("line %d does not look like a %s listener: %q", i+1, proto, clean(line, 60))
 		}
 		s, err := parseLocal(f[3])
@@ -198,18 +278,55 @@ func parseSS(out, proto, wantState string) ([]socket, error) {
 			return nil, fmt.Errorf("line %d: %v", i+1, err)
 		}
 		s.proto = proto
-		if len(f) > 5 {
-			for _, m := range procEntry.FindAllStringSubmatch(strings.Join(f[5:], " "), -1) {
-				s.procs = append(s.procs, m[1])
-			}
-		}
 		socks = append(socks, s)
 	}
 	return socks, nil
 }
 
+// parseProcesses reads "ss -Hltnp" / "ss -Hlunp" output and adds the process
+// names of each socket to names, keyed by the socket's subject. It is lenient
+// on purpose and cannot produce a socket: a line counts only when it is a
+// whole record (state, three more columns and a local address that parses,
+// then either nothing or a users:(...) column that ends the line); every
+// other line is skipped. A process name that holds a newline splits its
+// record into lines like that, so the record and the lines it leaves behind
+// are skipped. It reports whether every non-blank line was understood.
+func parseProcesses(out, proto, wantState string, names map[string][]string) bool {
+	complete := true
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 5 || f[0] != wantState {
+			complete = false
+			continue
+		}
+		s, err := parseLocal(f[3])
+		if err != nil {
+			complete = false
+			continue
+		}
+		s.proto = proto
+		if len(f) == 5 {
+			continue
+		}
+		if !strings.HasPrefix(f[5], "users:((") || !strings.HasSuffix(line, "))") {
+			complete = false
+			continue
+		}
+		for _, m := range procEntry.FindAllStringSubmatch(strings.Join(f[5:], " "), -1) {
+			names[s.subject()] = append(names[s.subject()], m[1])
+		}
+	}
+	return complete
+}
+
 // parseLocal parses the local address column: "*:80", "0.0.0.0:22",
-// "[::]:22", "127.0.0.53%lo:53", "[fe80::1%eth0]:22".
+// "[::]:22", "127.0.0.53%lo:53", "[::]%lo:22", "*%lo:22". An interface
+// suffix comes after the address (and after the closing bracket), never
+// inside the brackets.
 func parseLocal(col string) (socket, error) {
 	i := strings.LastIndexByte(col, ':')
 	if i < 0 {
@@ -221,6 +338,12 @@ func parseLocal(col string) (socket, error) {
 		return socket{}, fmt.Errorf("local address %q has an invalid port", clean(col, 60))
 	}
 	s := socket{port: port}
+	if j := strings.IndexByte(host, '%'); j >= 0 {
+		host, s.zone = host[:j], host[j:]
+		if !zonePattern.MatchString(s.zone) {
+			return socket{}, fmt.Errorf("local address %q has an invalid interface suffix", clean(col, 60))
+		}
+	}
 	if host == "*" {
 		s.any = true
 		return s, nil
@@ -231,12 +354,6 @@ func parseLocal(col string) (socket, error) {
 			return socket{}, fmt.Errorf("local address %q has unbalanced brackets", clean(col, 60))
 		}
 		host = host[1 : len(host)-1]
-	}
-	if j := strings.IndexByte(host, '%'); j >= 0 {
-		host, s.zone = host[:j], host[j:]
-		if !zonePattern.MatchString(s.zone) {
-			return socket{}, fmt.Errorf("local address %q has an invalid interface suffix", clean(col, 60))
-		}
 	}
 	a, err := netip.ParseAddr(host)
 	// ss brackets IPv6 addresses and only those.

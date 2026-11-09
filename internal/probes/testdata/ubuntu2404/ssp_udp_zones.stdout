@@ -1,0 +1,3 @@
+UNCONN 0      0          0.0.0.0%lo:7009 0.0.0.0:* users:(("perl",pid=4018,fd=11))
+UNCONN 0      0             [::]%lo:7004    [::]:* users:(("perl",pid=4018,fd=6)) 
+UNCONN 0      0      [fe80::1]%dum0:7007    [::]:* users:(("perl",pid=4018,fd=9)) 

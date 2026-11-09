@@ -61,10 +61,13 @@ func wantStatus(t *testing.T, o probes.Outcome, want result.Status) {
 	if o.Status != want {
 		t.Fatalf("status = %s (%s), want %s; evidence %+v", o.Status, o.Summary, want, o.Evidence)
 	}
-	if o.Status == result.Error || o.Status == result.Skipped {
-		if len(o.Evidence) != 0 {
-			t.Fatalf("%s outcome carries evidence: %+v", o.Status, o.Evidence)
-		}
+	if o.Status == result.Skipped && len(o.Evidence) != 0 {
+		t.Fatalf("skipped outcome carries evidence: %+v", o.Evidence)
+	}
+	// An error keeps confirmed failing items only when it says the picture
+	// is partial.
+	if o.Status == result.Error && len(o.Evidence) != 0 && !strings.Contains(o.Summary, "partial") {
+		t.Fatalf("error outcome carries evidence without saying it is partial: %q %+v", o.Summary, o.Evidence)
 	}
 	if o.Summary == "" {
 		t.Fatalf("empty summary")
@@ -103,8 +106,10 @@ func inline(stdout string, exit int) execx.Result {
 }
 
 // commonFailures runs the failure modes that every kind handles the same way
-// against argv and checks the resulting status.
-func commonFailures(t *testing.T, p probes.Probe, argv []string, program string, files probes.FS) {
+// against argv and checks the resulting status. setup registers whatever
+// else the probe runs besides argv (the other half of a kind with two
+// commands).
+func commonFailures(t *testing.T, p probes.Probe, argv []string, program string, files probes.FS, setup ...func(*fake.FakeRunner)) {
 	t.Helper()
 	cases := []struct {
 		name string
@@ -130,6 +135,9 @@ func commonFailures(t *testing.T, p probes.Probe, argv []string, program string,
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := fake.New(os.DirFS("testdata"))
+			for _, s := range setup {
+				s(f)
+			}
 			c.add(f)
 			o := exec(p, f, files)
 			wantStatus(t, o, c.want)

@@ -18,9 +18,10 @@ var jailPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 //
 //	jail  (string, required)  jail name, for example "sshd"
 //
-// It runs "fail2ban-client status <jail>". fail2ban-client has no "--"
-// separator, so the name pattern (and the rejected leading "-") is what
-// keeps the value from becoming an option. The documented exit statuses it
+// It runs "fail2ban-client -- status <jail>". The "--" ends option parsing
+// (fail2ban-client 0.11 and 1.0 both accept it before the command), and the
+// name pattern with its rejected leading "-" is a second guard that keeps
+// the value from becoming an option. The documented exit statuses it
 // interprets:
 //
 //	0    the first stdout line is "Status for the jail: <jail>": pass.
@@ -50,7 +51,7 @@ func (fail2banJail) Prepare(params map[string]any) (Probe, error) {
 type jailProbe struct{ jail string }
 
 func (j jailProbe) Run(ctx context.Context, env *Env) Outcome {
-	res, out := run(ctx, env, []string{"fail2ban-client", "status", j.jail}, 0)
+	res, out := run(ctx, env, []string{"fail2ban-client", "--", "status", j.jail}, 0)
 	if out != nil {
 		return *out
 	}
@@ -60,7 +61,7 @@ func (j jailProbe) Run(ctx context.Context, env *Env) Outcome {
 		if first == "Status for the jail: "+j.jail {
 			return Outcome{Status: result.Pass, Summary: fmt.Sprintf("fail2ban jail %s is running", j.jail)}
 		}
-		return *errorOutcome("fail2ban-client status %s: unexpected output %q", j.jail, clean(first, 80))
+		return *errorOutcome("fail2ban-client -- status %s: unexpected output %q", j.jail, clean(first, 80))
 	case 255:
 		if first == "Sorry but the jail '"+j.jail+"' does not exist" {
 			return Outcome{

@@ -268,3 +268,31 @@ func TestExceptionForTheExpiredCheckItself(t *testing.T) {
 		}
 	}
 }
+
+// An error that keeps the failing items it confirmed is still an error:
+// neither a whole-check exception nor one that matches a kept item changes
+// it, and the kept items are not marked as excepted.
+func TestExceptionsDoNotTouchAPartialError(t *testing.T) {
+	r := host().AddResult(ssUDP, res("", 1)) // udp cannot be read, the tcp listeners are confirmed
+	for name, cfg := range map[string]*config.Config{
+		"whole check": withExceptions(exc("t.listeners", "", "known", day)),
+		"one item":    withExceptions(exc("t.listeners", "tcp/0.0.0.0:8080", "known", day)),
+		"every item": withExceptions(exc("t.listeners", "tcp/0.0.0.0:8080", "a", day),
+			exc("t.listeners", "tcp/[::]:8080", "b", day)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := byID(t, run(t, cfg, r, day), "t.listeners")
+			if got.Status != result.Error || len(got.ExceptionReasons) != 0 || strings.Contains(got.Summary, "(excepted") {
+				t.Fatalf("result %+v", got)
+			}
+			if len(got.Evidence) != 2 || !strings.Contains(got.Summary, "partial") {
+				t.Fatalf("the confirmed items were lost: %+v", got)
+			}
+			for _, e := range got.Evidence {
+				if e.Excepted || e.ExceptionReason != "" {
+					t.Fatalf("item marked excepted: %+v", e)
+				}
+			}
+		})
+	}
+}

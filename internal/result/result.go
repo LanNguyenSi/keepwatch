@@ -68,7 +68,10 @@ type Evidence struct {
 // Result is the outcome of one check.
 //
 // For a failing check every evidence item is a failing item; findings that
-// are only informational belong in Summary.
+// are only informational belong in Summary. An error result normally has no
+// evidence. A check that reads several sources and could not read all of
+// them keeps, as evidence, the failing items the other sources confirmed,
+// and its Summary says the picture is partial; the status stays error.
 type Result struct {
 	CheckID  string     `json:"check_id"`
 	Kind     string     `json:"kind"`

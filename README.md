@@ -102,12 +102,23 @@ makes it `error`, never `pass`.
 | `service_active` | `systemctl is-active -- <service>` | `service` (unit name) |
 | `package_installed` | `dpkg-query -W` for one package | `package` (Debian package name) |
 | `sshd_effective` | `sshd -T`, the effective configuration with drop-ins merged in | `option`, `allow` (list), `aliases` (list, optional) |
-| `fail2ban_jail` | `fail2ban-client status <jail>` | `jail` |
-| `listeners` | `ss -Hltnp` and `ss -Hlunp`, compared with `listeners.allow` | `allow_loopback` (default true), `protos` (list, default tcp and udp) |
+| `fail2ban_jail` | `fail2ban-client -- status <jail>` | `jail` |
+| `listeners` | `ss -Hltn` and `ss -Hlun`, compared with `listeners.allow`; `ss -Hltnp` and `ss -Hlunp` only to name the processes | `allow_loopback` (default true), `protos` (list, default tcp and udp) |
 | `reboot_required` | `/var/run/reboot-required` and `.pkgs`, and `needrestart -b -k -r l` when installed | none |
 
 Names that reach a command line (unit, package and jail names) are checked
 against a strict pattern, and a leading `-` is always rejected.
+
+`listeners` takes the socket set from `ss` without `-p` alone; the process
+names in the evidence come from a separate best-effort `ss -p` run that only
+fills the detail text (a failing run leaves the processes "unknown" and never
+changes the status). A listener bound to an interface is reported with the
+interface after the address, for example `udp/[fe80::1]%eth0:546` or
+`tcp/*%lo:7002`. `listeners.allow` cannot name an interface, so such a
+listener is allowed by an entry for its address without the interface, or by
+`bind: "*"`; `allow_loopback` only covers loopback addresses, not a wildcard
+bound to `lo`. Files are read without following a symbolic link in the last
+path component and only if they are regular files.
 
 Under `checks.<id>` in the configuration, `enabled: false` skips a check,
 `severity` replaces the catalog severity, and `params` are merged over the
@@ -127,6 +138,9 @@ covers the evidence items whose subject equals `match` exactly (for example
 `tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). A check
 whose failing items are all covered becomes `excepted`; otherwise it stays
 `fail` and the covered items are marked. Exceptions never change an `error`.
+An `error` of a check that reads two sources (`reboot_required`, and
+`listeners` with tcp and udp) keeps the failing items that the readable source
+confirmed and says in its summary that the picture is partial.
 Each expired exception is reported as its own `exception_expired` result
 (severity low).
 
