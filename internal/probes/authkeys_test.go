@@ -748,7 +748,7 @@ func TestAuthorizedKeysPrepareTakesNoParameters(t *testing.T) {
 	prepareErr(t, "authorized_keys", map[string]any{"x": 1})
 }
 
-// ---- key types, integers and whitespace as sshd reads them (F2, F3)
+// ---- key types, integers and whitespace as sshd reads them
 
 // blobOf returns the decoded blob of a public key line.
 func blobOf(t *testing.T, line string) []byte {

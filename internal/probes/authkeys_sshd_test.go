@@ -162,3 +162,40 @@ func TestAuthorizedKeysFormsThatSSHDAcceptsAreInTheCorpus(t *testing.T) {
 		}
 	}
 }
+
+// A key blob over 16 KiB is read by ssh-keygen and by sshd but not fingerprinted
+// here: the line counts as unreadable, the run fails, and no fingerprint is
+// listed.
+func TestAuthorizedKeysBlobOver16KiBFailsWithoutFingerprint(t *testing.T) {
+	const dummy = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, v := range versions {
+		cases, _ := loadKeyCases(t, v)
+		found := false
+		for _, c := range cases {
+			if !strings.HasPrefix(c.about, "sk-ssh-ed25519 line with a blob over 16 KiB") {
+				continue
+			}
+			found = true
+			fsys := keyHost(t, v, map[string]string{aliceAK: c.line})
+			o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": {dummy}})
+			if o.Status != result.Fail {
+				t.Errorf("%s: status %s, want fail", v, o.Status)
+			}
+			unreadable := 0
+			for _, e := range o.Evidence {
+				if strings.HasPrefix(e.Subject, "alice:SHA256:") {
+					t.Errorf("%s: fingerprint listed: %s", v, e.Subject)
+				}
+				if strings.Contains(e.Detail, "may hold an unchecked key") {
+					unreadable++
+				}
+			}
+			if unreadable != 1 {
+				t.Errorf("%s: %d unreadable key lines, want 1", v, unreadable)
+			}
+		}
+		if !found {
+			t.Errorf("%s: no 16 KiB case", v)
+		}
+	}
+}

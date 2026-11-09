@@ -10,7 +10,7 @@
 #   R    an rsa key, C an ecdsa key
 # Files: NN.keys is the input (exactly one line), NN.fp the "ssh-keygen -lf"
 # stdout, NN.exit its exit status, NN.about a one-line description, NN.login
-# which of the keys good, evil, rsa, ecdsa and goodcert (the good key as a
+# which of the keys good, evil, rsa, ecdsa, dsa and goodcert (the good key as a
 # certificate) a real sshd accepted for a login with that line as the only
 # line of the user's authorized_keys file ("none" when it accepted none).
 # KEYS holds the fingerprint of each key ("name SHA256:..."). The accounts for
@@ -68,9 +68,15 @@ w('ec_inner_short.b64', s(b'ECDSA') + s(ec[1]) + s(ec[2]))
 # an uncompressed point turned into a compressed one (0x02/0x03 and x only)
 pt = ec[2]; assert pt[0] == 4
 w('ec_comp.b64', s(ec[0]) + s(ec[1]) + s(bytes([2 + (pt[-1] & 1)]) + pt[1:33]))
+# a dsa key whose blob names its type "dsa", the short name
+dsa = fields(rd('k/dsa.pub'))
+w('dsa_inner_short.b64', s(b'dsa') + b''.join(s(x) for x in dsa[1:]))
+# a security key whose application string makes the blob larger than 16 KiB
+w('sk_big.b64', s(b'sk-ssh-ed25519@openssh.com') + s(pk) + s(b'ssh:' + b'x' * 20000))
 PY
 SK=$(cat k/sk.b64); WEB=$(cat k/webauthn.b64); TRAIL=$(cat k/trail.b64)
 RIS=$(cat k/rsa_inner_short.b64); RI2=$(cat k/rsa_inner_sha2.b64); EIS=$(cat k/ed_inner_short.b64); CIS=$(cat k/ec_inner_short.b64)
+DIS=$(cat k/dsa_inner_short.b64); SKBIG=$(cat k/sk_big.b64)
 RLZ=$(cat k/rsa_lz.b64); RLZ3=$(cat k/rsa_lz3.b64); RNEG=$(cat k/rsa_neg.b64); ECC=$(cat k/ec_comp.b64)
 n=0
 # A real sshd on 127.0.0.1:2222 for the account alice, with password login off.
@@ -84,7 +90,8 @@ if [ "$login" = 1 ]; then
   ssh-keygen -A >/dev/null 2>&1
   printf '%s\n' "Port 2222" "ListenAddress 127.0.0.1" "HostKey /etc/ssh/ssh_host_ed25519_key" \
     "PidFile $out/sshd.pid" "AuthorizedKeysFile .ssh/authorized_keys" "PasswordAuthentication no" \
-    "KbdInteractiveAuthentication no" "PubkeyAuthentication yes" "UsePAM yes" "StrictModes yes" "LogLevel ERROR" >sshd_config
+    "KbdInteractiveAuthentication no" "PubkeyAuthentication yes" "UsePAM yes" "StrictModes yes" "LogLevel ERROR" \
+    "PubkeyAcceptedAlgorithms +ssh-dss" >sshd_config
   /usr/sbin/sshd -f "$out/sshd_config"
   for i in 1 2 3 4 5 6 7 8 9 10; do
     (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null && break
@@ -120,6 +127,7 @@ case_() {
     try good -o CertificateFile=/dev/null -o PubkeyAcceptedAlgorithms=ssh-ed25519 && acc="$acc good"
     try evil -o PubkeyAcceptedAlgorithms=ssh-ed25519 && acc="$acc evil"
     try rsa && acc="$acc rsa"
+    try dsa -o PubkeyAcceptedAlgorithms=+ssh-dss && acc="$acc dsa"
     try ecdsa && acc="$acc ecdsa"
     try good -o CertificateFile=k/good-cert.pub -o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com && acc="$acc goodcert"
     printf '%s\n' "${acc# }" | sed 's/^$/none/' >"$id.login"
@@ -213,6 +221,8 @@ case_ "ssh-rsa line, the blob calls its type RSA" 'ssh-rsa %s x\n' "$RIS"
 case_ "ssh-rsa line, the blob calls its type rsa-sha2-256" 'ssh-rsa %s x\n' "$RI2"
 case_ "ssh-ed25519 line, the blob calls its type Ed25519" 'ssh-ed25519 %s x\n' "$EIS"
 case_ "ecdsa line, the blob calls its type ECDSA" 'ecdsa-sha2-nistp256 %s x\n' "$CIS"
+case_ "ssh-dss line, the blob calls its type dsa (sshd allows ssh-dss)" 'ssh-dss %s x\n' "$DIS"
+case_ "sk-ssh-ed25519 line with a blob over 16 KiB" 'sk-ssh-ed25519@openssh.com %s x\n' "$SKBIG"
 if [ "$login" = 1 ]; then
   kill "$(cat "$out/sshd.pid")" 2>/dev/null || true
   rm -f /home/alice/.ssh/authorized_keys sshd_config sshd.pid

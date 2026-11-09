@@ -1,1 +1,1 @@
-from="192.0.2.0/24,*.example.test",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHc1F+Qso3bp9yGRoiFl7Ov6SIklBSbXC9yt7n/cxdlR comment
+from="192.0.2.0/24,*.example.test",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILz/txnC6h+iEoYtNpSL1rDaUKsz2TsGaL+pI84QTjMG comment

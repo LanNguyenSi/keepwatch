@@ -178,7 +178,10 @@ both apt commands must be understood line by line (the phased marker
 ` (phased N%)` that apt prints on a version row is one of the known shapes); a
 line of any other shape, or a kept back list that does not match the count in
 the summary, makes the result `error`. Together at most 2000 upgraded and kept
-back packages are looked up; with more the result is `error`.
+back packages are looked up; with more the result is `error`. Limit: an
+administrator's apt pin on a `-security` pocket (`Pin-Priority` below 100, or
+-1) keeps the security version out of apt's candidates, so the check passes;
+that is the administrator's choice and the check does not second-guess it.
 
 `docker_exposure` fails when the daemon listens on TCP (an entry in
 `daemon.json` `hosts`, or `-H`/`--host` on the running dockerd's command line,
@@ -228,12 +231,15 @@ parsed, so a line that sshd refuses because of a bad option is still listed (a
 key may be listed that cannot log in); an ECDSA point is checked for its size
 and uncompressed form, not for lying on the curve, and an RSA key is not checked
 for its length; certificates (`-cert-v01@openssh.com` types) are read by sshd but
-never match a login key, so they count as lines that are not keys (a `warn`).
+never match a login key, so they count as lines that are not keys (a `warn`);
+a key blob over 16 KiB (a security key with a very long application string, for
+example) is not fingerprinted and counts as a line that cannot be read (a
+`fail`, see below).
 A line that cannot be read but starts with the name of a key type that sshd
 reads (as its first word, or as the first word after the options) is a `fail`
 and not a `warn`: sshd may accept a key from it that is not checked (subject
 `user:path:line`, the reason is a fixed text, the line is never quoted).
-The test set holds 83 lines on each release with what `ssh-keygen -lf` printed
+The test set holds 85 lines on each release with what `ssh-keygen -lf` printed
 and which keys a real sshd accepted for them (`testdata/ubuntuXXXX/keycases`,
 `keycases.sh`), and a test asserts: a key that sshd accepts is listed with
 exactly its fingerprint, and no key is listed that neither sshd accepts nor

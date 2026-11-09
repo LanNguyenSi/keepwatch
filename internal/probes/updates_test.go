@@ -277,6 +277,22 @@ func TestSecurityUpdatesPockets(t *testing.T) {
 	})
 }
 
+func TestSecurityUpdatesEvidenceOrderMixesUpgradedAndKeptBack(t *testing.T) {
+	// the kept back package sorts before the upgraded one and is looked up
+	// after it: the names in the summary (and the evidence) are sorted over both
+	out := "Reading package lists...\nThe following packages have been kept back:\n  alpha\n" +
+		"1 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n" +
+		"Inst zeta [1.0] (3.0 Ubuntu:24.04/noble-security [amd64])\n"
+	r := newRunner().AddResult(aptArgv, inline(out, 0)).
+		AddResult(policyArgv("zeta", "alpha"), inline(policyText("zeta", "3.0@noble-security", "*1.0@dpkg")+policyText("alpha", "2.0@noble-security", "*1.0@dpkg"), 0))
+	o := execAt(updatesProbe(t, nil), r, lists(time.Hour), t0)
+	wantStatus(t, o, result.Fail)
+	if !eq(subjects(o), []string{"alpha", "zeta"}) {
+		t.Fatalf("subjects %v", subjects(o))
+	}
+	wantSummary(t, o, "2 pending security update(s): alpha, zeta;")
+}
+
 func TestSecurityUpdatesUnderstandsOrErrors(t *testing.T) {
 	inst := "Inst a [1] (2 Ubuntu:24.04/noble-security [amd64])\n"
 	bad := map[string]string{
