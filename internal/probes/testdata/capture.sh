@@ -11,7 +11,7 @@
 # with /sbin/init as PID 1 (privileged).
 #
 # KW_SECTIONS selects what to capture: a comma separated list of base,
-# firewall, apt, keys, certs, disk, docker (default: all). The last five
+# firewall, apt, keys, keycases, certs, disk, docker (default: all). The last six
 # sections run in the plain containers, which need the extra packages ufw,
 # nftables, iptables, apt, openssh-client, openssl, e2fsprogs, util-linux
 # (setpriv), docker.io and curl; the docker section starts its own dockerd
@@ -259,6 +259,15 @@ for v in 2204 2404; do
     ex "$plain" 'printf "AuthorizedKeysFile none\n" > /etc/ssh/sshd_config.d/10-keys.conf'
     cap "$plain" $d sshd_T_authkeys_none sshd -T
     ex "$plain" 'rm -f /etc/ssh/sshd_config.d/10-keys.conf'
+  fi
+
+  # ---- authorized_keys line parser: hard lines and what ssh-keygen -lf makes of each
+  if want keycases; then
+    docker cp "$here/keycases.sh" "$plain:/tmp/keycases.sh"
+    ex "$plain" 'bash /tmp/keycases.sh /tmp/kwkc'
+    rm -rf "$here/$d/keycases"
+    docker cp "$plain:/tmp/kwkc" "$here/$d/keycases"
+    ex "$plain" 'rm -rf /tmp/kwkc /tmp/keycases.sh'
   fi
 
   # ---- cert_expiry: certificates and what openssl says about them ----------------

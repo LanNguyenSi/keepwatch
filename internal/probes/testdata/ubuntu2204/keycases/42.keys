@@ -1,0 +1,1 @@
+from="192.0.2.0/24,*.example.test",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDuA4UMOkblrymGy4wxHAPX6nb+DB59Dp7kl3CdiAOww comment

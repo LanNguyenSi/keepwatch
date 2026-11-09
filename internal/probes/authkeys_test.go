@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 
@@ -189,7 +190,7 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 		`command="/bin/true",no-pty,no-port-forwarding ssh-ed25519 ` + blob + " c",
 		`command="echo hello world" ssh-ed25519 ` + blob,
 		`command="echo \"quoted blanks\" x" ssh-ed25519 ` + blob,
-		`from="10.0.0.0/8,!10.1.0.0/16",environment="A=b c" ssh-ed25519 ` + blob,
+		`from="192.0.2.0/24,!192.0.2.128/25",environment="A=b c" ssh-ed25519 ` + blob,
 		`cert-authority,principals="a b" ssh-ed25519 ` + blob,
 	}
 	for _, line := range pass {
@@ -208,25 +209,20 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 		"unknown key type":       "ssh-foo " + blob,
 		"type without data":      "ssh-ed25519",
 		"data not base64":        "ssh-ed25519 !!!notbase64!!!",
-		"data unpadded":          "ssh-ed25519 " + strings.TrimRight(base64.StdEncoding.EncodeToString(wire("ssh-ed25519", "a")), "="),
+		"data unpadded":          "ecdsa-sha2-nistp256 " + strings.TrimRight(strings.Fields(loadKey(t, v, "ecdsa").line)[1], "="),
 		"blob of another type":   "ssh-ed25519 " + rblob,
 		"rsa type, ed25519 blob": "ssh-rsa " + blob,
 		"empty data":             "ssh-ed25519 =",
 		"shadow-like line":       "root:$6$abc$def:19000:0:99999:7:::",
 		"certificate":            strings.Join([]string{"ssh-ed25519-cert-v01@openssh.com", blob}, " "),
-		"too long":               "ssh-ed25519 " + strings.Repeat("A", 17000),
-		"nul byte":               "ssh-ed25519 " + blob + "\x00",
+		"blob too large":         "ssh-ed25519 " + strings.Repeat("A", 17000),
+		"nul in the blob":        "ssh-ed25519 " + blob[:20] + "\x00" + blob[20:],
 	}
 	for name, line := range bad {
 		t.Run("bad "+name, func(t *testing.T) {
 			o := run(ed.line + "\nline two\n" + line + "\n")
-			if name == "nul byte" {
-				// the NUL sits in the comment position, after the key
-				wantStatus(t, o, result.Warn)
-				return
-			}
 			wantStatus(t, o, result.Warn)
-			for bad, why := range map[string]string{"too long": "line is too long", "unterminated quote": "unterminated quote in the options"} {
+			for bad, why := range map[string]string{"unterminated quote": "unterminated quote in the options"} {
 				if name == bad && !strings.Contains(allText(o), why) {
 					t.Fatalf("evidence %+v", o.Evidence)
 				}
@@ -255,7 +251,10 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 	})
 	t.Run("the sk key types", func(t *testing.T) {
 		for _, typ := range []string{"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"} {
-			b := wire(typ, "x", "y")
+			b := wire(typ, pk32("x"), "application")
+			if typ == "sk-ecdsa-sha2-nistp256@openssh.com" {
+				b = wire(typ, "nistp256", "point", "application")
+			}
 			line := typ + " " + base64.StdEncoding.EncodeToString(b)
 			sum := sha256.Sum256(b)
 			fp := "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
@@ -271,6 +270,9 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 		wantStatus(t, run("ssh-ed25519 "+base64.StdEncoding.EncodeToString([]byte{0, 1})+"\n"), result.Warn)
 	})
 }
+
+// pk32 pads s to the 32 bytes of an ed25519 public key.
+func pk32(s string) string { return (s + strings.Repeat("_", 32))[:32] }
 
 // wire builds a key blob: the type and further strings in SSH wire format.
 func wire(parts ...string) []byte {
@@ -522,6 +524,18 @@ func TestAuthorizedKeysAccounts(t *testing.T) {
 			t.Fatalf("evidence %+v", o.Evidence)
 		}
 	})
+	t.Run("a line with a field too many is not read as an account", func(t *testing.T) {
+		// 8 fields: the home and shell cannot be told, so the user is not examined and the line is a warning
+		fsys := probestest.FakeFS{
+			Files: map[string]string{"/etc/passwd": "root:x:0:0:root:/root:/bin/bash\neight:x:1013:1013::/home/eight:/bin/sh:extra\n"},
+			Homes: map[string]string{probestest.HomeKey("/home/eight", ".ssh/authorized_keys"): ed.line + "\n"},
+		}
+		o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"root": nil})
+		wantStatus(t, o, result.Warn)
+		if !eq(subjects(o), []string{"passwd:2"}) {
+			t.Fatalf("evidence %+v", o.Evidence)
+		}
+	})
 	t.Run("passwd that cannot be read", func(t *testing.T) {
 		for _, fsys := range []probestest.FakeFS{{}, {Errs: map[string]error{"/etc/passwd": fs.ErrPermission}}, {Files: map[string]string{"/etc/passwd": strings.Repeat("x", 5<<20)}}} {
 			o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"root": {ed.fp}})
@@ -632,7 +646,7 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 	t.Run("many unexpected keys", func(t *testing.T) {
 		var b strings.Builder
 		for i := 0; i < 150; i++ {
-			k := wire("ssh-ed25519", fmt.Sprintf("key%03d", i))
+			k := wire("ssh-ed25519", pk32(fmt.Sprintf("key%03d", i)))
 			b.WriteString("ssh-ed25519 " + base64.StdEncoding.EncodeToString(k) + "\n")
 		}
 		fsys := keyHost(t, v, map[string]string{aliceAK: b.String()})
@@ -663,4 +677,75 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 
 func TestAuthorizedKeysPrepareTakesNoParameters(t *testing.T) {
 	prepareErr(t, "authorized_keys", map[string]any{"x": 1})
+}
+
+// TestAuthorizedKeysLinesMatchSSHKeygen is the differential test of the line
+// parser. Every case under testdata/<release>/keycases is one authorized_keys
+// line (see keycases.sh) together with what "ssh-keygen -lf" printed for it on
+// that release. ssh-keygen reads the line the way sshd does, so the contract
+// is: keepwatch finds the very key ssh-keygen finds, or, where ssh-keygen finds
+// none, none. The only line keepwatch deliberately does not list although
+// ssh-keygen does is a certificate, which it reports as a line that is not a
+// key.
+func TestAuthorizedKeysLinesMatchSSHKeygen(t *testing.T) {
+	const dummy = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, v := range versions {
+		dir := "testdata/" + v + "/keycases"
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases := 0
+		for _, e := range entries {
+			id, ok := strings.CutSuffix(e.Name(), ".keys")
+			if !ok {
+				continue
+			}
+			cases++
+			t.Run(v+"/"+id, func(t *testing.T) {
+				content := fixtureFile(t, v+"/keycases/"+id+".keys")
+				about := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".about"))
+				exit := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".exit"))
+				fsys := keyHost(t, v, map[string]string{aliceAK: content})
+				run := func(fp string) probes.Outcome {
+					return execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": {fp}})
+				}
+				if exit != "0" {
+					o := run(dummy)
+					wantStatus(t, o, result.Warn)
+					for _, ev := range o.Evidence {
+						if ev.Subject != "alice:"+dummy && !strings.Contains(ev.Detail, "line is not a public key") {
+							t.Fatalf("%s: ssh-keygen finds no key, keepwatch says %+v", about, ev)
+						}
+					}
+					if len(o.Evidence) < 2 {
+						t.Fatalf("%s: the line is not reported as unparseable: %+v", about, o.Evidence)
+					}
+					return
+				}
+				out := strings.TrimSpace(fixtureFile(t, v+"/keycases/"+id+".fp"))
+				fields := strings.Fields(out)
+				fp := fields[1]
+				if strings.HasSuffix(out, "-CERT)") {
+					o := run(fp)
+					wantStatus(t, o, result.Warn)
+					if strings.Contains(allText(o), "ssh-keygen") || len(o.Evidence) < 2 {
+						t.Fatalf("%s: %+v", about, o.Evidence)
+					}
+					return
+				}
+				// the line holds exactly the key ssh-keygen found: expecting it passes,
+				// expecting something else fails with that key as the subject
+				wantStatus(t, run(fp), result.Pass)
+				o := run(dummy)
+				wantStatus(t, o, result.Fail)
+				if !eq(subjects(o), []string{"alice:" + fp}) {
+					t.Fatalf("%s: ssh-keygen lists %s, keepwatch lists %v", about, fp, subjects(o))
+				}
+			})
+		}
+		if cases < 40 {
+			t.Fatalf("%s: only %d key line cases found", v, cases)
+		}
+	}
 }

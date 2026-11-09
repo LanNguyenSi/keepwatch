@@ -22,7 +22,6 @@ const (
 	passwdFile         = "/etc/passwd"
 	maxPasswd          = 4 << 20
 	maxKeyFile         = 256 << 10
-	maxKeyLine         = 16 << 10
 	maxKeyBlob         = 16 << 10
 	defaultKeyFileList = ".ssh/authorized_keys .ssh/authorized_keys2"
 )
@@ -70,21 +69,37 @@ const (
 // file that is not an authorized keys file (a link to a file of another
 // user, say) leaks nothing.
 //
-// A line is [options] type base64-key [comment]. The options (which may
-// contain quoted spaces) are skipped, the type must be one of ssh-ed25519,
-// ssh-rsa, ssh-dss, ecdsa-sha2-nistp256/384/521 and the two sk- types, and the
-// base64 blob must decode and start with the same type name. A certificate
-// (a -cert-v01 type) is not a key to compare and counts as a line that is not a
-// key. The fingerprint is the unpadded base64 of the SHA-256 of the
-// blob, computed here. A line that is not blank, not a comment and not a key
-// is a warning.
+// A line is read the way OpenSSH reads it (see keyFingerprint, which ports
+// sshkey_advance_past_options): the line ends at a NUL byte, a key at the start
+// of the line is used as it stands, otherwise the options are stepped over
+// (quotes can hold blanks, a backslash escapes a quote, an unterminated quote
+// is an unparseable line) and the key must follow. The options are not
+// interpreted. The key type must be one of ssh-ed25519, ssh-rsa, ssh-dss,
+// ecdsa-sha2-nistp256/384/521 and the two sk- types, the base64 blob must
+// decode (strictly, as OpenSSH does) to a well-formed key of that type, and a
+// comment is ignored whatever its length (a line of any length up to the 256
+// KiB file limit is read in full, so a long comment cannot hide a key). A
+// certificate (a -cert-v01 type) is not a key to compare and counts as a line
+// that is not a key. The fingerprint is the unpadded base64 of the SHA-256 of
+// the blob, computed here; it is the one "ssh-keygen -l" prints for the same
+// line (the tests compare them for lines captured with ssh-keygen on Ubuntu
+// 22.04 and 24.04). A line that is not blank, not a comment and not a key is a
+// warning.
+//
+// A path in the home that leads out of it through a symbolic link is not
+// followed (a warning with the reason), although sshd follows such a link and
+// would accept the keys in the file. That is a limit: the keys are never
+// judged as pass, but they are not listed either. An AuthorizedKeysFile outside
+// the home that is reached through links is read only when every directory on
+// the way is root-owned and not writable by others (ReadTrusted); the user can
+// not point such a path at a file of their own.
 //
 // Result: a key in a file that the user's expected list does not have is a
 // fail (subject "<user>:SHA256:..."), also for a user without any expected
 // entry. Without a fail, an expected key that no file has (same subject form),
 // a file that was refused or has unparseable lines (subject
 // "<user>:<path>" or "<user>:<path>:<line>"), a passwd line that does not
-// parse, an expected user without an account, and an AuthorizedKeysCommand
+// parse (anything but exactly seven fields; its user is not examined), an expected user without an account, and an AuthorizedKeysCommand
 // other than none (subject "authorizedkeyscommand", its keys cannot be
 // checked) make the status warn. When there is a fail, the warnings are
 // counted in the summary and not listed, because every evidence item of a
@@ -432,10 +447,6 @@ func parseAuthorizedKeys(content string) (keys []authKey, bad []badLine) {
 		if trimmed == "" || trimmed[0] == '#' {
 			continue
 		}
-		if len(line) > maxKeyLine {
-			bad = append(bad, badLine{i + 1, "line is too long"})
-			continue
-		}
 		typ, fp, err := keyFingerprint(trimmed)
 		if err != nil {
 			bad = append(bad, badLine{i + 1, err.Error()})
@@ -448,40 +459,87 @@ func parseAuthorizedKeys(content string) (keys []authKey, bad []badLine) {
 
 var keyTypeRe = regexp.MustCompile(`^(?:ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$`)
 
+// The reasons a line is not a key. They are fixed texts: a reason never quotes
+// the line.
+var (
+	errNoKeyType = errors.New("no known key type")
+	errNoKeyData = errors.New("no key data")
+	errBadBlob   = errors.New("key data is not valid base64 or is not a key of that type")
+	errQuote     = errors.New("unterminated quote in the options")
+)
+
 // keyFingerprint returns the key type and the "SHA256:..." fingerprint of an
-// authorized_keys line (without leading blanks). The error text is one of a
-// fixed set and never quotes the line.
+// authorized_keys line (without leading blanks), reading the line the way
+// OpenSSH does (auth_check_authkey_line in auth2-pubkeyfile.c, and
+// do_fingerprint in ssh-keygen.c, which lists the same key):
+//
+//  1. The line is a C string: it ends at the first NUL byte.
+//  2. A key is read at the start of the line (sshkey_read): a key type, blanks,
+//     and a base64 blob that ends at the next blank. What follows, the
+//     comment, is not looked at.
+//  3. Only when that fails, the options are skipped (sshkey_advance_past_options,
+//     see advancePastOptions) and a key is read after the blanks that follow
+//     them.
+//
+// The key sshd would use and the key listed here are therefore the same key
+// for every line: the options are not parsed or trusted, they are only
+// stepped over exactly as sshd steps over them, so text inside quotes can
+// neither hide a key from this check nor make up one. A line that sshd would
+// refuse because of an unknown or malformed option is still listed (OpenSSH
+// applies the option rules after finding the key); the worst case is a key
+// that is listed although it cannot log in.
 func keyFingerprint(line string) (typ, fp string, err error) {
-	rest := line
-	first, after := splitToken(rest)
-	if !keyTypeRe.MatchString(first) {
-		// Options come first; they may hold quoted blanks.
-		end, ok := optionsEnd(rest)
-		if !ok {
-			return "", "", errors.New("unterminated quote in the options")
-		}
-		rest = strings.TrimLeft(rest[end:], " \t")
-		first, after = splitToken(rest)
+	if i := strings.IndexByte(line, 0); i >= 0 {
+		line = line[:i]
 	}
-	if !keyTypeRe.MatchString(first) {
-		return "", "", errors.New("no known key type")
+	typ, fp, err = readKey(line)
+	if err == nil {
+		return typ, fp, nil
 	}
-	b64, _ := splitToken(strings.TrimLeft(after, " \t"))
-	if b64 == "" {
-		return "", "", errors.New("no key data")
+	first, _ := splitToken(line)
+	end, ok := advancePastOptions(line)
+	if !ok {
+		return "", "", errQuote
 	}
-	blob, derr := base64.StdEncoding.DecodeString(b64)
-	if derr != nil || len(blob) == 0 || len(blob) > maxKeyBlob {
-		return "", "", errors.New("key data is not valid base64 or has an unusable size")
+	typ2, fp2, err2 := readKey(strings.TrimLeft(line[end:], " \t"))
+	if err2 == nil {
+		return typ2, fp2, nil
 	}
-	if n, ok := wireString(blob); !ok || n != first {
-		return "", "", errors.New("key data does not match the key type")
+	if keyTypeRe.MatchString(first) {
+		return "", "", err // the line starts with a key type, so that is the problem
 	}
-	sum := sha256.Sum256(blob)
-	return first, "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]), nil
+	return "", "", err2
 }
 
-// splitToken returns the first blank-delimited token and the rest.
+// readKey mirrors sshkey_read: a key type, blanks, a base64 blob. s is a
+// C string without NUL.
+func readKey(s string) (typ, fp string, err error) {
+	typ, rest := splitToken(s)
+	if rest == "" {
+		// sshkey_read: no blank after the first token is a format error
+		if keyTypeRe.MatchString(typ) {
+			return "", "", errNoKeyData
+		}
+		return "", "", errNoKeyType
+	}
+	if !keyTypeRe.MatchString(typ) {
+		return "", "", errNoKeyType
+	}
+	b64, _ := splitToken(strings.TrimLeft(rest, " \t"))
+	if b64 == "" {
+		return "", "", errNoKeyData
+	}
+	// Strict: OpenSSH refuses text whose padding bits are not zero.
+	blob, derr := base64.StdEncoding.Strict().DecodeString(b64)
+	if derr != nil || len(blob) == 0 || len(blob) > maxKeyBlob || !wellFormedBlob(typ, blob) {
+		return "", "", errBadBlob
+	}
+	sum := sha256.Sum256(blob)
+	return typ, "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]), nil
+}
+
+// splitToken returns the first blank-delimited token and the rest. The blanks
+// are space and tab, like OpenSSH's strcspn(cp, " \t").
 func splitToken(s string) (string, string) {
 	if i := strings.IndexAny(s, " \t"); i >= 0 {
 		return s[:i], s[i:]
@@ -489,32 +547,57 @@ func splitToken(s string) (string, string) {
 	return s, ""
 }
 
-// optionsEnd returns the index of the first blank outside quotes, the end of
-// the options field, and false when a quote is not closed.
-func optionsEnd(s string) (int, bool) {
-	in := false
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '\\' && in && i+1 < len(s):
-			i++
-		case c == '"':
-			in = !in
-		case (c == ' ' || c == '\t') && !in:
-			return i, true
+// advancePastOptions returns the index of the end of the key options at the
+// start of s: the first space or tab that is not inside double quotes, or
+// len(s). It is a line-for-line port of sshkey_advance_past_options
+// (authfile.c); in particular a backslash only matters when a double quote
+// follows it, in which case both are skipped, and it matters outside quotes
+// too. ok is false for an unterminated quote.
+func advancePastOptions(s string) (end int, ok bool) {
+	quoted := false
+	i := 0
+	for ; i < len(s) && (quoted || (s[i] != ' ' && s[i] != '\t')); i++ {
+		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '"' {
+			i++ // skip both
+		} else if s[i] == '"' {
+			quoted = !quoted
 		}
 	}
-	return len(s), !in
+	return i, !(i == len(s) && quoted)
 }
 
-// wireString reads the leading SSH wire-format string (uint32 length, bytes)
-// of a key blob.
-func wireString(blob []byte) (string, bool) {
-	if len(blob) < 4 {
-		return "", false
+// wellFormedBlob reports whether blob is exactly the wire format OpenSSH
+// reads for the key type: the type name first, then the fields of the type,
+// and nothing after them.
+func wellFormedBlob(typ string, blob []byte) bool {
+	var fields [][]byte
+	for len(blob) > 0 {
+		if len(blob) < 4 {
+			return false
+		}
+		n := binary.BigEndian.Uint32(blob)
+		if n > uint32(len(blob)-4) {
+			return false
+		}
+		fields = append(fields, blob[4:4+n])
+		blob = blob[4+n:]
 	}
-	n := binary.BigEndian.Uint32(blob)
-	if n > uint32(len(blob)-4) {
-		return "", false
+	if len(fields) == 0 || string(fields[0]) != typ {
+		return false
 	}
-	return string(blob[4 : 4+n]), true
+	switch typ {
+	case "ssh-ed25519":
+		return len(fields) == 2 && len(fields[1]) == 32
+	case "sk-ssh-ed25519@openssh.com":
+		return len(fields) == 3 && len(fields[1]) == 32
+	case "ssh-rsa":
+		return len(fields) == 3
+	case "ssh-dss":
+		return len(fields) == 5
+	case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521":
+		return len(fields) == 3 && "ecdsa-sha2-"+string(fields[1]) == typ
+	case "sk-ecdsa-sha2-nistp256@openssh.com":
+		return len(fields) == 4 && string(fields[1]) == "nistp256"
+	}
+	return false
 }
