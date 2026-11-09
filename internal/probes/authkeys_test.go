@@ -882,6 +882,8 @@ func TestAuthorizedKeysCanonicalIntegers(t *testing.T) {
 				t.Errorf("%s %s: %s %+v", v, what, o.Status, o.Evidence)
 			}
 		}
+		// an integer of zero bytes is zero: read, not negative
+		wantKeyFP(t, v, "e of zero bytes", line(typ, nil, n), fpOf(joinWire(typ, nil, n)))
 		unreadable("a negative modulus", line(typ, e, n[1:]))
 		unreadable("a negative e", line(typ, []byte{0x80, 1}, n))
 		unreadable("a modulus of 2049 bytes", line(typ, e, append([]byte{1}, z(2048)...)))
@@ -889,7 +891,7 @@ func TestAuthorizedKeysCanonicalIntegers(t *testing.T) {
 		// the same for DSA: four integers, each canonicalised
 		d := [][]byte{{0x80, 1}, {0x7f}, {0x9e, 2}, {3}}
 		canon := joinWire([]byte("ssh-dss"), append(z(1), d[0]...), d[1], append(z(1), d[2]...), d[3])
-		padded := joinWire([]byte("ssh-dss"), append(z(4), append(z(1), d[0]...)...), append(z(2), d[1]...), append(z(3), append(z(1), d[2]...)...), d[3])
+		padded := joinWire([]byte("ssh-dss"), append(z(4), append(z(1), d[0]...)...), append(z(2), d[1]...), append(z(3), append(z(1), d[2]...)...), append(z(2), d[3]...))
 		wantKeyFP(t, v, "dss with padded integers", "ssh-dss "+base64.StdEncoding.EncodeToString(padded), fpOf(canon))
 		unreadable("a negative dss integer", "ssh-dss "+base64.StdEncoding.EncodeToString(joinWire([]byte("ssh-dss"), d[0], d[1], d[2], d[3])))
 	}
@@ -936,6 +938,13 @@ func TestAuthorizedKeysTypeStringInTheBlob(t *testing.T) {
 		wantKeyFP(t, v, "sk-ecdsa", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
 		wantKeyFP(t, v, "sk-ecdsa, webauthn blob type", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("webauthn-sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
 		wantKeyFP(t, v, "webauthn line, sk-ecdsa blob type", "webauthn-sk-ecdsa-sha2-nistp256@openssh.com "+sk("sk-ecdsa-sha2-nistp256@openssh.com"), fpOf(canon))
+		skBlob := func(curve, point string) string {
+			return "sk-ecdsa-sha2-nistp256@openssh.com " + base64.StdEncoding.EncodeToString(joinWire([]byte("sk-ecdsa-sha2-nistp256@openssh.com"), []byte(curve), []byte(point), []byte("ssh:")))
+		}
+		unreadable("sk-ecdsa, curve p384 with a point of p256 size", skBlob("nistp384", ecPoint("nistp256")))
+		unreadable("sk-ecdsa, a point of the wrong size", skBlob("nistp256", "\x04ppp"))
+		unreadable("sk-ecdsa, a compressed point of full size", skBlob("nistp256", "\x02"+strings.Repeat("p", 64)))
+		unreadable("ecdsa, a compressed point of full size", "ecdsa-sha2-nistp256 "+base64.StdEncoding.EncodeToString(joinWire([]byte("ecdsa-sha2-nistp256"), []byte("nistp256"), []byte("\x03"+strings.Repeat("p", 64)))))
 		unreadable("sk-ecdsa, short blob type", "sk-ecdsa-sha2-nistp256@openssh.com "+sk("ECDSA-SK"))
 		skEd := joinWire([]byte("sk-ssh-ed25519@openssh.com"), []byte(pk32("k")), []byte("ssh:"))
 		skEdShort := joinWire([]byte("Ed25519-SK"), []byte(pk32("k")), []byte("ssh:"))

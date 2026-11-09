@@ -467,8 +467,8 @@ func classifyAptPolicyLine(line string) aptLine {
 		return aptLine{shape: shape, ver: m[2]}
 	}
 	if m := aptOriginRe.FindStringSubmatch(line); m != nil {
-		prio, err := strconv.Atoi(strings.TrimSpace(m[1]))
-		if err != nil || fmt.Sprintf("%4d", prio) != m[1] {
+		prio, _ := strconv.Atoi(strings.TrimSpace(m[1])) // a number too large to read fails the width check below
+		if fmt.Sprintf("%4d", prio) != m[1] {
 			return aptLine{}
 		}
 		desc := m[2]

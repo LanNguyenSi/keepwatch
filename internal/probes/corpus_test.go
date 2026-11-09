@@ -114,7 +114,20 @@ func checkAptCorpus(t *testing.T, dir string, shapes map[string]int) (lines int)
 		if o.Status == result.Error {
 			t.Errorf("%s: the probe does not understand the corpus: %s", dir, o.Summary)
 		}
-		t.Logf("%s: simulation: %s (%d evidence items)", dir, o.Status, len(o.Evidence))
+		kinds := map[string]int{}
+		for _, l := range strings.Split(string(sim), "\n") {
+			k := "other"
+			for _, p := range []string{"Inst ", "Conf ", "Remv ", "Purg ", " "} {
+				if strings.HasPrefix(l, p) {
+					k = strings.TrimSpace(p)
+					if k == "" {
+						k = "indented"
+					}
+				}
+			}
+			kinds[k]++
+		}
+		t.Logf("%s: simulation: %s (%d evidence items); lines: %v", dir, o.Status, len(o.Evidence), kinds)
 	}
 	return lines
 }
