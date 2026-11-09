@@ -1,0 +1,20 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following NEW packages will be installed:
+  libnvidia-common-580-server libpciaccess0
+  nvidia-firmware-580-server-580.178.04 nvidia-kernel-common-580-server
+The following packages will be upgraded:
+  libnvidia-common-535-server
+1 upgraded, 4 newly installed, 0 to remove and 0 not upgraded.
+Inst libpciaccess0 (0.16-3 Ubuntu:22.04/jammy [arm64])
+Inst nvidia-firmware-580-server-580.178.04 (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Inst nvidia-kernel-common-580-server (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Inst libnvidia-common-535-server [535.288.01-0ubuntu0.22.04.1] (535.309.01-0ubuntu0.22.04.2 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [all]) []
+Inst libnvidia-common-580-server (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [all])
+Conf libpciaccess0 (0.16-3 Ubuntu:22.04/jammy [arm64])
+Conf nvidia-firmware-580-server-580.178.04 (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Conf nvidia-kernel-common-580-server (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Conf libnvidia-common-535-server (535.309.01-0ubuntu0.22.04.2 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [all])
+Conf libnvidia-common-580-server (580.178.04-0ubuntu0.22.04.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [all])

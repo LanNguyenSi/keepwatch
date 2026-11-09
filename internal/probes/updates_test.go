@@ -25,17 +25,25 @@ func policyArgv(names ...string) []string {
 
 var instUpgrade = regexp.MustCompile(`^Inst (\S+) \[(\S+)\] \((\S+) (.+?) \[[^\]]*\]\)`)
 
-// instNames returns the sorted names of the packages that a simulation
-// upgrades (the ones with an installed version).
+// instNames returns the names the probe asks apt-cache about for a
+// simulation: the upgraded packages that have an installed version, sorted,
+// then the kept back packages, sorted.
 func instNames(sim string) []string {
-	var names []string
+	var names, kept []string
+	inKept := false
 	for _, l := range strings.Split(sim, "\n") {
+		if inKept && strings.HasPrefix(l, " ") {
+			kept = append(kept, strings.Fields(l)...)
+			continue
+		}
+		inKept = l == "The following packages have been kept back:" || l == "The following upgrades have been deferred due to phasing:"
 		if m := instUpgrade.FindStringSubmatch(l); m != nil {
 			names = append(names, m[1])
 		}
 	}
 	sort.Strings(names)
-	return names
+	sort.Strings(kept)
+	return append(names, kept...)
 }
 
 // withPolicy registers, for the upgraded packages of a simulation, an
@@ -258,12 +266,14 @@ func TestSecurityUpdatesPockets(t *testing.T) {
 		out = strings.Replace(out, "1 reinstalled", "0 reinstalled", 1)
 		wantStatus(t, execAt(updatesProbe(t, nil), aptRunner(out), lists(time.Hour), t0), result.Error)
 	})
-	t.Run("removals and kept-back packages are noted, not judged", func(t *testing.T) {
+	t.Run("removals are noted, kept-back packages are looked up", func(t *testing.T) {
 		out := "Reading package lists...\nThe following packages have been kept back:\n  held-pkg\nThe following packages will be REMOVED:\n  old\n" +
-			"0 upgraded, 0 newly installed, 1 to remove and 2 not upgraded.\nRemv old [1]\n"
-		o := execAt(updatesProbe(t, nil), aptRunner(out), lists(time.Hour), t0)
+			"0 upgraded, 0 newly installed, 1 to remove and 1 not upgraded.\nRemv old [1]\n"
+		r := newRunner().AddResult(aptArgv, inline(out, 0)).
+			AddResult(policyArgv("held-pkg"), inline(policyText("held-pkg", "2.0@noble-updates", "*1.0@dpkg"), 0))
+		o := execAt(updatesProbe(t, nil), r, lists(time.Hour), t0)
 		wantStatus(t, o, result.Pass)
-		wantSummary(t, o, "2 package(s) not upgraded")
+		wantSummary(t, o, "1 package(s) not upgraded")
 	})
 }
 

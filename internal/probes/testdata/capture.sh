@@ -11,7 +11,7 @@
 # with /sbin/init as PID 1 (privileged).
 #
 # KW_SECTIONS selects what to capture: a comma separated list of base,
-# firewall, apt, keys, keycases, certs, disk, docker (default: all). The last six
+# firewall, apt, aptrepo, aptphased, keys, keycases, certs, disk, docker (default: all). The last six
 # sections run in the plain containers, which need the extra packages ufw,
 # nftables, iptables, apt, openssh-client, openssl, e2fsprogs, util-linux
 # (setpriv), docker.io and curl; the docker section starts its own dockerd
@@ -233,7 +233,7 @@ for v in 2204 2404; do
     # polcap <name>: apt-cache policy for the packages the simulation upgrades,
     # in the order the probe asks for them (sorted, one batch)
     polcap() {
-      cap "$plain" $d "$1" bash -c "export LC_ALL=C; names=\$($apt | sed -n 's/^Inst \\([^ ]*\\) .*/\\1/p' | sort | tr '\\n' ' '); apt-cache $nocache policy -- \$names"
+      cap "$plain" $d "$1" bash -c "export LC_ALL=C; sim=\$($apt); names=\$({ echo \"\$sim\" | sed -n 's/^Inst \\([^ ]*\\) \\[.*/\\1/p' | sort; echo \"\$sim\" | awk '/^The following packages have been kept back:/{k=1;next} k&&/^ /{for(i=1;i<=NF;i++)print \$i;next} {k=0}' | sort; } | tr '\\n' ' '); apt-cache $nocache policy -- \$names"
     }
     # start from a host with pending updates: put apt, libpcre2 and the apt
     # library back to the versions of the release pocket
@@ -245,6 +245,15 @@ for v in 2204 2404; do
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk >/dev/null 2>&1'
     cap "$plain" $d apt_pending $apt
     polcap apt_policy_pending
+    # a slice of the corpus the apt parsers are tested against: the simulation
+    # and apt-cache policy for the packages it upgrades, for every 8th installed
+    # package and for 40 package names out of the whole archive (testdata/aptcorpus.sh
+    # writes the full corpus with KW_CORPUS_INSTALLED_EVERY=1 and KW_CORPUS_SAMPLE=3000)
+    docker cp "$here/aptcorpus.sh" "$plain:/tmp/aptcorpus.sh"
+    ex "$plain" 'KW_CORPUS_INSTALLED_EVERY=8 KW_CORPUS_SAMPLE=40 bash /tmp/aptcorpus.sh /tmp/kwcorpus >/dev/null'
+    rm -rf "$here/$d/aptcorpus"
+    docker cp "$plain:/tmp/kwcorpus" "$here/$d/aptcorpus"
+    ex "$plain" 'rm -rf /tmp/kwcorpus /tmp/aptcorpus.sh'
     # the same simulation against a source list without the security suite: the
     # packages are then available from -updates only
     ex "$plain" '. /etc/os-release
@@ -283,6 +292,36 @@ for v in 2204 2404; do
     cap "$plain" $d apt_annotations $apt
     polcap apt_policy_annotations
     ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
+  fi
+
+  # ---- security_updates against a local repository: held back, blocked, phased ----
+  # kwtest 1.0 is installed; the security and updates suites hold newer versions
+  # (see aptrepo.sh for the scenarios). The simulation and apt-cache policy, as
+  # the probe asks for them (the package kwtest is named by the simulation or
+  # by the list of kept back packages).
+  if want aptrepo; then
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    docker cp "$here/aptrepo.sh" "$plain:/tmp/aptrepo.sh"
+    for sc in plain superseded phased phasedonly secphased hold holdupdate newdep; do
+      ex "$plain" "bash /tmp/aptrepo.sh $sc"
+      cap "$plain" $d "aptlr_$sc" apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade
+      cap "$plain" $d "aptlr_${sc}_policy" apt-cache $nocache policy -- kwtest
+    done
+    ex "$plain" 'bash /tmp/aptrepo.sh restore; rm -f /tmp/aptrepo.sh'
+  fi
+
+  # ---- security_updates: a phased update in the real archive (22.04 has some) ----
+  if want aptphased; then
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    pk=libnvidia-common-535-server
+    if docker exec "$plain" bash -c "apt-cache dumpavail | awk '/^Package: $pk\$/{p=1} p&&/^Phased-Update-Percentage:/{f=1} /^\$/{p=0} END{exit !f}'"; then
+      ex "$plain" "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk=535.288.01-0ubuntu0.22.04.1 >/dev/null 2>&1"
+      cap "$plain" $d apt_real_phased apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade
+      cap "$plain" $d apt_policy_real_phased apt-cache $nocache policy -- $pk
+      ex "$plain" "DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq $pk >/dev/null 2>&1; apt-get dist-upgrade -y -qq >/dev/null 2>&1"
+    else
+      echo "capture.sh: no package with a Phased-Update-Percentage on $d, no apt_real_phased fixture" >&2
+    fi
   fi
 
   # ---- authorized_keys: key files and the sshd -T lines that name them -----------

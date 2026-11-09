@@ -1,0 +1,5 @@
+release: Ubuntu 22.04.5 LTS
+apt: 2.4.5
+arch: arm64
+installed-every: 8
+sample: 40

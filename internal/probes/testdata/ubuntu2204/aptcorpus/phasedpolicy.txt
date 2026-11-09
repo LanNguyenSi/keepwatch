@@ -1,0 +1,132 @@
+libnvidia-common-530:
+  Installed: (none)
+  Candidate: 535.309.01-0ubuntu0.22.04.2
+  Version table:
+     535.309.01-0ubuntu0.22.04.2 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.309.01-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.288.01-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.274.02-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.247.01-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+     535.230.02-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.183.01-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.171.04-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.161.07-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.154.05-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.146.02-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.129.03-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.113.01-0ubuntu0.22.04.3 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.104.05-0ubuntu0.22.04.4 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.86.05-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.54.03-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+libnvidia-common-535-server:
+  Installed: (none)
+  Candidate: 535.288.01-0ubuntu0.22.04.1
+  Version table:
+     535.309.01-0ubuntu0.22.04.2 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.309.01-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.288.01-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.274.02-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.261.03-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.247.01-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.230.02-0ubuntu0.22.04.3 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.216.03-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.216.01-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.183.06-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.183.01-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.161.08-0ubuntu2.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.161.07-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.154.05-0ubuntu0.22.04.2 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+     535.154.05-0ubuntu0.22.04.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.129.03-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.104.12-0ubuntu0.22.04.2 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.104.05-0ubuntu0.22.04.1 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+     535.54.03-0ubuntu0.22.04.1 1 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+nvidia-firmware-535-535.104.05:
+  Installed: (none)
+  Candidate: 535.104.05-0ubuntu0.22.04.4
+  Version table:
+     535.104.05-0ubuntu0.22.04.4 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+nvidia-firmware-535-535.146.02:
+  Installed: (none)
+  Candidate: 535.146.02-0ubuntu0.22.04.1
+  Version table:
+     535.146.02-0ubuntu0.22.04.1 1 (phased 0%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages
+nvidia-firmware-535-server-535.154.05:
+  Installed: (none)
+  Candidate: 535.154.05-0ubuntu0.22.04.2
+  Version table:
+     535.154.05-0ubuntu0.22.04.2 500 (phased 40%)
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages
+     535.154.05-0ubuntu0.22.04.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages

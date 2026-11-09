@@ -1,0 +1,5 @@
+release: Ubuntu 24.04.5 LTS
+apt: 2.7.14build2
+arch: arm64
+installed-every: 8
+sample: 40

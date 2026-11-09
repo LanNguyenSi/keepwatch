@@ -1,0 +1,261 @@
+catfish:
+  Installed: (none)
+  Candidate: 4.16.4-2
+  Version table:
+     4.16.4-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+djbdns-utils:
+  Installed: (none)
+  Candidate: 1:1.05-15ubuntu2
+  Version table:
+     1:1.05-15ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+fonts-averia-sans-gwf:
+  Installed: (none)
+  Candidate: 1.00-2.1
+  Version table:
+     1.00-2.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+gdc-12-multilib-i686-linux-gnu:
+  Installed: (none)
+  Candidate: 12.4.0-2ubuntu1~24.04.1cross1
+  Version table:
+     12.4.0-2ubuntu1~24.04.1cross1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages
+     12.3.0-17ubuntu1cross1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+gobjc-13-multilib-sparc64-linux-gnu:
+  Installed: (none)
+  Candidate: 13.3.0-6ubuntu2~24.04cross1
+  Version table:
+     13.3.0-6ubuntu2~24.04cross1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages
+     13.2.0-23ubuntu4cross1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+golang-vbom-util-dev:
+  Installed: (none)
+  Candidate: 0.0~git20180919.efcd4e0-3
+  Version table:
+     0.0~git20180919.efcd4e0-3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+kdump-tools:
+  Installed: (none)
+  Candidate: 1:1.10.3ubuntu2
+  Version table:
+     1:1.10.3ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libalien-build-perl:
+  Installed: (none)
+  Candidate: 2.80-2
+  Version table:
+     2.80-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libclang-rt-19-dev:
+  Installed: (none)
+  Candidate: 1:19.1.1-1ubuntu1~24.04.2
+  Version table:
+     1:19.1.1-1ubuntu1~24.04.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages
+libequinox-simpleconfigurator-manipulator-java:
+  Installed: (none)
+  Candidate: 2.2.100+eclipse4.26-1
+  Version table:
+     2.2.100+eclipse4.26-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libghc-diagrams-prof:
+  Installed: (none)
+  Candidate: 1.4.0.1-1
+  Version table:
+     1.4.0.1-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libghc-utf8-light-prof:
+  Installed: (none)
+  Candidate: 0.4.4.0-1
+  Version table:
+     0.4.4.0-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libhepmc3t64:
+  Installed: (none)
+  Candidate: 3.1.2-2.1build1
+  Version table:
+     3.1.2-2.1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libkseexprui4:
+  Installed: (none)
+  Candidate: 4.0.4.0-6ubuntu4
+  Version table:
+     4.0.4.0-6ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libn32gphobos3-mips64el-cross:
+  Installed: (none)
+  Candidate: 12.4.0-2ubuntu1~24.04cross8
+  Version table:
+     12.4.0-2ubuntu1~24.04cross8 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages
+     12.3.0-17ubuntu1cross3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libpdf-reuse-perl:
+  Installed: (none)
+  Candidate: 0.39-3
+  Version table:
+     0.39-3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+librust-approx+num-complex-dev:
+  Installed: (none)
+  Candidate: 0.5.0-1
+  Version table:
+     0.5.0-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+librust-unicode-segmentation-dev:
+  Installed: (none)
+  Candidate: 1.10.1-1
+  Version table:
+     1.10.1-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libtest-async-http-perl:
+  Installed: (none)
+  Candidate: 0.02-3
+  Version table:
+     0.02-3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+libxml-light-ocaml:
+  Installed: (none)
+  Candidate: 2.5-2build1
+  Version table:
+     2.5-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+linux-headers-generic-64k-7.0:
+  Installed: (none)
+  Candidate: 7.0.0-42.42~24.04.1
+  Version table:
+     7.0.0-42.42~24.04.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+linux-modules-6.8.0-1080-qcom-rt:
+  Installed: (none)
+  Candidate: 6.8.0-1080.85
+  Version table:
+     6.8.0-1080.85 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages
+linux-modules-nvidia-535-server-open-aws-64k-6.14:
+  Installed: (none)
+  Candidate: 6.14.0-1018.18~24.04.1+3
+  Version table:
+     6.14.0-1018.18~24.04.1+3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-modules-nvidia-580-6.17.0-1019-oracle:
+  Installed: (none)
+  Candidate: 6.17.0-1019.19~24.04.3+2
+  Version table:
+     6.17.0-1019.19~24.04.3+2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-modules-nvidia-590-open-6.8.0-1051-nvidia-64k:
+  Installed: (none)
+  Candidate: 6.8.0-1051.54
+  Version table:
+     6.8.0-1051.54 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-modules-nvidia-610-6.8.0-1061-oracle:
+  Installed: (none)
+  Candidate: 6.8.0-1061.64+1
+  Version table:
+     6.8.0-1061.64+1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-objects-nvidia-550-open-6.8.0-71-generic-64k:
+  Installed: (none)
+  Candidate: 6.8.0-71.71
+  Version table:
+     6.8.0-71.71 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-objects-nvidia-590-6.14.0-1018-aws-64k:
+  Installed: (none)
+  Candidate: 6.14.0-1018.18~24.04.1+3
+  Version table:
+     6.14.0-1018.18~24.04.1+3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages
+linux-oracle-6.17-tools-6.17.0-1009:
+  Installed: (none)
+  Candidate: 6.17.0-1009.9~24.04.1
+  Version table:
+     6.17.0-1009.9~24.04.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+mate-screensaver:
+  Installed: (none)
+  Candidate: 1.26.2-1build2
+  Version table:
+     1.26.2-1build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+node-grunt-contrib-uglify:
+  Installed: (none)
+  Candidate: 5.2.2+dfsg-1
+  Version table:
+     5.2.2+dfsg-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+openmpi-doc:
+  Installed: (none)
+  Candidate: 4.1.6-7ubuntu2
+  Version table:
+     4.1.6-7ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+process-viewer:
+  Installed: (none)
+  Candidate: 0.5.9-1
+  Version table:
+     0.5.9-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+python3-django-rich:
+  Installed: (none)
+  Candidate: 1.8.0-2
+  Version table:
+     1.8.0-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+python3-pyvkfft:
+  Installed: (none)
+  Candidate: 2024.1.2+ds1-2build1
+  Version table:
+     2024.1.2+ds1-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages
+r-cran-dimred:
+  Installed: (none)
+  Candidate: 0.2.6-1
+  Version table:
+     0.2.6-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+ruby-messagebus-api:
+  Installed: (none)
+  Candidate: 3.0.7+git.20130130.97b34ece.REALLY.1.0.3-3
+  Version table:
+     3.0.7+git.20130130.97b34ece.REALLY.1.0.3-3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+strongswan-starter:
+  Installed: (none)
+  Candidate: 5.9.13-2ubuntu4.24.04.5
+  Version table:
+     5.9.13-2ubuntu4.24.04.5 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+     5.9.13-2ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+ulogd2:
+  Installed: (none)
+  Candidate: 2.0.8-2build1
+  Version table:
+     2.0.8-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages
+zurl:
+  Installed: (none)
+  Candidate: 1.12.0-1ubuntu2
+  Version table:
+     1.12.0-1ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages

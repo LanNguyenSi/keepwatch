@@ -1,0 +1,233 @@
+ca-certificates:
+  Installed: 20260816ubuntu0.24.04.2
+  Candidate: 20260816ubuntu0.24.04.2
+  Version table:
+ *** 20260816ubuntu0.24.04.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     20240203 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+dbus-system-bus-common:
+  Installed: 1.14.10-4ubuntu4.1
+  Candidate: 1.14.10-4ubuntu4.1
+  Version table:
+ *** 1.14.10-4ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.14.10-4ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+findutils:
+  Installed: 4.9.0-5build1
+  Candidate: 4.9.0-5build1
+  Version table:
+ *** 4.9.0-5build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+init-system-helpers:
+  Installed: 1.66ubuntu1
+  Candidate: 1.66ubuntu1
+  Version table:
+ *** 1.66ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libassuan0:
+  Installed: 2.5.6-1build1
+  Candidate: 2.5.6-1build1
+  Version table:
+ *** 2.5.6-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libbsd0:
+  Installed: 0.12.1-1build1.1
+  Candidate: 0.12.1-1build1.1
+  Version table:
+ *** 0.12.1-1build1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     0.12.1-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libcom-err2:
+  Installed: 1.47.0-2.4~exp1ubuntu4.1
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+ *** 1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libedit2:
+  Installed: 3.1-20230828-1build1
+  Candidate: 3.1-20230828-1build1
+  Version table:
+ *** 3.1-20230828-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libgcrypt20:
+  Installed: 1.10.3-2ubuntu0.2
+  Candidate: 1.10.3-2ubuntu0.2
+  Version table:
+ *** 1.10.3-2ubuntu0.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.10.3-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libgpg-error0:
+  Installed: 1.47-3build2.1
+  Candidate: 1.47-3build2.1
+  Version table:
+ *** 1.47-3build2.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.47-3build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libjson-c5:
+  Installed: 0.17-1build1
+  Candidate: 0.17-1build1
+  Version table:
+ *** 0.17-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+liblz4-1:
+  Installed: 1.9.4-1build1.1
+  Candidate: 1.9.4-1build1.1
+  Version table:
+ *** 1.9.4-1build1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.9.4-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libnfnetlink0:
+  Installed: 1.0.2-2build1
+  Candidate: 1.0.2-2build1
+  Version table:
+ *** 1.0.2-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libpam-modules-bin:
+  Installed: 1.5.3-5ubuntu5.7
+  Candidate: 1.5.3-5ubuntu5.7
+  Version table:
+ *** 1.5.3-5ubuntu5.7 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.5.3-5ubuntu5 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libpsl5t64:
+  Installed: 0.21.2-1.1build1
+  Candidate: 0.21.2-1.1build1
+  Version table:
+ *** 0.21.2-1.1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libsasl2-modules:
+  Installed: 2.1.28+dfsg1-5ubuntu3.1
+  Candidate: 2.1.28+dfsg1-5ubuntu3.1
+  Version table:
+ *** 2.1.28+dfsg1-5ubuntu3.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2.1.28+dfsg1-5ubuntu3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libss2:
+  Installed: 1.47.0-2.4~exp1ubuntu4.1
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+ *** 1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+libtirpc-common:
+  Installed: 1.3.4+ds-1.1build1
+  Candidate: 1.3.4+ds-1.1build1
+  Version table:
+ *** 1.3.4+ds-1.1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libxau6:
+  Installed: 1:1.0.9-1build6
+  Candidate: 1:1.0.9-1build6
+  Version table:
+ *** 1:1.0.9-1build6 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libzstd1:
+  Installed: 1.5.5+dfsg2-2build1.1
+  Candidate: 1.5.5+dfsg2-2build1.1
+  Version table:
+ *** 1.5.5+dfsg2-2build1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.5.5+dfsg2-2build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+ncurses-bin:
+  Installed: 6.4+20240113-1ubuntu2.2
+  Candidate: 6.4+20240113-1ubuntu2.2
+  Version table:
+ *** 6.4+20240113-1ubuntu2.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     6.4+20240113-1ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+openssl:
+  Installed: 3.0.13-0ubuntu3.16
+  Candidate: 3.0.13-0ubuntu3.16
+  Version table:
+ *** 3.0.13-0ubuntu3.16 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     3.0.13-0ubuntu3 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+python3-blinker:
+  Installed: 1.7.0-1
+  Candidate: 1.7.0-1
+  Version table:
+ *** 1.7.0-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+python3-launchpadlib:
+  Installed: 1.11.0-6
+  Candidate: 1.11.0-6
+  Version table:
+ *** 1.11.0-6 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+python3-wadllib:
+  Installed: 1.3.6-5
+  Candidate: 1.3.6-5
+  Version table:
+ *** 1.3.6-5 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+systemd:
+  Installed: 255.4-1ubuntu8.18
+  Candidate: 255.4-1ubuntu8.18
+  Version table:
+ *** 255.4-1ubuntu8.18 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     255.4-1ubuntu8 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+ubuntu-keyring:
+  Installed: 2023.11.28.1
+  Candidate: 2023.11.28.1
+  Version table:
+ *** 2023.11.28.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+xz-utils:
+  Installed: 5.6.1+really5.4.5-1ubuntu0.4
+  Candidate: 5.6.1+really5.4.5-1ubuntu0.4
+  Version table:
+ *** 5.6.1+really5.4.5-1ubuntu0.4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     5.6.1+really5.4.5-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages

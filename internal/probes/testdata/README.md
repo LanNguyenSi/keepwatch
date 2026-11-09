@@ -43,9 +43,10 @@ per release), all started by hand and removed afterwards:
    `systemctl is-active`, `fail2ban-client` and the loopback sockets of
    systemd-resolved.
 
-The sections after `base` (`firewall`, `apt`, `keys`, `keycases`, `certs`,
-`disk`, `docker`) run in the plain containers, which need these packages in addition:
-`ufw nftables iptables openssl docker.io procps e2fsprogs util-linux` (and
+The sections after `base` (`firewall`, `apt`, `aptrepo`, `aptphased`, `keys`,
+`keycases`, `certs`, `disk`, `docker`) run in the plain containers, which need
+these packages in addition: `ufw nftables iptables openssl docker.io procps
+e2fsprogs util-linux python3 xz-utils` (and
 network access: `apt` upgrades packages, `docker` pulls `alpine:3`). Docker
 runs inside the privileged container with the `vfs` storage driver, because the
 overlay driver does not work inside a container. `KW_SECTIONS` (a comma
@@ -103,8 +104,11 @@ Fixtures of the second group of kinds (all captured by the sections named in
 | `apt_current` | the same | nothing to upgrade |
 | `apt_notroot` | the same as user 65534 | prints the "NOTE: This is only a simulation!" lines first |
 | `apt_error` | the same with `-o Dir::State::status=<unparseable file>` | exit 100, `E:` lines on stderr (argv differs as above) |
+| `aptcorpus/` | `aptcorpus.sh` (`KW_CORPUS_INSTALLED_EVERY=8 KW_CORPUS_SAMPLE=40`) | a slice of the corpus the apt parsers are tested against: the simulation of the `apt_pending` state, `apt-cache policy` for its packages (`simpolicy.000`), for every 8th installed package (`instpolicy.*`) and for 40 package names out of `apt-cache pkgnames` (`samplepolicy.*`), the names, `META`. Each file is read by `TestAptCorpus` line by line. The full corpus (every installed package, 3000 names, dirty states) is made by the same script without the limits |
+| `aptlr_<scenario>`, `aptlr_<scenario>_policy` | the simulation, and `apt-cache policy -- kwtest` | `aptrepo.sh` builds a local repository with `kwtest` 1.0 installed. `plain`: security 1.1; `superseded`: security 1.1 and updates 1.2; `phased`: updates 1.2 with `Phased-Update-Percentage: 0`; `phasedonly`: updates 1.1 phased, no security; `secphased`: security 1.1 phased; `hold`: security 1.1 and `apt-mark hold`; `holdupdate`: updates 1.1 and a hold; `newdep`: security 1.1 that depends on a package that does not exist. On 22.04 apt lists the package under "kept back" in `phasedonly`; apt 2.8 on 24.04 puts it under "The following upgrades have been deferred due to phasing:" |
+| `apt_real_phased`, `apt_policy_real_phased` | the simulation and the policy of `libnvidia-common-535-server` (22.04 only) | an installed version of a package that the real archive carries with `Phased-Update-Percentage: 40` in `-updates` and `-security`: the version rows end in ` (phased 40%)`. 24.04 has no phased package in the archive when this was captured; its phased rows come from `aptlr_phased` |
 | `sshkey_<type>.pub`, `sshkey_<type>_fp` | files and `ssh-keygen -lf <file>` | throw-away ed25519, rsa and ecdsa keys; `_fp.stdout` is what ssh-keygen prints for the key. `sshkey_cert.pub` is a user certificate; ssh-keygen prints the fingerprint of the key inside it, keepwatch does not compare certificates |
-| `keycases/<NN>.keys`, `.fp`, `.exit`, `.about` | one authorized_keys line and `ssh-keygen -lf <file>` on it | 49 lines per release made by `keycases.sh`: options with quotes and backslash-quote, tabs, an unterminated quote, options without a key type, a NUL after the key, comments of 40000 bytes and a second key in the comment, certificate and unknown types, malformed blobs. `.fp` is what ssh-keygen printed (empty with exit 255 when it finds no key). The authorized_keys tests compare keepwatch with it |
+| `keycases/<NN>.keys`, `.fp`, `.exit`, `.about`, `.login`, `KEYS` | one authorized_keys line, `ssh-keygen -lf <file>` on it, and which of the keys `good`, `evil`, `rsa`, `ecdsa` and the certificate `goodcert` a real sshd (listening on 127.0.0.1:2222 in the container) accepted for a login with that line as the only line of the user's file (`none` when it accepted none); `KEYS` holds the fingerprint of each key | 83 lines per release made by `keycases.sh`: options with quotes and backslash-quote, tabs, an unterminated quote, options without a key type, a NUL after the key, comments of 40000 bytes and a second key in the comment, certificate and unknown types, malformed blobs. `.fp` is what ssh-keygen printed (empty with exit 255 when it finds no key). The authorized_keys tests compare keepwatch with it |
 | `etc_passwd` | `cat /etc/passwd` | the container's passwd plus `alice` (1001, bash), `svc` (1002, nologin) and `bob` (1003, default shell) |
 | `sshd_T_authkeys_custom` | `sshd -T` | drop-in with `AuthorizedKeysFile %h/.ssh/authorized_keys /etc/ssh/keys/%u .ssh/ak_%U`, `AuthorizedKeysCommand /usr/local/bin/kwkeys %u`: sshd prints the tokens unexpanded |
 | `sshd_T_authkeys_none` | `sshd -T` | `AuthorizedKeysFile none` |

@@ -42,13 +42,14 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 //	        fail. It works with /var/cache/apt and /var/lib/apt mounted
 //	        read-only (as a systemd unit with ProtectSystem=strict has them).
 //	apt-cache policy -- <package>...
-//	        for the packages the simulation upgrades: the versions each
-//	        package has, newest first, with the pockets that carry them. No
-//	        lock, no write, exit status 0; apt-cache exits 100 on every error
-//	        ("E: ..." on stderr), which is error here. The packages are named
-//	        in batches of at most 100, after "--", each name matched against
-//	        a strict pattern first; at most 2000 packages are looked up
-//	        (more is error). A package apt-cache prints nothing for is error.
+//	        for the packages the simulation upgrades and for the ones it
+//	        keeps back: the versions each package has, newest first, with the
+//	        pockets that carry them. No lock, no write, exit status 0;
+//	        apt-cache exits 100 on every error ("E: ..." on stderr), which is
+//	        error here. The packages are named in batches of at most 100,
+//	        after "--", each name matched against a strict pattern first; at
+//	        most 2000 packages are looked up (more is error). A package
+//	        apt-cache prints nothing for is error.
 //
 // "apt-get update" is never run, which would write: the check judges the
 // package lists the host has, and says how old they are.
@@ -56,8 +57,19 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // Only exit status 0 is interpreted for either command. The output of
 // apt-get must be understood in full: every line is a known kind of line, the
 // summary line "N upgraded, M newly installed, K to remove and L not
-// upgraded." is present exactly once, and the number of "Inst" lines equals
-// N + M. Anything else is error.
+// upgraded." is present exactly once, the number of "Inst" lines equals
+// N + M, and the number of names under the headings of the packages apt does
+// not upgrade ("The following packages have been kept back:" and, with apt
+// 2.8, "The following upgrades have been deferred due to phasing:") equals L.
+// Anything else is error. The output of apt-cache policy is read the same way,
+// line by line (classifyAptPolicyLine): the version rows may end in
+// " (phased N%)", which apt prints for a version with a
+// Phased-Update-Percentage (apt-private/private-show.cc, function Policy, in
+// apt 2.4.15 and 2.8.4; the commands run with LC_ALL=C, so the word is not
+// translated), and the origin lines carry the priority as printf("%4i")
+// prints it. Everything else is error. The shapes were checked against the
+// output for every installed package and for 3000 package names of the real
+// archive on both releases (testdata/aptcorpus.sh, corpus_test.go).
 //
 // What is a pending security update. The simulation installs the best
 // candidate, and that may come from an "-updates" pocket that is newer than
@@ -73,7 +85,13 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // candidate, with epochs, tildes and revisions handled by apt and not by this
 // code. Exactly one marked row must be present, else error. A package that is
 // newly installed has no installed version; it counts when its candidate
-// comes from a security pocket (the Inst line names the pockets).
+// comes from a security pocket (the Inst line names the pockets). A package
+// that apt keeps back (apt-mark hold, a dependency that cannot be met, or
+// phasing) has no Inst line, but apt names it, and it is looked up in the same
+// way: when a security pocket carries a version newer than the installed one,
+// it is a pending security update whose detail says that apt keeps it back.
+// The simulation leaves such a package alone, so a fix for it would otherwise
+// never be seen.
 //
 // Result: fail with one evidence item per package (subject: the package name,
 // detail: old and new version, the pocket and the security version when the
@@ -84,9 +102,10 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // (one evidence item with subject "apt-lists"); with pending updates the age
 // appears in the summary, and the stale lists are a warning that is reported
 // next to the failure (Outcome.Warnings), so an exception for the updates
-// leaves a warning. The count of "not upgraded" packages (held back, or phased
-// by Ubuntu) is named in the summary; the simulation does not list them, so
-// they are not judged: a held package with a security fix is not seen.
+// leaves a warning. The count of "not upgraded" packages (kept back by a hold,
+// by a dependency, or by Ubuntu's phasing) is named in the summary; all of them
+// are judged, as above, so a held package with a newer security version fails
+// the check.
 type securityUpdates struct{}
 
 func (securityUpdates) Name() string       { return "security_updates" }
@@ -146,7 +165,7 @@ func (u updatesProbe) Run(ctx context.Context, env *Env) Outcome {
 	}
 	base := fmt.Sprintf("%d other upgrade(s) pending", other)
 	if sim.notUpgraded > 0 {
-		base += fmt.Sprintf("; %d package(s) not upgraded (held back or phased)", sim.notUpgraded)
+		base += fmt.Sprintf("; %d package(s) not upgraded (kept back by apt)", sim.notUpgraded)
 	}
 
 	if len(ev) > 0 {
@@ -243,12 +262,16 @@ type aptPkg struct {
 	name, oldVer, newVer string
 	pockets              []string // the "-security" pockets of the candidate, sorted
 	security             bool
+	kept                 bool   // apt keeps the package back; it is not in the simulation's Inst lines
 	secVer, secPocket    string // the newest security version above the installed one (see lookupPolicy)
 }
 
 // detail renders what is pending for a package that counts as a security
 // update.
 func (p aptPkg) detail() string {
+	if p.kept {
+		return fmt.Sprintf("kept back by apt (held, or blocked by a dependency or by phasing); installed %s, the security version %s from %s is newer", p.oldVer, p.secVer, p.secPocket)
+	}
 	if len(p.pockets) > 0 {
 		return fmt.Sprintf("%s -> %s from %s", orNone(p.oldVer), p.newVer, strings.Join(p.pockets, ", "))
 	}
@@ -257,7 +280,20 @@ func (p aptPkg) detail() string {
 
 type aptSim struct {
 	pkgs        []aptPkg
+	keptBack    []string // names under the headings of aptKeptHeadings, sorted
 	notUpgraded int
+}
+
+// The headings of the lists of packages that apt does not upgrade, with the
+// names on the indented lines that follow. apt 2.4 lists all of them under
+// "kept back" (a hold, a dependency that cannot be met, phasing); apt 2.8 puts
+// the ones that phasing defers under a heading of their own, so the two
+// lists together name what the summary counts as "not upgraded"
+// (InstallPackages in apt-private/private-install.cc splits HeldBackPackages
+// into ShowPhasing and ShowKept; Stats counts them all).
+var aptKeptHeadings = map[string]bool{
+	"The following packages have been kept back:":               true,
+	"The following upgrades have been deferred due to phasing:": true,
 }
 
 var (
@@ -279,10 +315,28 @@ func parseAptSimulation(out string) (aptSim, error) {
 	var sim aptSim
 	summaries := 0
 	var upgraded, installed, reinstalled int
+	inKept := false
+	seenKept := map[string]bool{}
 	for i, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
+		if inKept && line != "" && line[0] == ' ' {
+			for _, name := range strings.Fields(line) {
+				if !aptNameRe.MatchString(name) {
+					return aptSim{}, fmt.Errorf("line %d: %q is not a package name in the list of kept back packages", i+1, clean(name, 60))
+				}
+				if !seenKept[name] {
+					seenKept[name] = true
+					sim.keptBack = append(sim.keptBack, name)
+				}
+			}
+			continue
+		}
+		inKept = false
 		switch {
 		case line == "" || line[0] == ' ':
+			continue
+		case aptKeptHeadings[line]:
+			inKept = true
 			continue
 		case aptSummaryRe.MatchString(line):
 			m := aptSummaryRe.FindStringSubmatch(line)
@@ -313,10 +367,14 @@ func parseAptSimulation(out string) (aptSim, error) {
 	if summaries != 1 {
 		return aptSim{}, fmt.Errorf("expected one summary line, found %d", summaries)
 	}
+	if len(sim.keptBack) != sim.notUpgraded {
+		return aptSim{}, fmt.Errorf("the summary announces %d package(s) not upgraded, but %d are named under the headings of the kept back and deferred packages", sim.notUpgraded, len(sim.keptBack))
+	}
 	if want := upgraded + installed + reinstalled; len(sim.pkgs) != want {
 		return aptSim{}, fmt.Errorf("the summary announces %d package(s) to install or upgrade, but the output lists %d", want, len(sim.pkgs))
 	}
 	sort.Slice(sim.pkgs, func(i, j int) bool { return sim.pkgs[i].name < sim.pkgs[j].name })
+	sort.Strings(sim.keptBack)
 	return sim, nil
 }
 
@@ -346,16 +404,103 @@ func parseAptInst(line string) (aptPkg, error) {
 }
 
 var (
-	aptHeaderRe     = regexp.MustCompile(`^([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?):$`)
-	aptPolicyKeyRe  = regexp.MustCompile(`^  (?:Installed|Candidate|Package pin): \S.*$`)
-	aptVersionRowRe = regexp.MustCompile(`^( \*\*\* |     )([0-9A-Za-z][0-9A-Za-z.+~:_-]*) (-?\d+)$`)
-	aptOriginRe     = regexp.MustCompile(`^        (-?\d+) (\S+)(?: (\S+)(?: (\S+))? Packages)?$`)
+	aptHeaderRe    = regexp.MustCompile(`^([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?):$`)
+	aptPolicyKeyRe = regexp.MustCompile(`^  (?:Installed|Candidate|Package pin): \S.*$`)
+	// A version row: " *** " (the installed version) or five blanks, the
+	// version, the priority, and for a phased version " (phased N%)".
+	aptVersionRowRe = regexp.MustCompile(`^( \*\*\* |     )([0-9A-Za-z][0-9A-Za-z.+~:_-]*) (-?\d+)( \(phased ([0-9]|[1-9][0-9])%\))?$`)
+	// An origin line: seven blanks, the priority as printf("%4i") prints it,
+	// a blank and the description of the index file.
+	aptOriginRe = regexp.MustCompile(`^ {7}( *-?\d+) (\S.*)$`)
 )
 
+// aptLine is one classified line of "apt-cache policy -- <names>".
+type aptLine struct {
+	shape  string
+	name   string // header: the package name
+	ver    string // version row: the version
+	pocket string // origin line: the pocket of the suite, "" without one
+}
+
+// Shapes of the lines of apt-cache policy, as the policy function in
+// apt-private/private-show.cc of apt 2.4.15 and 2.8.4 prints them (the
+// output is run with LC_ALL=C, so "phased" is not translated):
+//
+//	header          "<name>:"                       std::cout << Pkg.FullName(true) << ":"
+//	installed       "  Installed: <ver>|(none)"
+//	candidate       "  Candidate: <ver>|(none)"
+//	table           "  Version table:"
+//	row             "     <ver> <prio>"              std::cout << "     " << V.VerStr() << " " << GetPriority(V)
+//	row-installed   " *** <ver> <prio>"
+//	row-phased      the same with " (phased N%)"   printed when PhasedUpdatePercentage() != 100,
+//	                (N is 0..99: values above 100 are ignored by the list parser)
+//	row-installed-phased
+//	origin-suite    "       %4i <site> <release>/<component> <arch> Packages"  Describe(true) of an index file
+//	origin-flat     "       %4i <site> <release> Packages"                     (a flat repository)
+//	origin-file     "       %4i /path"                                          (the dpkg status file)
+//	blank           ""
+//
+// An unknown line has shape "".
+func classifyAptPolicyLine(line string) aptLine {
+	switch {
+	case line == "":
+		return aptLine{shape: "blank"}
+	case aptHeaderRe.MatchString(line):
+		return aptLine{shape: "header", name: aptHeaderRe.FindStringSubmatch(line)[1]}
+	case strings.HasPrefix(line, "  Installed: ") && aptPolicyKeyRe.MatchString(line):
+		return aptLine{shape: "installed"}
+	case strings.HasPrefix(line, "  Candidate: ") && aptPolicyKeyRe.MatchString(line):
+		return aptLine{shape: "candidate"}
+	case aptPolicyKeyRe.MatchString(line):
+		return aptLine{shape: "pin"}
+	case line == "  Version table:":
+		return aptLine{shape: "table"}
+	}
+	if m := aptVersionRowRe.FindStringSubmatch(line); m != nil {
+		shape := "row"
+		if m[1] == " *** " {
+			shape = "row-installed"
+		}
+		if m[4] != "" {
+			shape += "-phased"
+		}
+		return aptLine{shape: shape, ver: m[2]}
+	}
+	if m := aptOriginRe.FindStringSubmatch(line); m != nil {
+		prio, err := strconv.Atoi(strings.TrimSpace(m[1]))
+		if err != nil || fmt.Sprintf("%4d", prio) != m[1] {
+			return aptLine{}
+		}
+		desc := m[2]
+		if strings.HasPrefix(desc, "/") {
+			return aptLine{shape: "origin-file"}
+		}
+		f := strings.Split(desc, " ")
+		for _, x := range f {
+			if x == "" {
+				return aptLine{}
+			}
+		}
+		switch {
+		case len(f) == 4 && f[3] == "Packages":
+			release, _, ok := strings.Cut(f[1], "/")
+			if !ok {
+				return aptLine{}
+			}
+			return aptLine{shape: "origin-suite", pocket: release}
+		case len(f) == 3 && f[2] == "Packages":
+			return aptLine{shape: "origin-flat", pocket: f[1]}
+		}
+	}
+	return aptLine{}
+}
+
 // lookupPolicy asks apt-cache policy for the packages the simulation
-// upgrades and marks as security updates those that have a newer version in a
-// security pocket than the installed one (see securityUpdates). It returns a
-// non-nil outcome (an error) when the answer cannot be had or understood.
+// upgrades and for the packages it keeps back, and marks as security updates
+// those that have a newer version in a security pocket than the installed one
+// (see securityUpdates). A kept back package with such a version is added to
+// the packages as a pending security update. It returns a non-nil outcome (an
+// error) when the answer cannot be had or understood.
 func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 	var names []string
 	seen := map[string]bool{}
@@ -366,8 +511,14 @@ func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 		seen[p.name] = true
 		names = append(names, p.name)
 	}
+	for _, name := range sim.keptBack {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
 	if len(names) > aptPolicyMax {
-		return errorOutcome("%d packages are to be upgraded, more than the %d whose security versions are looked up", len(names), aptPolicyMax)
+		return errorOutcome("%d packages are to be upgraded or are kept back, more than the %d whose security versions are looked up", len(names), aptPolicyMax)
 	}
 	newer := map[string]aptNewerSecurity{}
 	for len(names) > 0 {
@@ -400,11 +551,17 @@ func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 			p.secVer, p.secPocket, p.security = f.version, f.pocket, true
 		}
 	}
+	for _, name := range sim.keptBack {
+		if f, ok := newer[name]; ok {
+			sim.pkgs = append(sim.pkgs, aptPkg{name: name, oldVer: f.installed, kept: true, security: true, secVer: f.version, secPocket: f.pocket})
+		}
+	}
+	sort.Slice(sim.pkgs, func(i, j int) bool { return sim.pkgs[i].name < sim.pkgs[j].name })
 	return nil
 }
 
 // aptNewerSecurity is the newest security version above the installed one.
-type aptNewerSecurity struct{ version, pocket string }
+type aptNewerSecurity struct{ installed, version, pocket string }
 
 // parseAptPolicy reads "apt-cache policy -- <names>" for exactly the packages
 // in want. Per package the output is
@@ -416,7 +573,7 @@ type aptNewerSecurity struct{ version, pocket string }
 //	 *** <version> <priority>          (the installed version)
 //	        <priority> <url> <suite>/<component> <arch> Packages
 //	        100 /var/lib/dpkg/status
-//	     <version> <priority>          (any other version)
+//	     <version> <priority>          (any other version, " (phased N%)" appended for a phased one)
 //	        ...
 //
 // with the versions newest first (apt keeps them sorted by Debian version
@@ -424,9 +581,9 @@ type aptNewerSecurity struct{ version, pocket string }
 // one; the first of them that one of its origin lines puts into a security
 // pocket is reported. The package header is the name apt prints: no
 // architecture for the native one, "name:arch" for others, which is how the
-// simulation names them. Every line must be one of the shapes above, every
-// wanted package must be present exactly once and have exactly one installed
-// row.
+// simulation names them. Every line must be one of the shapes of
+// classifyAptPolicyLine, every wanted package must be present exactly once and
+// have exactly one installed row.
 func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, error) {
 	wanted := map[string]bool{}
 	for _, w := range want {
@@ -437,23 +594,29 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 	var cur string
 	var above, haveRow bool // above: no installed row seen yet in this package
 	var rowAbove bool       // the last version row lies above the installed one
-	var rowVer string
+	var rowVer, instVer string
 	installedRows := 0
 	finish := func() error {
 		if cur != "" && installedRows != 1 {
 			return fmt.Errorf("package %s has %d installed version rows, want 1", cur, installedRows)
 		}
+		// the installed row comes after the newer ones, so it is entered now
+		if f, ok := found[cur]; ok {
+			f.installed = instVer
+			found[cur] = f
+		}
 		return nil
 	}
 	for i, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
-		switch {
-		case line == "":
-		case aptHeaderRe.MatchString(line):
+		l := classifyAptPolicyLine(line)
+		switch l.shape {
+		case "blank":
+		case "header":
 			if err := finish(); err != nil {
 				return nil, err
 			}
-			cur = aptHeaderRe.FindStringSubmatch(line)[1]
+			cur = l.name
 			if !wanted[cur] {
 				return nil, fmt.Errorf("line %d: a package that was not asked for: %q", i+1, clean(cur, 60))
 			}
@@ -461,37 +624,38 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 				return nil, fmt.Errorf("package %s is described twice", cur)
 			}
 			described[cur] = true
-			above, haveRow, rowAbove, rowVer, installedRows = true, false, false, "", 0
-		case cur == "":
-			return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
-		case aptPolicyKeyRe.MatchString(line) || line == "  Version table:":
-		case aptVersionRowRe.MatchString(line):
-			m := aptVersionRowRe.FindStringSubmatch(line)
+			above, haveRow, rowAbove, rowVer, instVer, installedRows = true, false, false, "", "", 0
+		case "":
+			return nil, fmt.Errorf("line %d is not a line of apt-cache policy: %q", i+1, clean(line, 60))
+		case "installed", "candidate", "pin", "table":
+			if cur == "" {
+				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+			}
+		case "row", "row-phased", "row-installed", "row-installed-phased":
+			if cur == "" {
+				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+			}
 			haveRow = true
-			if m[1] == " *** " {
+			if strings.HasPrefix(l.shape, "row-installed") {
 				installedRows++
 				above = false
-				rowAbove, rowVer = false, m[2]
+				rowAbove, rowVer, instVer = false, l.ver, l.ver
 			} else {
-				rowAbove, rowVer = above, m[2]
+				rowAbove, rowVer = above, l.ver
 			}
-		case aptOriginRe.MatchString(line):
+		default: // an origin line
+			if cur == "" {
+				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+			}
 			if !haveRow {
 				return nil, fmt.Errorf("line %d: an origin line before any version", i+1)
 			}
-			if !rowAbove {
-				continue
+			if !rowAbove || l.pocket == "" {
+				continue // a version at or below the installed one; the dpkg status file
 			}
-			m := aptOriginRe.FindStringSubmatch(line)
-			if m[3] == "" {
-				continue // the dpkg status file, or a local source without a suite
+			if _, done := found[cur]; !done && aptPocketRe.MatchString(l.pocket) {
+				found[cur] = aptNewerSecurity{version: rowVer, pocket: l.pocket}
 			}
-			pocket, _, _ := strings.Cut(m[3], "/")
-			if _, done := found[cur]; !done && aptPocketRe.MatchString(pocket) {
-				found[cur] = aptNewerSecurity{version: rowVer, pocket: pocket}
-			}
-		default:
-			return nil, fmt.Errorf("line %d is not a line of apt-cache policy: %q", i+1, clean(line, 60))
 		}
 	}
 	if err := finish(); err != nil {
