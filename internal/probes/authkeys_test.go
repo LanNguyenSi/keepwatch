@@ -925,7 +925,7 @@ func TestAuthorizedKeysTypeStringInTheBlob(t *testing.T) {
 			unreadable("ssh-ed25519 line, blob type "+name, "ssh-ed25519 "+with(ef, name))
 		}
 		wantKeyFP(t, v, "ecdsa, exact name", "ecdsa-sha2-nistp256 "+with(cf, "ecdsa-sha2-nistp256"), ec.fp)
-		for _, name := range []string{"ECDSA", "ecdsa", "ecdsa-sha2-nistp384", "nistp256", "ECDSA-SK"} {
+		for _, name := range []string{"ECDSA", "ecdsa", "ecdsa-sha2-nistp384", "nistp256", "ECDSA-SK", ""} {
 			unreadable("ecdsa line, blob type "+name, "ecdsa-sha2-nistp256 "+with(cf, name))
 		}
 		// sk-ecdsa: the two names of the type; the short name is not accepted
