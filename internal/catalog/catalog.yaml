@@ -1,0 +1,116 @@
+# keepwatch base catalog. One entry per check; ids are dotted and stable
+# (they appear in configuration, exceptions and state). fix_hint is plain
+# text for the operator and is never executed.
+checks:
+  - id: services.fail2ban_active
+    title: fail2ban service is active
+    kind: service_active
+    params:
+      service: fail2ban.service
+    severity: high
+    rationale: fail2ban bans hosts that guess SSH passwords. If it is not running, brute-force attempts go unchecked.
+    fix_hint: Start and enable the service, for example "systemctl enable --now fail2ban".
+
+  - id: services.unattended_upgrades_active
+    title: unattended-upgrades service is active
+    kind: service_active
+    params:
+      service: unattended-upgrades.service
+    severity: medium
+    rationale: Automatic security updates close known vulnerabilities without waiting for an operator.
+    fix_hint: Enable the service, for example "systemctl enable --now unattended-upgrades".
+
+  - id: packages.fail2ban_installed
+    title: fail2ban is installed
+    kind: package_installed
+    params:
+      package: fail2ban
+    severity: high
+    rationale: Without the package there is no protection against repeated login attempts.
+    fix_hint: Install the package, for example "apt install fail2ban".
+
+  - id: packages.unattended_upgrades_installed
+    title: unattended-upgrades is installed
+    kind: package_installed
+    params:
+      package: unattended-upgrades
+    severity: medium
+    rationale: Without the package security updates are only applied when someone remembers to.
+    fix_hint: Install the package, for example "apt install unattended-upgrades".
+
+  - id: packages.needrestart_installed
+    title: needrestart is installed
+    kind: package_installed
+    params:
+      package: needrestart
+    severity: low
+    rationale: needrestart reports services and kernels that still run outdated code after an update.
+    fix_hint: Install the package, for example "apt install needrestart".
+
+  - id: ssh.password_authentication
+    title: SSH password authentication is disabled
+    kind: sshd_effective
+    params:
+      option: passwordauthentication
+      allow: [no]
+    severity: high
+    rationale: Password logins can be guessed or leaked; key-based logins cannot be brute-forced over the network.
+    fix_hint: Set "PasswordAuthentication no" in a drop-in under /etc/ssh/sshd_config.d/ that sorts before any file that sets it to yes, and reload sshd.
+
+  - id: ssh.permit_root_login
+    title: SSH root login is restricted to keys or disabled
+    kind: sshd_effective
+    params:
+      option: permitrootlogin
+      # sshd -T prints a configured "prohibit-password" as "without-password".
+      allow: [no, prohibit-password, without-password]
+    severity: high
+    rationale: Direct root logins with a password hand an attacker the most valuable account on one guess.
+    fix_hint: Set "PermitRootLogin prohibit-password" or "PermitRootLogin no" in a drop-in under /etc/ssh/sshd_config.d/ and reload sshd.
+
+  - id: ssh.keyboard_interactive_authentication
+    title: SSH keyboard-interactive authentication is disabled
+    kind: sshd_effective
+    params:
+      option: kbdinteractiveauthentication
+      # OpenSSH before 8.7 calls the same option challengeresponseauthentication.
+      aliases: [challengeresponseauthentication]
+      allow: [no]
+    severity: medium
+    rationale: Keyboard-interactive can carry password prompts through PAM and bypass a disabled PasswordAuthentication.
+    fix_hint: Set "KbdInteractiveAuthentication no" in a drop-in under /etc/ssh/sshd_config.d/ and reload sshd.
+
+  - id: ssh.x11_forwarding
+    title: SSH X11 forwarding is disabled
+    kind: sshd_effective
+    params:
+      option: x11forwarding
+      allow: [no]
+    severity: low
+    rationale: X11 forwarding exposes the client's display to the server and is rarely needed on a server.
+    fix_hint: Set "X11Forwarding no" in a drop-in under /etc/ssh/sshd_config.d/ and reload sshd.
+
+  - id: fail2ban.sshd_jail
+    title: fail2ban sshd jail is running
+    kind: fail2ban_jail
+    params:
+      jail: sshd
+    severity: high
+    rationale: The sshd jail is what turns failed SSH logins into bans; the package alone does nothing.
+    fix_hint: Enable the jail with "enabled = true" under [sshd] in /etc/fail2ban/jail.d/ and restart fail2ban.
+
+  - id: network.listeners
+    title: Only allowed ports are listening
+    kind: listeners
+    params:
+      allow_loopback: true
+    severity: medium
+    rationale: Every listening socket is attack surface. Anything not in the allowlist was either added by accident or by someone else.
+    fix_hint: Stop the service that opened the port, bind it to a loopback address, or add it to listeners.allow in the keepwatch configuration if it is intended.
+
+  - id: system.reboot_required
+    title: No reboot is pending
+    kind: reboot_required
+    severity: medium
+    rationale: A pending reboot means a kernel or core library update is installed but not running, so the fix is not in effect yet.
+    fix_hint: Schedule a reboot at a convenient time.

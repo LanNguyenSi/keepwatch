@@ -88,12 +88,54 @@ keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented exam
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml
 ```
 
+## Checks
+
+A check is an entry of the catalog (embedded in the binary, one YAML file)
+that names a kind and its parameters. Every kind is read-only: it runs fixed
+programs without a shell, or reads a file, and never touches the network.
+A program that is not installed makes the check `skipped`; a timeout,
+truncated output, an unexpected exit status or output that does not parse
+makes it `error`, never `pass`.
+
+| Kind | Reads | Parameters |
+|---|---|---|
+| `service_active` | `systemctl is-active -- <service>` | `service` (unit name) |
+| `package_installed` | `dpkg-query -W` for one package | `package` (Debian package name) |
+| `sshd_effective` | `sshd -T`, the effective configuration with drop-ins merged in | `option`, `allow` (list), `aliases` (list, optional) |
+| `fail2ban_jail` | `fail2ban-client status <jail>` | `jail` |
+| `listeners` | `ss -Hltnp` and `ss -Hlunp`, compared with `listeners.allow` | `allow_loopback` (default true), `protos` (list, default tcp and udp) |
+| `reboot_required` | `/var/run/reboot-required` and `.pkgs`, and `needrestart -b -k -r l` when installed | none |
+
+Names that reach a command line (unit, package and jail names) are checked
+against a strict pattern, and a leading `-` is always rejected.
+
+Under `checks.<id>` in the configuration, `enabled: false` skips a check,
+`severity` replaces the catalog severity, and `params` are merged over the
+catalog's parameters key by key: a key set in the configuration replaces
+the catalog value as a whole. For the list parameters that means the
+configured list replaces the catalog default (`allow` and `aliases` of
+`sshd_effective`, `protos` of `listeners`); it never extends it. As for any
+list in the configuration, lists set in `conf.d` drop-ins are appended to the
+main file's list before the checks see them, so a drop-in can widen an
+`allow`. The listener allowlist is the top-level `listeners.allow` section,
+not a check parameter. Unknown parameter keys, wrong types and bad values
+are errors, and so is a `checks.<id>` or `exceptions[].check` that names an id
+the catalog does not have (an exception may also name `exception_expired`).
+
+An active exception without `match` covers the whole check. With `match` it
+covers the evidence items whose subject equals `match` exactly (for example
+`tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). A check
+whose failing items are all covered becomes `excepted`; otherwise it stays
+`fail` and the covered items are marked. Exceptions never change an `error`.
+Each expired exception is reported as its own `exception_expired` result
+(severity low).
+
 ## Status
 
-Pre-MVP. The command line skeleton, the program execution layer and the
-strict configuration loader exist; `config check` and `init` are
-implemented, while the commands (`check`, `report`, `doctor`, `install`,
-`uninstall`) are stubs that exit with status 3.
+Pre-MVP. The command line skeleton, the program execution layer, the
+strict configuration loader and the check engine with six check kinds exist;
+`config check` and `init` are implemented, while the commands (`check`,
+`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
 
 ## License
 
