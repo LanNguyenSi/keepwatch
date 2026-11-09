@@ -20,14 +20,21 @@ var DefaultEnv = []string{
 	"LC_ALL=C",
 }
 
+// DefaultTargetDirs are directories whose files are accepted as the resolved
+// target of a program found in a trusted search directory. Ubuntu 26.04 ships
+// Rust coreutils, where /usr/bin/echo is a symlink into this directory.
+var DefaultTargetDirs = []string{"/usr/lib/cargo/bin/coreutils"}
+
 // Real runs programs on the host.
 type Real struct {
-	allow  map[string]bool
-	dirs   []trustedDir
-	extras []extra
+	allow   map[string]bool
+	dirs    []trustedDir
+	targets []string // resolved trusted target dirs
+	extras  []extra
 	// raw option inputs, consumed by NewReal
-	rawDirs   []string
-	rawExtras []string
+	rawDirs    []string
+	rawTargets []string
+	rawExtras  []string
 }
 
 // trustedDir is a search directory, kept in the literal form it was given in
@@ -48,6 +55,15 @@ func WithSearchDirs(dirs ...string) Option {
 	return func(r *Real) { r.rawDirs = dirs }
 }
 
+// WithTrustedTargetDirs adds directories (to DefaultTargetDirs) in which the
+// symlink-resolved target of a program may live. They are NOT search
+// directories: bare names are never looked up in them and an absolute argv[0]
+// there is refused. NewReal panics on a relative entry. Like all trusted
+// directories they must be root-owned and not group- or world-writable.
+func WithTrustedTargetDirs(dirs ...string) Option {
+	return func(r *Real) { r.rawTargets = append(r.rawTargets, dirs...) }
+}
+
 // WithExtraPrograms permits specific programs outside the trusted search
 // directories, given as absolute paths. This is the only way to run an
 // off-path binary. NewReal panics if an entry is not absolute (a programmer
@@ -64,10 +80,14 @@ func WithExtraPrograms(paths ...string) Option {
 
 // NewReal returns a runner that only executes programs whose base name is in
 // allow (for example "sshd", "ss"), subject to the invariant documented on
-// resolve. It panics if a WithSearchDirs or WithExtraPrograms entry is not an
+// resolve. It panics if a WithSearchDirs, WithTrustedTargetDirs or WithExtraPrograms entry is not an
 // absolute path.
 func NewReal(allow []string, opts ...Option) *Real {
-	r := &Real{allow: map[string]bool{}, rawDirs: filepath.SplitList(SearchPath)}
+	r := &Real{
+		allow:      map[string]bool{},
+		rawDirs:    filepath.SplitList(SearchPath),
+		rawTargets: append([]string(nil), DefaultTargetDirs...),
+	}
 	for _, a := range allow {
 		r.allow[a] = true
 	}
@@ -84,6 +104,16 @@ func NewReal(allow []string, opts ...Option) *Real {
 		}
 		r.dirs = append(r.dirs, td)
 	}
+	for _, d := range r.rawTargets {
+		if !filepath.IsAbs(d) {
+			panic("execx: WithTrustedTargetDirs needs absolute paths, got " + strconv.Quote(d))
+		}
+		rd := filepath.Clean(d)
+		if e, err := filepath.EvalSymlinks(d); err == nil {
+			rd = e
+		}
+		r.targets = append(r.targets, rd)
+	}
 	for _, x := range r.rawExtras {
 		if !filepath.IsAbs(x) {
 			panic("execx: WithExtraPrograms needs absolute paths, got " + strconv.Quote(x))
@@ -94,14 +124,15 @@ func NewReal(allow []string, opts ...Option) *Real {
 		}
 		r.extras = append(r.extras, e)
 	}
-	r.rawDirs, r.rawExtras = nil, nil
+	r.rawDirs, r.rawTargets, r.rawExtras = nil, nil, nil
 	return r
 }
 
 // resolve turns argv[0] into the path to execute, applying the allowlist.
 //
 // Invariant: the executed file's symlink-resolved location lies directly in
-// one of the trusted directories, or it is a WithExtraPrograms entry whose
+// one of the trusted directories (the search directories, or the trusted
+// target directories, see below), or it is a WithExtraPrograms entry whose
 // target still equals the pinned one. Nothing else runs, however it is named.
 //
 // No symlink resolution is ever applied to a directory component supplied by
@@ -116,10 +147,15 @@ func NewReal(allow []string, opts ...Option) *Real {
 //     string-equals a trusted directory (literal or resolved form), without
 //     resolving it; it is then handled like a bare name in that directory.
 //     Everything else, including relative paths with '/', is refused.
-//   - The resolved target must be directly in a trusted directory (resolved
-//     form), and either the base name of the target or the base name of the
-//     name as given must be allowlisted. The second clause supports
-//     multi-call binaries such as busybox (/usr/bin/ss -> /bin/busybox).
+//   - The resolved target must be directly in a trusted search directory
+//     (resolved form) or in a trusted target directory (DefaultTargetDirs
+//     plus WithTrustedTargetDirs, resolved once at construction; a missing
+//     directory keeps its literal form, which fails closed). Target
+//     directories apply only to this check: they are never searched for bare
+//     names and never accepted as the directory of an absolute argv[0].
+//   - Either the base name of the target or the base name of the name as
+//     given must be allowlisted. The second clause supports multi-call
+//     binaries such as busybox (/usr/bin/ss -> /bin/busybox).
 //
 // Residual: trust rests on the trusted directories being root-owned and not
 // writable by untrusted users, and on the extras' pinned targets and their
@@ -195,6 +231,11 @@ func (r *Real) isTrustedForm(dir string) bool {
 func (r *Real) isResolvedTrusted(dir string) bool {
 	for _, d := range r.dirs {
 		if dir == d.resolved {
+			return true
+		}
+	}
+	for _, t := range r.targets {
+		if dir == t {
 			return true
 		}
 	}

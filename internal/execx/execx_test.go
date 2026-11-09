@@ -393,7 +393,20 @@ func TestOutputExactlyAtLimitNotTruncated(t *testing.T) {
 	}
 }
 
-func pidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+// pidAlive reports whether pid is a live process. A zombie (killed but not
+// reaped, as when the test runs as PID 1 in a container) counts as gone.
+func pidAlive(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		// format: pid (comm) state ...; comm may contain spaces or parens
+		if i := strings.LastIndexByte(string(b), ')'); i >= 0 && i+2 < len(b) && b[i+2] == 'Z' {
+			return false
+		}
+	}
+	return true
+}
 
 func waitGone(pid int) bool {
 	for i := 0; i < 50; i++ {
@@ -645,5 +658,116 @@ func TestLookupSkipsNonRegularFiles(t *testing.T) {
 	got, err := NewReal([]string{"tool"}, WithSearchDirs(d1, d2)).lookup("tool")
 	if err != nil || got != filepath.Join(d2, "tool") {
 		t.Fatalf("lookup = %q, %v", got, err)
+	}
+}
+
+// fakeToolWithTarget builds a trusted search dir whose "tool" is a symlink
+// into a separate target dir.
+func fakeToolWithTarget(t *testing.T) (searchDir, targetDir, marker string) {
+	t.Helper()
+	searchDir, targetDir = t.TempDir(), t.TempDir()
+	marker = filepath.Join(t.TempDir(), "ran")
+	real := writeScript(t, targetDir, "tool", "touch "+marker)
+	if err := os.Symlink(real, filepath.Join(searchDir, "tool")); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func TestTargetDirRefusedWithoutOption(t *testing.T) {
+	search, _, marker := fakeToolWithTarget(t)
+	r := NewReal([]string{"tool"}, WithSearchDirs(search))
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+	notExecuted(t, marker)
+}
+
+func TestTargetDirAcceptedWithOption(t *testing.T) {
+	search, target, marker := fakeToolWithTarget(t)
+	r := NewReal([]string{"tool"}, WithSearchDirs(search), WithTrustedTargetDirs(target))
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("expected execution")
+	}
+	if _, err := r.Run(bg, []string{filepath.Join(search, "tool")}, Opts{}); err != nil {
+		t.Fatalf("absolute in search dir: %v", err)
+	}
+}
+
+// Target dirs are not search dirs: an absolute argv[0] inside one is refused
+// and bare names are never looked up there.
+func TestTargetDirIsNotASearchDir(t *testing.T) {
+	search, target, marker := fakeToolWithTarget(t)
+	writeScript(t, target, "only-in-target", "touch "+marker)
+	r := NewReal([]string{"tool", "only-in-target"}, WithSearchDirs(search), WithTrustedTargetDirs(target))
+	resolvedTarget, _ := filepath.EvalSymlinks(target)
+	for _, dir := range []string{target, resolvedTarget} {
+		if _, err := r.Run(bg, []string{filepath.Join(dir, "tool")}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+			t.Fatalf("absolute in target dir %s: err = %v, want ErrNotAllowed", dir, err)
+		}
+	}
+	if _, err := r.Run(bg, []string{"only-in-target"}, Opts{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bare name only in target dir: err = %v, want ErrNotFound", err)
+	}
+	if _, err := r.lookup("only-in-target"); err == nil {
+		t.Fatal("lookup searched the target dir")
+	}
+	notExecuted(t, marker)
+}
+
+func TestRelativeTargetDirRejected(t *testing.T) {
+	mustPanic(t, func() { NewReal(nil, WithTrustedTargetDirs("relative/dir")) })
+}
+
+func TestTargetDirMissingFailsClosed(t *testing.T) {
+	search, _, marker := fakeToolWithTarget(t)
+	r := NewReal([]string{"tool"}, WithSearchDirs(search), WithTrustedTargetDirs(filepath.Join(t.TempDir(), "nope")))
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+	notExecuted(t, marker)
+}
+
+// A symlinked target dir is resolved once; its resolved form is trusted.
+func TestTargetDirSymlinkResolvedAtConstruction(t *testing.T) {
+	search, target, _ := fakeToolWithTarget(t)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReal([]string{"tool"}, WithSearchDirs(search), WithTrustedTargetDirs(alias))
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultAndOptionTargetDirsCombine(t *testing.T) {
+	extra := t.TempDir()
+	r := NewReal(nil, WithTrustedTargetDirs(extra))
+	want := map[string]bool{"/usr/lib/cargo/bin/coreutils": false}
+	resolvedExtra, _ := filepath.EvalSymlinks(extra)
+	want[resolvedExtra] = false
+	for _, d := range r.targets {
+		if _, ok := want[d]; ok {
+			want[d] = true
+		}
+	}
+	for d, ok := range want {
+		if !ok {
+			t.Errorf("targets %v lack %s", r.targets, d)
+		}
+	}
+}
+
+func TestDefaultTargetDirsIncludeRustCoreutils(t *testing.T) {
+	found := false
+	for _, d := range DefaultTargetDirs {
+		found = found || d == "/usr/lib/cargo/bin/coreutils"
+	}
+	if !found {
+		t.Fatalf("DefaultTargetDirs = %v", DefaultTargetDirs)
 	}
 }
