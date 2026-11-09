@@ -26,7 +26,7 @@ func TestCertExpiryFollowsLinksIntoATrustedArchive(t *testing.T) {
 
 	o := execAt(p, fake.New(nil), fsys, t0)
 	wantStatus(t, o, result.Fail)
-	if !eq(subjects(o), []string{live}) || !strings.Contains(o.Evidence[0].Detail, ", file "+archive[:100]) {
+	if !eq(subjects(o), []string{live}) || !strings.Contains(o.Evidence[0].Detail, ", file "+archive[:60]) {
 		t.Fatalf("evidence %+v", o.Evidence)
 	}
 
