@@ -161,6 +161,9 @@ func (v *validator) date(n *yaml.Node, path string) (string, bool, bool) {
 
 func (v *validator) host(n *yaml.Node) Host {
 	var h Host
+	if isNull(n) { // a null section counts as absent
+		return h
+	}
 	if !isMapping(n) {
 		v.fail(n, "host: expected a mapping")
 		return h
@@ -181,6 +184,9 @@ func (v *validator) host(n *yaml.Node) Host {
 
 func (v *validator) checks(n *yaml.Node) map[string]Check {
 	out := map[string]Check{}
+	if isNull(n) { // a null section counts as absent
+		return out
+	}
 	if !isMapping(n) {
 		v.fail(n, "checks: expected a mapping")
 		return out
@@ -235,6 +241,9 @@ func (v *validator) checks(n *yaml.Node) map[string]Check {
 
 func (v *validator) listeners(n *yaml.Node) Listeners {
 	var ls Listeners
+	if isNull(n) { // a null section counts as absent
+		return ls
+	}
 	if !isMapping(n) {
 		v.fail(n, "listeners: expected a mapping")
 		return ls
@@ -243,7 +252,9 @@ func (v *validator) listeners(n *yaml.Node) Listeners {
 		k, val := n.Content[i], n.Content[i+1]
 		switch k.Value {
 		case "allow":
-			ls.Allow = v.allow(val, "listeners.allow")
+			if !isNull(val) { // a null list counts as absent
+				ls.Allow = v.allow(val, "listeners.allow")
+			}
 		default:
 			v.fail(k, "listeners: unknown key "+strconv.Quote(k.Value))
 		}
@@ -311,6 +322,9 @@ func (v *validator) allow(seq *yaml.Node, path string) []Listener {
 
 func (v *validator) authorizedKeys(n *yaml.Node) AuthorizedKeys {
 	ak := AuthorizedKeys{Expected: map[string][]string{}}
+	if isNull(n) { // a null section counts as absent
+		return ak
+	}
 	if !isMapping(n) {
 		v.fail(n, "authorized_keys: expected a mapping")
 		return ak
@@ -355,6 +369,9 @@ func (v *validator) authorizedKeys(n *yaml.Node) AuthorizedKeys {
 
 func (v *validator) exceptions(seq *yaml.Node) []Exception {
 	var out []Exception
+	if isNull(seq) { // a null section counts as absent
+		return out
+	}
 	if !isSequence(seq) {
 		v.fail(seq, "exceptions: expected a list")
 		return out
@@ -422,6 +439,9 @@ func (v *validator) exceptions(seq *yaml.Node) []Exception {
 
 func (v *validator) notify(n *yaml.Node) Notify {
 	var nt Notify
+	if isNull(n) { // a null section counts as absent
+		return nt
+	}
 	if !isMapping(n) {
 		v.fail(n, "notify: expected a mapping")
 		return nt
@@ -490,7 +510,10 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 
 func (v *validator) ntfyURL(n *yaml.Node, raw string) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	// u.Hostname is the host without its port: an authority like ":443"
+	// has a Host but no host. A Host ending in ':' carries an empty
+	// port ("https://host:/x"), which is not a valid URL either.
+	if err != nil || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
 		v.fail(n, "notify.ntfy.url: "+strconv.Quote(raw)+" is not a valid absolute URL")
 		return
 	}
@@ -521,10 +544,11 @@ func isLoopback(host string) bool {
 }
 
 // checkTokenFile validates the token file's existence, type, size,
-// permissions and ownership through the same secure-open used by
-// ReadToken, then closes it without reading it. The checks run on the
-// fd, so a later path swap cannot pass validation on one file and read
-// another; ReadToken re-checks when it opens.
+// link count, permissions and ownership through the same secure-open
+// used by ReadToken, then closes it without reading it. Every check
+// runs on the open fd and the file's directory passes the conf.d
+// directory rules, so a later openSecure sees any path swap; ReadToken
+// re-checks when it opens.
 func (v *validator) checkTokenFile(n *yaml.Node, path string) {
 	f, _, err := openSecure(path, tokenPolicy(v.ownerOf))
 	if err != nil {
@@ -536,6 +560,12 @@ func (v *validator) checkTokenFile(n *yaml.Node, path string) {
 		return
 	}
 	f.Close()
+	// The directory holding the secret is checked like conf.d: a
+	// group-writable or foreign directory lets another user swap the
+	// token between validation and the read.
+	if derr := checkConfigDir(filepath.Dir(path), v.ownerOf); derr != nil {
+		v.fail(n, "notify.ntfy.token_file: "+cleanErr(derr))
+	}
 }
 
 func contains(set []string, s string) bool {

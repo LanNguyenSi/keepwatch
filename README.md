@@ -44,22 +44,31 @@ More rules, all reported with `file:line`:
 - Scalars are matched by YAML type: `enabled` is true/false, `port` is
   an integer, strings are strings (quoted `"22"` is not a port),
   `expires` is a `YYYY-MM-DD` date. A null (`~`) value counts as absent
-  for optional fields and is an error for required ones.
-- `*.yml` in `conf.d` is an error; use the `.yaml` extension.
-- Because keepwatch runs as root, loaded files and the `conf.d`
-  directory must not be symlinks, must be owned by root or the running
-  user, and must not be writable by group or other (mode 0644 or
-  stricter for files). Symlinks are never followed and checks run on
-  the open file itself.
+  for optional fields and is an error for required ones; a section key
+  with a null value (an empty `exceptions:` or `checks:`, for example)
+  counts as an absent section.
+- `*.yml` in `conf.d` is an error, and so is `a.YAML`, `b.Yml` or any
+  other case of the extension: use lower-case `.yaml`. A
+  subdirectory inside `conf.d` is an error too.
+- Because keepwatch runs as root, the final component of every loaded
+  path is never followed (a symlink is refused), and each file's type,
+  size (max 1 MiB), permissions (no group or other write bits, mode
+  0644 or stricter) and ownership (root or the running user) are
+  checked on the open file descriptor itself. The directories holding
+  the main file, `conf.d` and the token file must be real directories
+  owned by root or the running user and not writable by group or
+  other; deeper ancestor directories are not checked (known limit).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
   http only for loopback; a URL port must be 1-65535).
 - `notify.ntfy.token_file` must be a regular file, at most 4096 bytes,
-  mode 0600 or stricter, owned by the running user; it is validated
-  without reading and re-checked when the token is read, so swapping
-  the path after startup cannot redirect the secret.
+  with exactly one hard link, mode 0600 or stricter, owned by the
+  running user and not empty; it is validated without reading and
+  fully re-checked every time the token is read.
 - `keepwatch init` writes the example file atomically (temp file +
-  rename, mode 0640) and refuses to follow symlinks; `--force` only
-  replaces a regular file.
+  rename, mode 0640) into a directory that must not be a symlink or
+  writable by group or other and must be owned by root or the running
+  user; it refuses to follow symlinks, and `--force` only replaces a
+  regular file.
 
 ```sh
 keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example

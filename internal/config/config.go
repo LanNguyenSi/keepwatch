@@ -6,9 +6,13 @@
 // has KnownFields(true) set; the schema is then validated against the
 // parsed yaml.Node tree so that every error names file and line and so
 // that all errors are collected, not only the first. A *.yml file in
-// conf.d is an error (use the .yaml extension), and a file whose root
-// is not a mapping (an empty or null document is fine) is an error; a
-// file never replaces another file's root.
+// conf.d is an error (use the .yaml extension), a .yaml or .yml
+// extension in any other case is an error (use lower-case .yaml), and
+// so is a subdirectory inside conf.d; a file whose root is not a
+// mapping (an empty or null document is fine) is an error; a file
+// never replaces another file's root. A section key with a null value
+// (host, checks, listeners, listeners.allow, authorized_keys,
+// exceptions, notify) counts as an absent section.
 //
 // Merge rule: a conf.d file may only set or override the top-level
 // sections it names. Mappings merge per key, recursively, and a key set
@@ -26,22 +30,29 @@
 // as absent for optional fields and is an error where the field is
 // required.
 //
-// File access rules, because keepwatch runs as root: every loaded file
-// (main and conf.d) is opened without ever following a symlink, and
-// its type, size (max 1 MiB), permissions (no group or other write
-// bits) and ownership (uid 0 or the running user) are checked on the
-// file descriptor itself. The conf.d directory itself must be a real
-// directory, owned by uid 0 or the running user, and not writable by
-// group or other. notify.ntfy.token_file is stricter: regular file, at
-// most 4096 bytes, mode 0600 or stricter, owned by the running user,
-// validated without reading it and re-checked every time ReadToken
-// opens it, so swapping the path after Load cannot redirect the read.
+// File access rules, because keepwatch runs as root: the final path
+// component of every loaded file (main and conf.d) is never followed
+// (a symlink is refused), and the file's type, size (max 1 MiB),
+// permissions (no group or other write bits) and ownership (uid 0 or
+// the running user) are checked on the open file descriptor itself, so
+// a swap of the path between validation and a later open is caught by
+// the next check, not slipped past. The directories holding the main
+// file, conf.d and notify.ntfy.token_file must each be a real
+// directory (not a symlink), owned by uid 0 or the running user, and
+// not writable by group or other; deeper ancestor directories are not
+// checked (known limit). notify.ntfy.token_file is stricter: regular
+// file, at most 4096 bytes, exactly one hard link, mode 0600 or
+// stricter, owned by the running user and not empty; it is validated
+// without reading it and fully re-checked every time ReadToken opens
+// it.
 package config
 
 import (
 	_ "embed"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -157,6 +168,14 @@ func Load(path string, opts ...Option) (*Config, error) {
 	}
 
 	var errs Errors
+	// keepwatch runs as root: the directory holding the main file is
+	// part of the trust chain too. It must be a real, owned,
+	// non-writable directory; a missing one is reported as the missing
+	// main file instead.
+	mainDir := filepath.Dir(path)
+	if derr := checkConfigDir(mainDir, opt.ownerOf); derr != nil && !isNotExist(derr) {
+		errs = append(errs, Error{File: mainDir, Msg: trimPath(cleanErr(derr), mainDir)})
+	}
 	policy := configPolicy(opt.ownerOf)
 	root, origins, perrs := parseFile(path, policy)
 	errs = append(errs, perrs...)
@@ -178,15 +197,23 @@ func Load(path string, opts ...Option) (*Config, error) {
 		// redirect the token. It must be a real, owned, non-writable
 		// directory before any of its files are read.
 		if derr := checkConfigDir(dir, opt.ownerOf); derr != nil {
-			errs = append(errs, Error{File: dir, Msg: cleanErr(derr)})
+			errs = append(errs, Error{File: dir, Msg: trimPath(cleanErr(derr), dir)})
 		} else {
-			for _, name := range names {
+			for _, e := range names {
+				name := e.Name()
 				p := filepath.Join(dir, name)
-				switch filepath.Ext(name) {
-				case ".yaml":
+				switch {
+				case e.IsDir():
+					errs = append(errs, Error{File: p, Msg: "conf.d must not contain directories"})
+				case filepath.Ext(name) == ".yaml":
 					confd = append(confd, p)
-				case ".yml":
+				case filepath.Ext(name) == ".yml":
 					errs = append(errs, Error{File: p, Msg: `unsupported extension ".yml": use the .yaml extension`})
+				case strings.EqualFold(filepath.Ext(name), ".yaml") || strings.EqualFold(filepath.Ext(name), ".yml"):
+					// "a.YAML" and "b.Yml" would look loaded to anyone
+					// who globs case-insensitively: only the exact
+					// lower-case extensions count.
+					errs = append(errs, Error{File: p, Msg: "unsupported extension " + strconv.Quote(filepath.Ext(name)) + ": use lower-case .yaml"})
 				}
 			}
 		}

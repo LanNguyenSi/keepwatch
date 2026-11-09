@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -56,9 +57,9 @@ func parseFile(file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, 
 	origins := map[*yaml.Node]string{}
 	f, _, err := openSecure(file, p)
 	if err != nil {
-		return nil, origins, Errors{{File: file, Msg: "cannot read: " + cleanErr(err)}}
+		return nil, origins, Errors{{File: file, Msg: "cannot read: " + trimPath(cleanErr(err), file)}}
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxConfigSize))
+	data, err := readCapped(f, maxConfigSize)
 	f.Close()
 	if err != nil {
 		return nil, origins, Errors{{File: file, Msg: "cannot read: " + cleanErr(err)}}
@@ -151,19 +152,21 @@ func syntaxError(file string, err error) *Error {
 
 func cleanErr(err error) string { return err.Error() }
 
+// trimPath drops a leading "<path>: " from msg: an Error is already
+// prefixed with its File, so a message that starts with the same path
+// must not name it twice.
+func trimPath(msg, path string) string {
+	if p := path + ": "; strings.HasPrefix(msg, p) {
+		return msg[len(p):]
+	}
+	return msg
+}
+
 func isNotExist(err error) bool { return errors.Is(err, os.ErrNotExist) }
 
-func osReadDir(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	return names, nil
+// osReadDir lists dir in the lexicographic order os.ReadDir returns,
+// keeping directories (conf.d rejects them) but never hidden entries
+// or anything but direct children.
+func osReadDir(dir string) ([]os.DirEntry, error) {
+	return os.ReadDir(dir)
 }

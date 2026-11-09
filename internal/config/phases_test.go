@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -17,6 +18,42 @@ func TestConfDYmlIsError(t *testing.T) {
 	yml := filepath.Join(dir, "conf.d", "a.yml")
 	if !containsSub(errs, yml+`: unsupported extension ".yml": use the .yaml extension`) {
 		t.Errorf("errors %q lack the .yml error for %s", errs, yml)
+	}
+}
+
+func TestConfDExtensionCaseIsError(t *testing.T) {
+	// A .yaml/.yml extension in any other case is an error with a
+	// clear message: only the exact lower-case extension is loaded,
+	// and a file that would look loaded must not be skipped silently.
+	dir, main := setup(t, map[string]string{
+		"keepwatch.yaml": "state_dir: /from-main\n",
+		"conf.d/a.YAML":  "state_dir: /from-a\n",
+		"conf.d/b.Yml":   "state_dir: /from-b\n",
+	})
+	errs := errsOf(t, main)
+	for _, name := range []struct{ file, ext string }{
+		{"a.YAML", ".YAML"},
+		{"b.Yml", ".Yml"},
+	} {
+		p := filepath.Join(dir, "conf.d", name.file)
+		want := "unsupported extension " + strconv.Quote(name.ext) + ": use lower-case .yaml"
+		if !containsSub(errs, p+": "+want) {
+			t.Errorf("errors %q lack %q for %s", errs, want, p)
+		}
+	}
+}
+
+func TestConfDSubdirectoryIsError(t *testing.T) {
+	// A subdirectory inside conf.d is an error: silently skipping it
+	// would let a file tree that looks loaded never be loaded.
+	dir, main := setup(t, map[string]string{
+		"keepwatch.yaml": "state_dir: /from-main\n",
+		"conf.d/sub/":    "",
+	})
+	errs := errsOf(t, main)
+	sub := filepath.Join(dir, "conf.d", "sub")
+	if !containsSub(errs, sub+": conf.d must not contain directories") {
+		t.Errorf("errors %q lack the subdirectory error for %s", errs, sub)
 	}
 }
 

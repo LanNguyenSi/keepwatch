@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -132,4 +133,50 @@ func TestTokenExactlyAtCapIsRead(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("ReadToken returned %d bytes, want %d", len(got), len(want))
 	}
+}
+
+func TestReadTokenEmptyRejected(t *testing.T) {
+	// A token file that is empty, or holds only a newline, passes the
+	// Load-time checks but ReadToken rejects the empty token.
+	for _, content := range []string{"", "\n", "\r\n"} {
+		t.Run("content "+strconv.Quote(content), func(t *testing.T) {
+			dir, main := setup(t, nil)
+			token := filepath.Join(dir, "token")
+			writeMode(t, token, []byte(content), 0o600)
+			cfg := loadTokenCfg(t, main, token)
+			if _, err := cfg.ReadToken(); err == nil || !strings.Contains(err.Error(), "token is empty") {
+				t.Fatalf("ReadToken of an empty token: err = %v, want an empty-token error", err)
+			}
+		})
+	}
+}
+
+func TestReadCapped(t *testing.T) {
+	// readCapped takes at most max+1 bytes and rejects a reader that
+	// delivers more than max: exactly max is ok, max+1 is an error,
+	// empty is ok.
+	t.Run("exactly max bytes is ok", func(t *testing.T) {
+		b, err := readCapped(bytes.NewReader(bytes.Repeat([]byte("x"), 10)), 10)
+		if err != nil {
+			t.Fatalf("readCapped at the cap: %v", err)
+		}
+		if len(b) != 10 {
+			t.Errorf("read %d bytes, want 10", len(b))
+		}
+	})
+	t.Run("max+1 bytes is rejected", func(t *testing.T) {
+		_, err := readCapped(bytes.NewReader(bytes.Repeat([]byte("x"), 11)), 10)
+		if err == nil || !strings.Contains(err.Error(), "larger than 10 bytes") {
+			t.Fatalf("readCapped over the cap: err = %v, want a larger-than-10-bytes error", err)
+		}
+	})
+	t.Run("empty is ok", func(t *testing.T) {
+		b, err := readCapped(bytes.NewReader(nil), 10)
+		if err != nil {
+			t.Fatalf("readCapped of empty input: %v", err)
+		}
+		if len(b) != 0 {
+			t.Errorf("read %d bytes, want 0", len(b))
+		}
+	})
 }

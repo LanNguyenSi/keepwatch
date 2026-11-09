@@ -7,9 +7,10 @@ import (
 )
 
 func TestURLNegativeEmptyHost(t *testing.T) {
-	// https:///x and http:///x parse but have no host: they are not
-	// valid absolute URLs.
-	for _, u := range []string{"https:///x", "http:///x"} {
+	// https:///x and http:///x parse but have no host; ":443" has a
+	// Host but an empty host part; "host:" has an empty port: none of
+	// them is a valid absolute URL.
+	for _, u := range []string{"https:///x", "http:///x", "https://:443/x", "https://host:/x"} {
 		t.Run(u, func(t *testing.T) {
 			yaml := "notify:\n  ntfy:\n    url: " + u + "\n    topic: t\n"
 			_, main := setup(t, map[string]string{"keepwatch.yaml": yaml})

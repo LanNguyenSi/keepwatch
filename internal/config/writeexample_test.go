@@ -85,6 +85,68 @@ func TestWriteExampleSymlinks(t *testing.T) {
 	})
 }
 
+func TestWriteExampleDirectoryChecks(t *testing.T) {
+	// An existing target directory must be non-writable by group or
+	// other and owned by uid 0 or the running user, like every other
+	// configuration path: writing the example into a directory another
+	// user can write lets that user swap the file for a symlink.
+	t.Run("world-writable dir is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(sub, 0o777); err != nil { // defeat the umask
+			t.Fatal(err)
+		}
+		err := WriteExample(filepath.Join(sub, "keepwatch.yaml"), false)
+		if err == nil || !strings.Contains(err.Error(), "allow group or other writes") {
+			t.Fatalf("WriteExample into a world-writable dir: err = %v, want a permissions refusal", err)
+		}
+	})
+	t.Run("group-writable dir is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o770); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(sub, 0o770); err != nil { // defeat the umask
+			t.Fatal(err)
+		}
+		err := WriteExample(filepath.Join(sub, "keepwatch.yaml"), false)
+		if err == nil || !strings.Contains(err.Error(), "allow group or other writes") {
+			t.Fatalf("WriteExample into a group-writable dir: err = %v, want a permissions refusal", err)
+		}
+	})
+	t.Run("foreign-owner dir is refused via injection", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := WriteExample(filepath.Join(sub, "keepwatch.yaml"), false, WithOwnerOf(injectUID("sub", 60001)))
+		if err == nil || !strings.Contains(err.Error(), "owned by uid 60001, want uid 0 or") {
+			t.Fatalf("WriteExample into a foreign-owner dir: err = %v, want an ownership refusal", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(sub, "keepwatch.yaml")); !os.IsNotExist(statErr) {
+			t.Error("the refusal must not write the file")
+		}
+	})
+	t.Run("root-owned dir is accepted via injection", func(t *testing.T) {
+		if os.Getuid() == 0 {
+			t.Skip("running as root: an injected uid 0 cannot be told from the real owner")
+		}
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteExample(filepath.Join(sub, "keepwatch.yaml"), false, WithOwnerOf(injectUID("sub", 0))); err != nil {
+			t.Fatalf("WriteExample into a root-owned dir: %v", err)
+		}
+	})
+}
+
 func TestWriteExampleModeIndependentOfUmask(t *testing.T) {
 	// The file must end up 0640 (and a created directory 0750) no
 	// matter the process umask: the temp file is chmodded explicitly

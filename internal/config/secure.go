@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strconv"
@@ -36,11 +37,12 @@ type securePolicy struct {
 	ownerOf    OwnerOf
 	ownerMsg   string // full message: path, uid
 	isExpected func(uid int) bool
+	nlink1     bool // require exactly one hard link (secrets only)
 }
 
 // tokenPolicy is the rule for notify.ntfy.token_file: a regular file
-// of at most maxTokenSize bytes, readable and writable only by its
-// owner, owned by the running user.
+// of at most maxTokenSize bytes with exactly one hard link, readable
+// and writable only by its owner, owned by the running user.
 func tokenPolicy(of OwnerOf) securePolicy {
 	uid := os.Getuid()
 	s := strconv.Itoa(uid)
@@ -51,6 +53,7 @@ func tokenPolicy(of OwnerOf) securePolicy {
 		ownerOf:    of,
 		ownerMsg:   "%s: owned by uid %d, expected uid " + s,
 		isExpected: func(u int) bool { return u == uid },
+		nlink1:     true,
 	}
 }
 
@@ -72,15 +75,30 @@ func configPolicy(of OwnerOf) securePolicy {
 	}
 }
 
+// readCapped reads at most max bytes from r: it takes max+1 bytes at
+// most so a reader that delivers more than max is reported instead of
+// silently truncated.
+func readCapped(r io.Reader, max int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("larger than %d bytes", max)
+	}
+	return b, nil
+}
+
 // openSecure opens path and enforces the policy on the file the fd
-// refers to: it never follows a symlink (O_NOFOLLOW), never blocks on
-// a FIFO (O_NONBLOCK), fstats the fd, and requires a regular file no
-// larger than maxSize with no permMask permission bits and an
-// acceptable owner. Existence, type, size, permissions and ownership
-// are all checked on the one open fd, so swapping the path between
-// validation and a later read cannot substitute a different file: the
-// next openSecure call sees the swap, and the already-open fd keeps
-// pointing at the original inode. The caller must close the file.
+// refers to: the final path component is never followed
+// (O_NOFOLLOW), a FIFO never blocks (O_NONBLOCK), and the fd's fstat
+// result must be a regular file no larger than maxSize (exactly one
+// hard link when nlink1) with no permMask permission bits and an
+// acceptable owner. Because every check runs on the one open fd, a
+// later openSecure call sees a swap of the path and the already-open
+// fd keeps pointing at the original inode; keeping swaps off the path
+// is the job of the directory rules in checkConfigDir. The caller must
+// close the file.
 func openSecure(path string, p securePolicy) (*os.File, fs.FileInfo, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -105,6 +123,17 @@ func openSecure(path string, p securePolicy) (*os.File, fs.FileInfo, error) {
 	if fi.Mode().Perm()&p.permMask != 0 {
 		f.Close()
 		return nil, nil, fmt.Errorf(p.permMsg, path, fi.Mode().Perm())
+	}
+	if p.nlink1 {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			f.Close()
+			return nil, nil, fmt.Errorf("%s: cannot determine the link count of the open file", path)
+		}
+		if st.Nlink != 1 {
+			f.Close()
+			return nil, nil, fmt.Errorf("%s: has %d hard links, want exactly 1", path, st.Nlink)
+		}
 	}
 	uid, err := p.ownerOf(fi)
 	if err != nil {
