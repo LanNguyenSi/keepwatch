@@ -41,6 +41,11 @@ More rules, all reported with `file:line`:
   is treated as empty; a file never replaces another file's root).
 - A key repeated within the same mapping of the same file is an error
   at any depth; the same key set again by a later file is an override.
+  Validation runs on the merged result, so a value that a later file
+  replaces is not checked on its own (known limit).
+- `conf.d` must not be a symlink, dangling or not.
+- `notify.ntfy.token_file` must be a clean absolute path (no `.`, `..`
+  or repeated `/`).
 - Scalars are matched by YAML type: `enabled` is true/false, `port` is
   an integer, strings are strings (quoted `"22"` is not a port),
   `expires` is a `YYYY-MM-DD` date. A null (`~`) value counts as absent

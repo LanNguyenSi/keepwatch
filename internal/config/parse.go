@@ -52,8 +52,10 @@ func (es Errors) Error() string {
 // empty file yields a nil root and no error. Problems found while
 // parsing (syntax, content after the first document reported at the
 // line of the second document, duplicate keys within one mapping at
-// any depth) are returned as Errors; a file with a problem yields a
-// nil root.
+// any depth) are returned as Errors. A file with a syntax problem
+// yields a nil root; a file with duplicate keys still returns its
+// root, which is merged and validated, and Load fails on the kept
+// errors.
 func parseFile(file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, Errors) {
 	origins := map[*yaml.Node]string{}
 	f, _, err := openSecure(file, p)

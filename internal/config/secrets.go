@@ -20,10 +20,14 @@ func (c *Config) ReadToken() ([]byte, error) {
 		return nil, errors.New("config: notify.ntfy.token_file is not set")
 	}
 	path := c.Notify.Ntfy.TokenFile
-	if err := checkConfigDir(filepath.Dir(path), ownerOf); err != nil {
+	of := c.ownerOf
+	if of == nil {
+		of = ownerOf
+	}
+	if err := checkConfigDir(filepath.Dir(path), of); err != nil {
 		return nil, fmt.Errorf("notify.ntfy.token_file: %v", err)
 	}
-	f, _, err := openSecure(path, tokenPolicy(ownerOf))
+	f, _, err := openSecure(path, tokenPolicy(of))
 	if err != nil {
 		return nil, err
 	}

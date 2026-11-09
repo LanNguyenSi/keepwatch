@@ -29,7 +29,10 @@
 // (or a block whose lines are all commented out) leaves the main file's
 // notify section intact. A null in an earlier file does not block a
 // later file: the later value applies. A missing conf.d directory is
-// fine; a missing main file is an error. Repeated
+// fine; a missing main file is an error, and a conf.d that is a
+// symlink (dangling or not) is an error. Validation runs on the
+// merged tree, so a value replaced by a later file is not validated
+// on its own (known limit). Repeated
 // keys within one mapping of one file are an error at any depth
 // (duplicate key "x" (first at line N)); a key repeated across files is
 // an override and fine.
@@ -96,6 +99,8 @@ type Config struct {
 	AuthorizedKeys AuthorizedKeys
 	Exceptions     []Exception
 	Notify         Notify
+
+	ownerOf OwnerOf // the owner lookup Load used; ReadToken reuses it
 }
 
 // Host carries free-form information about this machine.
@@ -201,7 +206,14 @@ func Load(path string, opts ...Option) (*Config, error) {
 	var confd []string
 	dir := filepath.Join(filepath.Dir(path), "conf.d")
 	names, dirErr := os.ReadDir(dir)
+	// os.ReadDir follows a symlink, and a dangling one reports ENOENT,
+	// which would read as "no conf.d" and silently drop every drop-in.
+	// Any symlink at conf.d is an error, decided by Lstat first.
+	li, lerr := os.Lstat(dir)
+	confdLink := lerr == nil && li.Mode()&os.ModeSymlink != 0
 	switch {
+	case confdLink:
+		errs = append(errs, Error{File: dir, Msg: "must not be a symlink"})
 	case dirErr == nil:
 		// keepwatch runs as root: a conf.d that group or other can
 		// write, or that is a symlink, could suppress findings or

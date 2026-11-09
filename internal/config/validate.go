@@ -27,7 +27,7 @@ type validator struct {
 
 func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt options) (*Config, Errors) {
 	v := &validator{origins: origins, main: main, ownerOf: opt.ownerOf}
-	cfg := &Config{StateDir: DefaultStateDir}
+	cfg := &Config{StateDir: DefaultStateDir, ownerOf: opt.ownerOf}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		k, val := root.Content[i], root.Content[i+1]
 		switch k.Value {
@@ -497,9 +497,16 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 			}
 		case "token_file":
 			if s, present, ok := v.str(val, "notify.ntfy.token_file"); ok && present {
-				if !filepath.IsAbs(s) {
+				switch {
+				case !filepath.IsAbs(s):
 					v.fail(val, "notify.ntfy.token_file: must be an absolute path")
-				} else {
+				case filepath.Clean(s) != s:
+					// The directory check is lexical (filepath.Dir) while
+					// the kernel resolves "link/.." through the symlink: an
+					// unclean path could check one directory and open
+					// another.
+					v.fail(val, "notify.ntfy.token_file: must be a clean path (no '.', '..' or repeated '/')")
+				default:
 					nf.TokenFile = s
 					v.token = val
 				}
