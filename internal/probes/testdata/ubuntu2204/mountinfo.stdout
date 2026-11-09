@@ -1,0 +1,16 @@
+363 311 0:46 / / rw,relatime - overlay overlay rw,lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/21453/fs:/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/19426/fs,upperdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/21454/fs,workdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/21454/work,nouserxattr
+365 363 0:64 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+366 363 0:65 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,inode64
+367 366 0:66 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=666
+368 363 0:67 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw
+369 368 0:30 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw,nsdelegate,memory_recursiveprot
+370 366 0:62 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw
+371 366 0:68 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k,inode64
+372 363 253:17 /docker/containers/c7fc3b2211a75be55f3790af6aa989440c46fa8b5c74e9e77cb25f3ca7e3fc41/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/vdb1 rw
+373 363 253:17 /docker/containers/c7fc3b2211a75be55f3790af6aa989440c46fa8b5c74e9e77cb25f3ca7e3fc41/hostname /etc/hostname rw,relatime - ext4 /dev/vdb1 rw
+374 363 253:17 /docker/containers/c7fc3b2211a75be55f3790af6aa989440c46fa8b5c74e9e77cb25f3ca7e3fc41/hosts /etc/hosts rw,relatime - ext4 /dev/vdb1 rw
+320 363 0:4 net:[4026532450] /run/docker/netns/default rw - nsfs nsfs rw
+279 363 7:0 / /mnt/kw\040ext4 rw,relatime - ext4 /dev/loop0 rw
+280 363 0:50 / /mnt/kw\040tmp rw,relatime - tmpfs tmpfs rw,inode64
+281 363 0:51 / /mnt/kw\134back rw,relatime - tmpfs tmpfs rw,inode64
+318 363 0:52 / /mnt/kw-nl\012line rw,relatime - tmpfs tmpfs rw,inode64

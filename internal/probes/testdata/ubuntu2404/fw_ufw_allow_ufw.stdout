@@ -1,0 +1,4 @@
+Status: active
+Logging: on (low)
+Default: allow (incoming), allow (outgoing), deny (routed)
+New profiles: skip

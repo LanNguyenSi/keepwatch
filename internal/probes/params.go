@@ -69,6 +69,35 @@ func (p *paramReader) boolean(key string, def bool) bool {
 	return b
 }
 
+// integer reads an integer parameter. Only a whole number is accepted (YAML
+// decoding yields int; a float, even 48.0, or a string is an error), and it
+// must lie within [min, max]. A missing parameter yields def.
+func (p *paramReader) integer(key string, def, min, max int) int {
+	v, ok := p.raw(key)
+	if !ok {
+		return def
+	}
+	var n int
+	switch x := v.(type) {
+	case int:
+		n = x
+	case int64:
+		if x < int64(min) || x > int64(max) {
+			p.fail("%s: %d is not between %d and %d", key, x, min, max)
+			return def
+		}
+		n = int(x)
+	default:
+		p.fail("%s: expected an integer, got %T", key, v)
+		return def
+	}
+	if n < min || n > max {
+		p.fail("%s: %d is not between %d and %d", key, n, min, max)
+		return def
+	}
+	return n
+}
+
 // strList reads a list of strings, each checked with valid. A missing
 // optional list yields def; an empty list is an error when nonEmpty.
 func (p *paramReader) strList(key string, required, nonEmpty bool, def []string, valid func(string) error) []string {

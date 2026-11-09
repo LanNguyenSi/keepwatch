@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
@@ -44,14 +45,20 @@ type Probe interface {
 	Run(ctx context.Context, env *Env) Outcome
 }
 
-// Outcome is what a probe reports. Status is one of pass, fail, error or
-// skipped; the engine adds the check identity, severity and exceptions.
-// Every evidence item of a failing outcome is a failing item. A skipped
-// outcome carries no evidence. An error outcome carries none either, except
-// for a check that reads several sources and could not read all of them: it
-// keeps the failing items that the sources it could read confirmed, and its
-// summary says the picture is partial (see partialError). The status stays
-// error, so no exception applies to it.
+// Outcome is what a probe reports. Status is one of pass, fail, warn, error
+// or skipped; the engine adds the check identity, severity and exceptions.
+// Every evidence item of a failing outcome is a failing item. A warn outcome
+// is a soft deviation (nothing failed, but something needs a look): its
+// evidence items are the things to look at. When a check finds both failing
+// and warning items the status is fail, the evidence holds the failing items
+// only, and the summary counts the warnings, so an exception for the failing
+// items still sees only failing items. A skipped outcome carries no evidence.
+// An error outcome carries none either, except for a check that reads several
+// sources and could not read all of them: it keeps the failing items that the
+// sources it could read confirmed, and its summary says the picture is
+// partial (see partialError). The status stays error, so no exception
+// applies to it. No outcome carries more than maxEvidence items; see
+// limitEvidence.
 type Outcome struct {
 	Status   result.Status
 	Summary  string
@@ -66,6 +73,29 @@ type Env struct {
 	FS FS
 	// ListenerAllow is the configured listener allowlist.
 	ListenerAllow []ListenerRule
+	// AuthorizedKeys is the configured expected key fingerprints per user
+	// (authorized_keys.expected).
+	AuthorizedKeys map[string][]string
+	// Statfs reads file system usage; nil means the host's (OSStatfs).
+	Statfs StatfsFunc
+	// StatfsTimeout bounds one Statfs call; zero means 10 seconds.
+	StatfsTimeout time.Duration
+	// Now returns the current time; nil means time.Now.
+	Now func() time.Time
+}
+
+func (e *Env) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
+}
+
+func (e *Env) statfs() StatfsFunc {
+	if e.Statfs != nil {
+		return e.Statfs
+	}
+	return OSStatfs
 }
 
 // ListenerRule allows one listening socket.
@@ -84,6 +114,12 @@ var kinds = func() map[string]Kind {
 		fail2banJail{},
 		listeners{},
 		rebootRequired{},
+		firewallDefault{},
+		securityUpdates{},
+		dockerExposure{},
+		authorizedKeys{},
+		diskUsage{},
+		certExpiry{},
 	} {
 		m[k.Name()] = k
 	}

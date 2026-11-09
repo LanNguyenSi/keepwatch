@@ -1,0 +1,5 @@
+{
+  "storage-driver": "vfs",
+  "features": {"containerd-snapshotter": false},
+  "hosts": ["unix:///var/run/docker.sock", "tcp://127.0.0.1:2375"]
+}

@@ -44,8 +44,11 @@ type Deps struct {
 	Runner execx.Runner
 	// FS reads files for probes.
 	FS probes.FS
-	// Now returns the current time; exception expiry is decided with it.
+	// Now returns the current time; exception expiry and the probes that
+	// compare dates are decided with it.
 	Now func() time.Time
+	// Statfs reads file system usage for disk_usage; nil means the host's.
+	Statfs probes.StatfsFunc
 }
 
 // Programs returns the sorted union of the program base names the catalog's
@@ -174,9 +177,12 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 	expired := p.cfg.ExpiredExceptions(now)
 
 	env := &probes.Env{
-		Runner:        newCachingRunner(p.deps.Runner),
-		FS:            p.deps.FS,
-		ListenerAllow: listenerRules(p.cfg),
+		Runner:         newCachingRunner(p.deps.Runner),
+		FS:             p.deps.FS,
+		ListenerAllow:  listenerRules(p.cfg),
+		AuthorizedKeys: p.cfg.AuthorizedKeys.Expected,
+		Statfs:         p.deps.Statfs,
+		Now:            p.deps.Now,
 	}
 
 	out := make([]result.Result, 0, len(p.checks)+len(expired))

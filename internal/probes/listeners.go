@@ -83,7 +83,10 @@ const trustedMaxOutput = int64(64 << 20)
 // entry with bind "*" allows "*" and "*%lo" (the dual-stack socket that ss
 // prints with no address). A socket bound to a device is not thereby a
 // loopback listener: only a loopback ADDRESS is allowed by allow_loopback.
-// Each listener that is not allowed is one evidence item with subject
+// At most 100 evidence items are returned, sorted by subject: the first 99
+// and a marker item "(N more not shown)"; the summary says "and N more".
+// The status is not affected, and the marker keeps an exception for the listed
+// items from hiding the rest. Each listener that is not allowed is one evidence item with subject
 // "<proto>/<address>:<port>" (IPv6 in brackets, the interface suffix kept
 // after the address, for example "udp/[fe80::1]%eth0:546") and the owning
 // process names in the detail, shown quoted and sanitised, never
@@ -209,17 +212,22 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()], note)})
 		}
 	}
+	// A local user can open tens of thousands of sockets, so the evidence is
+	// limited; the summary and the marker item say how many are not shown.
+	shown, hidden := limitEvidence(ev)
 
 	switch {
 	case len(failures) > 0:
-		return partialError(failures, ev)
+		o := partialError(failures, ev)
+		o.Evidence = shown
+		return o
 	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
 	}
 	return Outcome{
 		Status:   result.Fail,
-		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)),
-		Evidence: ev,
+		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden),
+		Evidence: shown,
 	}
 }
 

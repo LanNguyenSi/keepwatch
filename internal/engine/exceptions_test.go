@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -294,5 +295,39 @@ func TestExceptionsDoNotTouchAPartialError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A flood of listening sockets is cut to 100 evidence items. An exception for
+// every item that is shown must not hide the ones that are not.
+func TestExceptionsDoNotHideEvidenceBeyondTheLimit(t *testing.T) {
+	var sb strings.Builder
+	for port := 9000; port < 9150; port++ {
+		fmt.Fprintf(&sb, "LISTEN 0 5 0.0.0.0:%d 0.0.0.0:*\n", port)
+	}
+	r := fake.New(nil).
+		AddResult(svcArgv, res("active\n", 0)).
+		AddResult(sshdArgv, res("passwordauthentication no\n", 0)).
+		AddResult(ssTCP, res(sb.String(), 0)).AddResult(ssUDP, res("", 0)).
+		AddResult(ssTCPp, res("", 0)).AddResult(ssUDPp, res("", 0))
+	base := byID(t, run(t, &config.Config{}, r, day), "t.listeners")
+	if base.Status != result.Fail || len(base.Evidence) != 100 {
+		t.Fatalf("status %s, %d items", base.Status, len(base.Evidence))
+	}
+	var es []config.Exception
+	for _, e := range base.Evidence[:99] {
+		es = append(es, exc("t.listeners", e.Subject, "shown", day))
+	}
+	got := byID(t, run(t, withExceptions(es...), r, day), "t.listeners")
+	if got.Status != result.Fail {
+		t.Fatalf("the hidden sockets were excepted along with the shown ones: %s", got.Status)
+	}
+	last := got.Evidence[99]
+	if last.Excepted || !strings.Contains(last.Subject, "more not shown") {
+		t.Fatalf("marker %+v", last)
+	}
+	// a whole-check exception still covers everything
+	if got := byID(t, run(t, withExceptions(exc("t.listeners", "", "all", day)), r, day), "t.listeners"); got.Status != result.Excepted {
+		t.Fatalf("status %s", got.Status)
 	}
 }

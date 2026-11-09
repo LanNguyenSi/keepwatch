@@ -1,0 +1,7 @@
+-P INPUT ACCEPT
+-A INPUT -j ufw6-before-logging-input
+-A INPUT -j ufw6-before-input
+-A INPUT -j ufw6-after-input
+-A INPUT -j ufw6-after-logging-input
+-A INPUT -j ufw6-reject-input
+-A INPUT -j ufw6-track-input
