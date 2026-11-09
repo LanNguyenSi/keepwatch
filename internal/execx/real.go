@@ -41,7 +41,9 @@ type extra struct{ path, pinned string }
 type Option func(*Real)
 
 // WithSearchDirs replaces the list of trusted directories used to resolve
-// bare names (see resolve). Intended for tests.
+// bare names (see resolve). Intended for tests. NewReal panics if an entry
+// is not absolute: a relative directory would be checked against the process
+// working directory but executed after the chdir to Opts.Dir.
 func WithSearchDirs(dirs ...string) Option {
 	return func(r *Real) { r.rawDirs = dirs }
 }
@@ -52,16 +54,18 @@ func WithSearchDirs(dirs ...string) Option {
 // error, caught at construction). Each entry is resolved once, at
 // construction, and the target is pinned: Run accepts it only when argv[0]
 // equals the configured path exactly AND the path still resolves to the
-// pinned target at that moment. The extras and all their ancestor
-// directories must be root-owned and not group- or world-writable; this is
-// not checked.
+// pinned target at that moment. Pinning compares paths, not file contents:
+// the pinned target and all its ancestor directories (and the configured
+// path's own ancestors) must be root-owned and not group- or world-writable;
+// this is not checked.
 func WithExtraPrograms(paths ...string) Option {
 	return func(r *Real) { r.rawExtras = append(r.rawExtras, paths...) }
 }
 
 // NewReal returns a runner that only executes programs whose base name is in
 // allow (for example "sshd", "ss"), subject to the invariant documented on
-// resolve. It panics if a WithExtraPrograms entry is not an absolute path.
+// resolve. It panics if a WithSearchDirs or WithExtraPrograms entry is not an
+// absolute path.
 func NewReal(allow []string, opts ...Option) *Real {
 	r := &Real{allow: map[string]bool{}, rawDirs: filepath.SplitList(SearchPath)}
 	for _, a := range allow {
@@ -71,6 +75,9 @@ func NewReal(allow []string, opts ...Option) *Real {
 		o(r)
 	}
 	for _, d := range r.rawDirs {
+		if !filepath.IsAbs(d) {
+			panic("execx: WithSearchDirs needs absolute paths, got " + strconv.Quote(d))
+		}
 		td := trustedDir{literal: filepath.Clean(d), resolved: filepath.Clean(d)}
 		if rd, err := filepath.EvalSymlinks(d); err == nil {
 			td.resolved = rd
@@ -115,8 +122,8 @@ func NewReal(allow []string, opts ...Option) *Real {
 //     multi-call binaries such as busybox (/usr/bin/ss -> /bin/busybox).
 //
 // Residual: trust rests on the trusted directories being root-owned and not
-// writable by untrusted users, and on the extras and their ancestors being
-// the same. Go has no fexecve, so a check-then-exec gap on the final
+// writable by untrusted users, and on the extras' pinned targets and their
+// ancestors being the same. Go has no fexecve, so a check-then-exec gap on the final
 // component remains for anyone able to write into those directories.
 func (r *Real) resolve(name string) (string, error) {
 	for _, e := range r.extras {

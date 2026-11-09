@@ -518,6 +518,11 @@ func TestRelativeExtraRejected(t *testing.T) {
 	mustPanic(t, func() { NewReal(nil, WithExtraPrograms("prog")) })
 }
 
+func TestRelativeSearchDirRejected(t *testing.T) {
+	mustPanic(t, func() { NewReal(nil, WithSearchDirs("relbin")) })
+	mustPanic(t, func() { NewReal(nil, WithSearchDirs("/usr/bin", "./bin")) })
+}
+
 // The directory part of an absolute argv[0] is never resolved: a symlink to a
 // trusted directory is not a trusted directory.
 func TestSymlinkedDirectoryComponentRefused(t *testing.T) {
