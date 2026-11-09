@@ -25,10 +25,26 @@ make test     # go test -race ./...
 make lint     # gofmt, go vet, staticcheck
 ```
 
+## Configuration
+
+The main file is `/etc/keepwatch/keepwatch.yaml` (override with
+`--config`). Every `*.yaml` in a `conf.d` directory next to it is loaded
+in lexicographic order and merged in: mappings merge per key (later
+files win), sequences such as `exceptions` and `listeners.allow` append,
+and scalars are replaced by the later file. A missing `conf.d` is fine;
+a missing main file is an error. Unknown keys, wrong types and out-of-range
+values are rejected, each error naming `file:line`.
+
+```sh
+keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example
+keepwatch config check --config /etc/keepwatch/keepwatch.yaml
+```
+
 ## Status
 
-Pre-MVP. The command line skeleton and the program execution layer exist;
-the commands (`check`, `report`, `config check`, `doctor`, `init`, `install`,
+Pre-MVP. The command line skeleton, the program execution layer and the
+strict configuration loader exist; `config check` and `init` are
+implemented, while the commands (`check`, `report`, `doctor`, `install`,
 `uninstall`) are stubs that exit with status 3.
 
 ## License
