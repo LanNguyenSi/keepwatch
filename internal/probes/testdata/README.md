@@ -55,7 +55,6 @@ All of them are captured output, not synthesised, except where marked.
 | `sshd_T_no_privsep_dir` | `sshd -T` | `/run/sshd` missing: exit 255 |
 | `ss_tcp_<scenario>`, `ss_udp_<scenario>` | `ss -Hltn`, `ss -Hlun` | the socket set the probe trusts: no process column. No UDP socket prints nothing |
 | `ssp_tcp_<scenario>`, `ssp_udp_<scenario>` | `ss -Hltnp`, `ss -Hlunp` | the same state with the process column, taken right after; the probe reads it only to name processes |
-
 | `dpkg_installed` | `dpkg-query -W -f=${Status}\t${Version}\n -- fail2ban` | installed |
 | `dpkg_unknown` | the same for `nosuchpkg-x` | exit 1, `no packages found matching` on stderr |
 | `dpkg_config_files` | the same for `rsync` after `apt-get remove` | `deinstall ok config-files`, exit 0 |
