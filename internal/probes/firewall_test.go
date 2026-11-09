@@ -78,6 +78,9 @@ func TestFirewallCapturedScenarios(t *testing.T) {
 				if c.want == result.Fail && !eq(subjects(o), c.subjects) {
 					t.Fatalf("subjects = %v, want %v", subjects(o), c.subjects)
 				}
+				if c.scenario == "none" && !strings.Contains(o.Evidence[0].Detail, "ufw: inactive") {
+					t.Fatalf("detail %q", o.Evidence[0].Detail)
+				}
 				if c.want == result.Pass && len(o.Evidence) != 0 {
 					t.Fatalf("pass with evidence %+v", o.Evidence)
 				}
@@ -238,6 +241,9 @@ func TestFirewallGarbageIsNeverAPass(t *testing.T) {
 		// an unknown policy on an input chain
 		nftDoc("inet f in filter input maybe"),
 		nftDoc("inet f in filter input drop") + " trailing",
+		// an entry that is not a single-key object
+		strings.Replace(nftDoc("inet f in filter input drop"), `"nftables": [`, `"nftables": [{},`, 1),
+		strings.Replace(nftDoc("inet f in filter input drop"), `"nftables": [`, `"nftables": [{"rule": {}, "chain": {}},`, 1),
 	}
 	for i, g := range garbage {
 		t.Run("nft "+string(rune('a'+i)), func(t *testing.T) {

@@ -323,6 +323,9 @@ func TestDiskUsageMountinfoIsParsedStrictly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			o := execDisk(diskProbe(t, nil), probestest.MemFS{"/proc/self/mountinfo": content}, st())
 			wantStatus(t, o, result.Error)
+			if name == "separator too early" && !strings.Contains(o.Summary, "not a mountinfo line") {
+				t.Fatalf("summary %q", o.Summary)
+			}
 			if !strings.Contains(o.Summary, "/proc/self/mountinfo: ") {
 				t.Fatalf("a mountinfo problem must be named as one, not left to statfs: %q", o.Summary)
 			}

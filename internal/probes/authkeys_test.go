@@ -226,8 +226,10 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 				return
 			}
 			wantStatus(t, o, result.Warn)
-			if name == "too long" && !strings.Contains(allText(o), "line is too long") {
-				t.Fatalf("evidence %+v", o.Evidence)
+			for bad, why := range map[string]string{"too long": "line is too long", "unterminated quote": "unterminated quote in the options"} {
+				if name == bad && !strings.Contains(allText(o), why) {
+					t.Fatalf("evidence %+v", o.Evidence)
+				}
 			}
 			var sub string
 			for _, e := range o.Evidence {

@@ -356,9 +356,6 @@ func parseNft(out []byte) (nftView, error) {
 	if dec.More() {
 		return nftView{}, errors.New("unexpected data after the JSON document")
 	}
-	if doc.Nftables == nil {
-		return nftView{}, errors.New(`no "nftables" array`)
-	}
 	schema := 0
 	tables := map[[2]string]nftTable{}
 	var chains []nftChain
