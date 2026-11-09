@@ -355,3 +355,19 @@ func TestCertExpiryNeverRunsAProgram(t *testing.T) {
 		t.Fatalf("calls %+v", r.Calls())
 	}
 }
+
+func TestCertExpiryWarningsOfAFailureAreCarried(t *testing.T) {
+	fsys := certFS(map[string]string{
+		"/etc/letsencrypt/live/a/fullchain.pem": pemCert(t, "a.example.test", t0.Add(days(3))),
+		"/etc/letsencrypt/live/b/fullchain.pem": pemCert(t, "b.example.test", t0.Add(days(20))),
+		"/etc/letsencrypt/live/c/fullchain.pem": pemCert(t, "c.example.test", t0.Add(days(200))),
+	})
+	o := execCert(certProbe(t, nil), fsys)
+	wantStatus(t, o, result.Fail)
+	if !eq(subjects(o), []string{"/etc/letsencrypt/live/a/fullchain.pem"}) {
+		t.Fatalf("evidence %+v", o.Evidence)
+	}
+	if len(o.Warnings) != 1 || o.Warnings[0].Subject != "/etc/letsencrypt/live/b/fullchain.pem" {
+		t.Fatalf("warnings %+v", o.Warnings)
+	}
+}

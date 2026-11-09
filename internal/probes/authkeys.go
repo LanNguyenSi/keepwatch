@@ -519,13 +519,6 @@ func keyFingerprint(line string) (typ, fp string, err error) {
 // C string without NUL.
 func readKey(s string) (typ, fp string, err error) {
 	typ, rest := splitToken(s)
-	if rest == "" {
-		// sshkey_read: no blank after the first token is a format error
-		if keyTypeRe.MatchString(typ) {
-			return "", "", errNoKeyData
-		}
-		return "", "", errNoKeyType
-	}
 	if !keyTypeRe.MatchString(typ) {
 		return "", "", errNoKeyType
 	}

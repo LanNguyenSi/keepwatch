@@ -358,18 +358,18 @@ var (
 // non-nil outcome (an error) when the answer cannot be had or understood.
 func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 	var names []string
-	byName := map[string]*aptPkg{}
-	for i := range sim.pkgs {
-		p := &sim.pkgs[i]
-		if p.oldVer == "" || byName[p.name] != nil {
+	seen := map[string]bool{}
+	for _, p := range sim.pkgs {
+		if p.oldVer == "" || seen[p.name] {
 			continue
 		}
+		seen[p.name] = true
 		names = append(names, p.name)
-		byName[p.name] = p
 	}
 	if len(names) > aptPolicyMax {
 		return errorOutcome("%d packages are to be upgraded, more than the %d whose security versions are looked up", len(names), aptPolicyMax)
 	}
+	newer := map[string]aptNewerSecurity{}
 	for len(names) > 0 {
 		n := min(aptPolicyBatch, len(names))
 		batch := names[:n]
@@ -391,9 +391,13 @@ func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 			return errorOutcome("apt-cache policy: %v", err)
 		}
 		for name, f := range found {
-			p := byName[name]
-			p.secVer, p.secPocket = f.version, f.pocket
-			p.security = p.security || f.version != ""
+			newer[name] = f
+		}
+	}
+	for i := range sim.pkgs {
+		p := &sim.pkgs[i]
+		if f, ok := newer[p.name]; ok {
+			p.secVer, p.secPocket, p.security = f.version, f.pocket, true
 		}
 	}
 	return nil

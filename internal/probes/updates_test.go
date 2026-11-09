@@ -515,6 +515,7 @@ func TestSecurityUpdatesPolicyIsUnderstoodOrError(t *testing.T) {
 		"nothing printed (unknown package)": "",
 		"another package":                   policyText("pkg-b", "3.0@noble-updates", "*1.0@dpkg"),
 		"the package twice":                 good + good,
+		"an extra package":                  good + policyText("pkg-b", "3.0@noble-updates", "*1.0@dpkg"),
 		"no installed row":                  policyText("pkg-a", "3.0@noble-updates", "1.0@dpkg"),
 		"two installed rows":                policyText("pkg-a", "*3.0@noble-updates", "*1.0@dpkg"),
 		"unknown line":                      good + "Surprise: something\n",
@@ -581,6 +582,16 @@ func TestSecurityUpdatesPolicyBatches(t *testing.T) {
 			t.Fatalf("batch %d: %d names, argv %v", i, got, c[:8])
 		}
 	}
+	// exactly at the bound the packages are all looked up
+	var edge strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&edge, "Inst pkg-%04d [1] (2 Ubuntu:24.04/noble-updates [amd64])\n", i)
+	}
+	r = aptRunner(aptOut(2000, 0, edge.String()))
+	wantStatus(t, execAt(updatesProbe(t, nil), r, lists(time.Hour), t0), result.Pass)
+	if len(r.Calls()) != 21 {
+		t.Fatalf("%d calls, want the simulation and 20 batches", len(r.Calls()))
+	}
 	// beyond the bound the check does not guess
 	var many strings.Builder
 	for i := 0; i < 2001; i++ {
@@ -589,4 +600,36 @@ func TestSecurityUpdatesPolicyBatches(t *testing.T) {
 	o = execAt(updatesProbe(t, nil), newRunner().AddResult(aptArgv, inline(aptOut(2001, 0, many.String()), 0)), lists(time.Hour), t0)
 	wantStatus(t, o, result.Error)
 	wantSummary(t, o, "2000")
+}
+
+func TestSecurityUpdatesSamePackageTwice(t *testing.T) {
+	// apt does not print a package twice; if it did, it is asked about once and both lines get the answer
+	sim := aptOut(2, 0, instOne+instOne)
+	r := newRunner().AddResult(aptArgv, inline(sim, 0)).
+		AddResult(policyArgv("pkg-a"), inline(policyText("pkg-a", "3.0@noble-updates", "2.0@noble-security", "*1.0@dpkg"), 0))
+	o := execAt(updatesProbe(t, nil), r, lists(time.Hour), t0)
+	wantStatus(t, o, result.Fail)
+	if !eq(subjects(o), []string{"pkg-a", "pkg-a"}) || len(r.Calls()) != 2 {
+		t.Fatalf("subjects %v, %d calls", subjects(o), len(r.Calls()))
+	}
+}
+
+// A package name from the simulation reaches the command line of apt-cache, so
+// it must match the strict pattern first: a name that does not is an error
+// and apt-cache is never asked about it, even when an answer would be at hand.
+func TestSecurityUpdatesNamesAreCheckedBeforeTheyReachAptCache(t *testing.T) {
+	for _, name := range []string{"A_b", "-x", "--version", "a;b", "a$b", "", "é", "a/b", "a.b:", ".a"} {
+		t.Run(name, func(t *testing.T) {
+			sim := aptOut(1, 0, fmt.Sprintf("Inst %s [1.0] (3.0 Ubuntu:24.04/noble-updates [amd64])\n", name))
+			r := newRunner().AddResult(aptArgv, inline(sim, 0)).
+				AddResult(policyArgv(name), inline(policyText(name, "3.0@noble-updates", "*1.0@dpkg"), 0))
+			o := execAt(updatesProbe(t, nil), r, lists(time.Hour), t0)
+			wantStatus(t, o, result.Error)
+			for _, c := range r.Calls() {
+				if c.Argv[0] == "apt-cache" {
+					t.Fatalf("apt-cache was run with %q", c.Argv)
+				}
+			}
+		})
+	}
 }

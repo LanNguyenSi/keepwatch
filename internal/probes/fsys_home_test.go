@@ -475,6 +475,33 @@ func TestReadTrusted(t *testing.T) {
 			t.Fatalf("%q %v", got, err)
 		}
 	})
+	t.Run("a link above the point the check starts from is not examined", func(t *testing.T) {
+		// tests (and /var on macOS) reach their directory through a link in a
+		// directory the check does not look at
+		b := certTree(t)
+		hop := filepath.Join(filepath.Dir(b), "hop")
+		link(t, b, hop)
+		o := probes.OSFS{TrustedOwners: []uint32{otherUID()}, CheckFrom: b}
+		_, _, err := o.ReadTrusted(filepath.Join(hop, "archive/example/fullchain1.pem"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || strings.Contains(err.Error(), "link ") || !strings.Contains(err.Error(), "directory "+b) {
+			t.Fatalf("the refusal must come from the first directory that is checked: %v", err)
+		}
+	})
+	t.Run("the root directory is checked when the check starts from it", func(t *testing.T) {
+		b := certTree(t)
+		_, _, err := probes.OSFS{TrustedOwners: []uint32{otherUID()}}.ReadTrusted(filepath.Join(b, "archive/example/fullchain1.pem"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "directory / is owned by uid") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a path that ends in a directory", func(t *testing.T) {
+		b := certTree(t)
+		for _, p := range []string{filepath.Join(b, "live", ".."), filepath.Join(b, "live", "."), "/"} {
+			if _, _, err := trustedFS(t, b).ReadTrusted(p, 100); !errors.Is(err, probes.ErrUnsafe) {
+				t.Fatalf("%s: %v", p, err)
+			}
+		}
+	})
 	t.Run("a loop of links ends", func(t *testing.T) {
 		b := certTree(t)
 		link(t, "b", filepath.Join(b, "live/a"))

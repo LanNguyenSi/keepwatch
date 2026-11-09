@@ -222,11 +222,6 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 		t.Run("bad "+name, func(t *testing.T) {
 			o := run(ed.line + "\nline two\n" + line + "\n")
 			wantStatus(t, o, result.Warn)
-			for bad, why := range map[string]string{"unterminated quote": "unterminated quote in the options"} {
-				if name == bad && !strings.Contains(allText(o), why) {
-					t.Fatalf("evidence %+v", o.Evidence)
-				}
-			}
 			var sub string
 			for _, e := range o.Evidence {
 				if strings.HasPrefix(e.Subject, "alice:.ssh/authorized_keys:3") {
@@ -239,8 +234,33 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 			if sub == "" {
 				t.Fatalf("no warning for line 3: %+v", o.Evidence)
 			}
+			// the reason is one of a fixed set
+			reason := map[string]string{
+				"garbage":                "no known key type",
+				"unknown key type":       "no known key type",
+				"option then nothing":    "no known key type",
+				"unterminated quote":     "unterminated quote in the options",
+				"type without data":      "no key data",
+				"data not base64":        "key data is not valid base64",
+				"blob of another type":   "key data is not valid base64",
+				"blob too large":         "key data is not valid base64",
+				"rsa type, ed25519 blob": "key data is not valid base64",
+			}[name]
+			if reason != "" && !strings.Contains(sub, reason) {
+				t.Fatalf("reason %q, want it to contain %q", sub, reason)
+			}
 		})
 	}
+	t.Run("a blob over the size limit is refused whatever its shape", func(t *testing.T) {
+		big := base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", strings.Repeat("n", 17000)))
+		small := base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", strings.Repeat("n", 1000)))
+		wantStatus(t, run(ed.line+"\nssh-rsa "+big+"\n"), result.Warn)
+		wantStatus(t, run(ed.line+"\nssh-rsa "+small+"\n"), result.Fail)
+	})
+	t.Run("the blob must name its own type", func(t *testing.T) {
+		line := "ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-foo", "e", "n"))
+		wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Warn)
+	})
 	t.Run("a bad line does not hide the keys around it", func(t *testing.T) {
 		o := run("garbage\n" + ed.line + "\n" + rsa.line + "\n")
 		wantStatus(t, o, result.Fail)
@@ -248,6 +268,34 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 			t.Fatalf("evidence %+v", o.Evidence)
 		}
 		wantSummary(t, o, "also 1 warning(s)")
+	})
+	t.Run("the shape of a key blob must be the one OpenSSH reads", func(t *testing.T) {
+		curve := func(typ, name string) string {
+			return typ + " " + base64.StdEncoding.EncodeToString(wire(typ, name, "point"))
+		}
+		for name, line := range map[string]string{
+			"ed25519 key of 31 bytes":      "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")[:31])),
+			"ed25519 key of 33 bytes":      "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a")+"x")),
+			"ed25519 blob with a field":    "ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire("ssh-ed25519", pk32("a"), "more")),
+			"ecdsa nistp256, curve p384":   curve("ecdsa-sha2-nistp256", "nistp384"),
+			"ecdsa nistp384, curve p256":   curve("ecdsa-sha2-nistp384", "nistp256"),
+			"ecdsa curve of another name":  curve("ecdsa-sha2-nistp521", "other"),
+			"sk-ecdsa with a wrong curve":  "sk-ecdsa-sha2-nistp256@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ecdsa-sha2-nistp256@openssh.com", "nistp384", "p", "app")),
+			"sk-ed25519 with a short key":  "sk-ssh-ed25519@openssh.com " + base64.StdEncoding.EncodeToString(wire("sk-ssh-ed25519@openssh.com", "short", "app")),
+			"rsa blob with one field":      "ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e")),
+			"dss blob with too few fields": "ssh-dss " + base64.StdEncoding.EncodeToString(wire("ssh-dss", "p", "q", "g")),
+		} {
+			t.Run(name, func(t *testing.T) { wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Warn) })
+		}
+		// the same shapes, right: ecdsa curves, rsa with e and n, dss with four numbers
+		for _, line := range []string{
+			curve("ecdsa-sha2-nistp384", "nistp384"),
+			curve("ecdsa-sha2-nistp521", "nistp521"),
+			"ssh-rsa " + base64.StdEncoding.EncodeToString(wire("ssh-rsa", "e", "n")),
+			"ssh-dss " + base64.StdEncoding.EncodeToString(wire("ssh-dss", "p", "q", "g", "y")),
+		} {
+			wantStatus(t, run(ed.line+"\n"+line+"\n"), result.Fail)
+		}
 	})
 	t.Run("the sk key types", func(t *testing.T) {
 		for _, typ := range []string{"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"} {

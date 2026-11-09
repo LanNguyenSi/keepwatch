@@ -186,6 +186,14 @@ func TestDiskUsageMixAndSelection(t *testing.T) {
 		}
 	}
 
+	t.Run("the warnings of a failing result are carried separately", func(t *testing.T) {
+		if got := []string{o.Warnings[0].Subject}; len(o.Warnings) != 1 || !eq(got, []string{"/data"}) {
+			t.Fatalf("warnings %+v", o.Warnings)
+		}
+		if len(o.Evidence) != 2 {
+			t.Fatalf("evidence %+v", o.Evidence)
+		}
+	})
 	t.Run("fstypes replaces the default", func(t *testing.T) {
 		st := &statfsMap{by: map[string]probes.Statfs{"/run": usage(95, 1)}}
 		o := execDisk(diskProbe(t, map[string]any{"fstypes": []any{"tmpfs"}}), files, st)
