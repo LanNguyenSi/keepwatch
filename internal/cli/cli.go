@@ -75,6 +75,7 @@ func usage(w io.Writer) {
 func parse(name string, args []string, stdout, stderr io.Writer) (code int, done bool) {
 	fs := flag.NewFlagSet("keepwatch "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {} // errors are printed by flag; -h prints our own usage
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			fmt.Fprintf(stdout, "Usage: keepwatch %s\n", name)

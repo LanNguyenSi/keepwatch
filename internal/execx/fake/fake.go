@@ -34,6 +34,7 @@ type FakeRunner struct {
 type entry struct {
 	name string
 	res  *execx.Result // set for inline results
+	err  error         // set for injected errors
 }
 
 var _ execx.Runner = (*FakeRunner)(nil)
@@ -43,7 +44,10 @@ func New(fsys fs.FS) *FakeRunner {
 	return &FakeRunner{fsys: fsys, entries: map[string]entry{}}
 }
 
-func key(argv []string) string { return strings.Join(argv, " ") }
+// key joins argv with NUL so ["a b"] and ["a","b"] stay distinct.
+func key(argv []string) string { return strings.Join(argv, "\x00") }
+
+func display(argv []string) string { return strings.Join(argv, " ") }
 
 // Add maps argv to the fixture files named name in the runner's file system.
 func (f *FakeRunner) Add(argv []string, name string) *FakeRunner {
@@ -61,6 +65,14 @@ func (f *FakeRunner) AddResult(argv []string, res execx.Result) *FakeRunner {
 	return f
 }
 
+// AddError makes argv fail with err (for example execx.ErrTimeout).
+func (f *FakeRunner) AddError(argv []string, err error) *FakeRunner {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[key(argv)] = entry{err: err}
+	return f
+}
+
 // Calls returns a copy of the recorded calls in order.
 func (f *FakeRunner) Calls() []Call {
 	f.mu.Lock()
@@ -74,11 +86,14 @@ func (f *FakeRunner) Run(_ context.Context, argv []string, opts execx.Opts) (exe
 	f.calls = append(f.calls, Call{Argv: append([]string(nil), argv...), Opts: opts})
 	e, ok := f.entries[key(argv)]
 	f.mu.Unlock()
-	if len(argv) == 0 {
+	if len(argv) == 0 || argv[0] == "" {
 		return execx.Result{}, execx.ErrEmptyArgv
 	}
 	if !ok {
-		return execx.Result{}, fmt.Errorf("%w: no fixture for %q", execx.ErrNotFound, key(argv))
+		return execx.Result{}, fmt.Errorf("%w: no fixture for %q", execx.ErrNotFound, display(argv))
+	}
+	if e.err != nil {
+		return execx.Result{}, e.err
 	}
 	if e.res != nil {
 		return *e.res, nil

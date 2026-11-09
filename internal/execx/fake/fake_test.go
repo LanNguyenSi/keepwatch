@@ -52,3 +52,29 @@ func TestInlineResultAndCalls(t *testing.T) {
 		t.Fatalf("calls = %+v", calls)
 	}
 }
+
+func TestArgvKeyIsNotAmbiguous(t *testing.T) {
+	f := New(os.DirFS("testdata")).AddResult([]string{"a b"}, execx.Result{Stdout: []byte("one")})
+	if _, err := f.Run(context.Background(), []string{"a", "b"}, execx.Opts{}); !errors.Is(err, execx.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if res, err := f.Run(context.Background(), []string{"a b"}, execx.Opts{}); err != nil || string(res.Stdout) != "one" {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestEmptyArgv(t *testing.T) {
+	f := New(os.DirFS("testdata")).AddResult([]string{""}, execx.Result{})
+	for _, argv := range [][]string{nil, {""}} {
+		if _, err := f.Run(context.Background(), argv, execx.Opts{}); !errors.Is(err, execx.ErrEmptyArgv) {
+			t.Errorf("%q: err = %v, want ErrEmptyArgv", argv, err)
+		}
+	}
+}
+
+func TestAddError(t *testing.T) {
+	f := New(os.DirFS("testdata")).AddError([]string{"sshd", "-T"}, execx.ErrTimeout)
+	if _, err := f.Run(context.Background(), []string{"sshd", "-T"}, execx.Opts{}); !errors.Is(err, execx.ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+}

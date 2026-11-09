@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -82,7 +84,7 @@ func TestSymlinkRule(t *testing.T) {
 		}
 		return p
 	}
-	r := NewReal([]string{"ss", "sshd"}, WithSearchDirs(trusted))
+	r := NewReal([]string{"ss", "sshd", "tool"}, WithSearchDirs(trusted))
 
 	// 1. allowed name -> non-allowed target outside trusted dirs: refused.
 	evil := write(outside, "evil")
@@ -119,8 +121,8 @@ func TestSymlinkRule(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotAllowed", err)
 	}
 
-	// 4. non-allowed name -> allowed target: allowed.
-	real := write(outside, "ss")
+	// 4. non-allowed name -> allowed target, target in a trusted dir: allowed.
+	real := write(trusted, "tool")
 	link4 := filepath.Join(trusted, "alias")
 	if err := os.Symlink(real, link4); err != nil {
 		t.Fatal(err)
@@ -263,5 +265,212 @@ func TestDir(t *testing.T) {
 	res, err := realRunner(t, "pwd").Run(bg, []string{"pwd"}, Opts{Dir: dir})
 	if err != nil || strings.TrimSpace(string(res.Stdout)) != dir {
 		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func writeScript(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func notExecuted(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("program was executed")
+	}
+}
+
+// A regular file named like an allowlisted program, outside the trusted
+// directories, must not run when given by absolute path.
+func TestAbsolutePathOutsideTrustedDirRefused(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	p := writeScript(t, dir, "sshd", "touch "+marker)
+	_, err := NewReal([]string{"sshd"}).Run(bg, []string{p}, Opts{})
+	if !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+	notExecuted(t, marker)
+}
+
+// A planted link named like an allowlisted program that points at a system
+// binary which is not allowlisted must be refused.
+func TestPlantedLinkToSystemBinaryRefused(t *testing.T) {
+	dir := t.TempDir()
+	sh, err := NewReal([]string{"sh"}).lookup("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	link := filepath.Join(dir, "ss")
+	if err := os.Symlink(sh, link); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReal([]string{"ss"})
+	if _, err := r.Run(bg, []string{link, "-c", "echo hi"}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+}
+
+func TestExtraPrograms(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	p := writeScript(t, dir, "probe", "touch "+marker)
+	other := writeScript(t, dir, "other", "touch "+marker)
+	r := NewReal(nil, WithExtraPrograms(p, "relative/ignored"))
+	if _, err := r.Run(bg, []string{other}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("unlisted: %v", err)
+	}
+	notExecuted(t, marker)
+	if _, err := r.Run(bg, []string{"probe"}, Opts{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bare name must not find extra program: %v", err)
+	}
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(p, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(bg, []string{alias}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("alias of listed program: %v", err)
+	}
+	notExecuted(t, marker)
+	if _, err := r.Run(bg, []string{p}, Opts{}); err != nil {
+		t.Fatalf("listed: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("expected execution")
+	}
+}
+
+// TestHelperArgv0 is not a test: re-executed as a child, it prints argv[0].
+func TestHelperArgv0(t *testing.T) {
+	if os.Getenv("KEEPWATCH_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	os.Stdout.WriteString(os.Args[0])
+}
+
+// The name as given must reach the child as argv[0] (multi-call binaries).
+func TestArgv0IsGivenName(t *testing.T) {
+	trusted := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Skip(err)
+	}
+	if err := os.WriteFile(filepath.Join(trusted, "multicall"), data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(trusted, "multicall"), filepath.Join(trusted, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReal([]string{"alias"}, WithSearchDirs(trusted))
+	res, err := r.Run(bg, []string{"alias", "-test.run=^TestHelperArgv0$"}, Opts{Env: []string{"KEEPWATCH_HELPER=1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(res.Stdout); !strings.HasPrefix(got, "alias") {
+		t.Fatalf("argv[0] = %q (stdout %q), want alias", got, res.Stdout)
+	}
+}
+
+func TestOutputExactlyAtLimitNotTruncated(t *testing.T) {
+	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "head -c 100 /dev/zero"}, Opts{MaxOutput: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated || len(res.Stdout) != 100 {
+		t.Fatalf("truncated=%v len=%d", res.Truncated, len(res.Stdout))
+	}
+	res, err = realRunner(t, "sh").Run(bg, []string{"sh", "-c", "head -c 101 /dev/zero"}, Opts{MaxOutput: 100})
+	if err != nil || !res.Truncated || len(res.Stdout) != 100 {
+		t.Fatalf("101 bytes: %+v %v", res, err)
+	}
+}
+
+func pidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func waitGone(pid int) bool {
+	for i := 0; i < 50; i++ {
+		if !pidAlive(pid) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// The child exits 0 while a background grandchild holds stdout: Run must
+// return within the wait delay with ErrIOTimeout and kill the grandchild.
+func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+
+	start := time.Now()
+	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "sleep 30 & echo $!; exit 0"}, Opts{})
+	if !errors.Is(err, ErrIOTimeout) {
+		t.Fatalf("err = %v, want ErrIOTimeout", err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("Run took %s", el)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0", res.ExitCode)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
+	if perr != nil {
+		t.Fatalf("stdout %q: %v", res.Stdout, perr)
+	}
+	if !waitGone(pid) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatal("grandchild outlived Run")
+	}
+}
+
+// A background grandchild that does not hold the pipes must also be gone
+// after a normal, successful Run.
+func TestBackgroundGrandchildKilledAfterNormalExit(t *testing.T) {
+	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"}, Opts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
+	if perr != nil {
+		t.Fatalf("stdout %q: %v", res.Stdout, perr)
+	}
+	if !waitGone(pid) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatal("grandchild outlived Run")
+	}
+}
+
+func TestSignalExit(t *testing.T) {
+	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "kill -9 $$"}, Opts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != -1 || !res.Signaled {
+		t.Fatalf("%+v", res)
+	}
+	res, err = realRunner(t, "sh").Run(bg, []string{"sh", "-c", "exit 3"}, Opts{})
+	if err != nil || res.Signaled || res.ExitCode != 3 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// A parent deadline shorter than Opts.Timeout surfaces as the context error,
+// not ErrTimeout.
+func TestParentDeadlineIsNotErrTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(bg, 150*time.Millisecond)
+	defer cancel()
+	_, err := realRunner(t, "sleep").Run(ctx, []string{"sleep", "30"}, Opts{Timeout: 30 * time.Second})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v", err)
 	}
 }

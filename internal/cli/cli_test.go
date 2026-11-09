@@ -93,3 +93,12 @@ func TestHelpListsCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpFlagOnSubcommandIsQuiet(t *testing.T) {
+	for _, args := range [][]string{{"check", "-h"}, {"config", "check", "-h"}, {"version", "-h"}} {
+		code, stdout, stderr := run(args...)
+		if code != 0 || stderr != "" || !strings.Contains(stdout, "Usage: keepwatch") {
+			t.Errorf("%v: exit=%d stdout=%q stderr=%q", args, code, stdout, stderr)
+		}
+	}
+}

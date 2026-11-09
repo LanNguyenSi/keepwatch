@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// waitDelay is how long Run waits for output pipes to close after the child
+// exited or was killed. A variable so tests can shorten it.
+var waitDelay = 2 * time.Second
+
 // Defaults applied when the corresponding Opts field is zero.
 const (
 	DefaultTimeout   = 10 * time.Second
@@ -24,6 +28,9 @@ var (
 	ErrNotFound   = errors.New("execx: program not found")
 	ErrTimeout    = errors.New("execx: timeout")
 	ErrEmptyArgv  = errors.New("execx: empty argv")
+	// ErrIOTimeout means the program exited but a leftover child kept its
+	// output pipes open past the grace period; output may be incomplete.
+	ErrIOTimeout = errors.New("execx: output pipes held open after exit")
 )
 
 // Runner runs one program and returns its result. A non-zero exit status is
@@ -34,7 +41,10 @@ type Runner interface {
 
 // Result is the outcome of a run.
 type Result struct {
+	// ExitCode is the exit status; -1 when the process was killed by a
+	// signal (see Signaled) or the run ended by timeout or cancellation.
 	ExitCode  int
+	Signaled  bool // the process was terminated by a signal (unix only)
 	Stdout    []byte
 	Stderr    []byte
 	Truncated bool // either stream was cut at MaxOutput
@@ -45,7 +55,10 @@ type Result struct {
 type Opts struct {
 	Timeout   time.Duration
 	MaxOutput int64
-	// Env replaces the minimal default environment when non-nil.
+	// Env replaces the minimal default environment when non-nil. It is for
+	// trusted callers only and must never carry configuration values or
+	// other user-controlled input (variables such as LD_PRELOAD change what
+	// the child executes).
 	Env []string
 	Dir string
 }

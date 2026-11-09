@@ -7,8 +7,3 @@ var (
 	Commit  = "unknown"
 	Date    = "unknown"
 )
-
-// String returns a one-line description of the build.
-func String() string {
-	return "keepwatch " + Version + " (commit " + Commit + ", built " + Date + ")"
-}
