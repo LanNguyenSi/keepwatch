@@ -3,3 +3,7 @@
 /dist/
 *.test
 *.out
+*.exe
+coverage.txt
+go.work
+go.work.sum
