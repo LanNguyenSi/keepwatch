@@ -1,0 +1,45 @@
+e2fsprogs:
+  Installed: 1.47.0-2.4~exp1ubuntu4
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+     1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+ *** 1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libcom-err2:
+  Installed: 1.47.0-2.4~exp1ubuntu4
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+     1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+ *** 1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libext2fs2t64:
+  Installed: 1.47.0-2.4~exp1ubuntu4
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+     1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+ *** 1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libss2:
+  Installed: 1.47.0-2.4~exp1ubuntu4
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+     1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+ *** 1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+logsave:
+  Installed: 1.47.0-2.4~exp1ubuntu4
+  Candidate: 1.47.0-2.4~exp1ubuntu4.1
+  Version table:
+     1.47.0-2.4~exp1ubuntu4.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+ *** 1.47.0-2.4~exp1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status

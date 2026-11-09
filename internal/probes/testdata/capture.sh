@@ -157,6 +157,9 @@ fwcap() {
   cap "$1" "$2" "fw_$3_nft" nft -j list ruleset
   cap "$1" "$2" "fw_$3_iptables" iptables -S INPUT
   cap "$1" "$2" "fw_$3_ip6tables" ip6tables -S INPUT
+  # the variant ("(nf_tables)" or "(legacy)") decides what a DROP of iptables means
+  cap "$1" "$2" "fw_$3_iptablesV" iptables -V
+  cap "$1" "$2" "fw_$3_ip6tablesV" ip6tables -V
 }
 
 for v in 2204 2404; do
@@ -195,18 +198,43 @@ for v in 2204 2404; do
     ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP'
     fwcap "$plain" $d ipt_drop
     fwreset "$plain"; ex "$plain" 'iptables -P INPUT DROP'; fwcap "$plain" $d ipt_drop4
+    # iptables-nft prints the policy of a table that nft has made dormant
+    # (not hooked: packets are accepted), for both families and for IPv6 only
     fwreset "$plain"
+    ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP; nft add table ip filter "{ flags dormant; }"; nft add table ip6 filter "{ flags dormant; }"'
+    fwcap "$plain" $d ipt_drop_dormant
+    fwreset "$plain"
+    ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP; nft add table ip6 filter "{ flags dormant; }"'
+    fwcap "$plain" $d ipt_drop_dormant6
     # the same four commands as an unprivileged user
     nb="setpriv --reuid=65534 --regid=65534 --clear-groups"
     cap "$plain" $d fw_notroot_ufw $nb ufw status verbose
     cap "$plain" $d fw_notroot_nft $nb nft -j list ruleset
     cap "$plain" $d fw_notroot_iptables $nb iptables -S INPUT
     cap "$plain" $d fw_notroot_ip6tables $nb ip6tables -S INPUT
+    cap "$plain" $d fw_notroot_iptablesV $nb iptables -V
+    cap "$plain" $d fw_notroot_ip6tablesV $nb ip6tables -V
+    # The legacy variant of iptables programs xtables, not nftables. It comes
+    # last: once a legacy table exists in the container's network namespace,
+    # iptables-nft prints "iptables-legacy tables present" on stderr.
+    fwreset "$plain"
+    ex "$plain" 'update-alternatives --set iptables /usr/sbin/iptables-legacy >/dev/null; update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >/dev/null
+      iptables -P INPUT DROP; ip6tables -P INPUT DROP'
+    fwcap "$plain" $d ipt_legacy_drop
+    ex "$plain" 'iptables -P INPUT ACCEPT; ip6tables -P INPUT ACCEPT
+      update-alternatives --set iptables /usr/sbin/iptables-nft >/dev/null; update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >/dev/null'
   fi
 
   # ---- security_updates: apt-get -s -o Debug::NoLocking=true dist-upgrade -------
   if want apt; then
-    apt="apt-get -s -o Debug::NoLocking=true dist-upgrade"
+    # the options keep apt from writing its cache files (/var/cache/apt/*.bin)
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    apt="apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade"
+    # polcap <name>: apt-cache policy for the packages the simulation upgrades,
+    # in the order the probe asks for them (sorted, one batch)
+    polcap() {
+      cap "$plain" $d "$1" bash -c "export LC_ALL=C; names=\$($apt | sed -n 's/^Inst \\([^ ]*\\) .*/\\1/p' | sort | tr '\\n' ' '); apt-cache $nocache policy -- \$names"
+    }
     # start from a host with pending updates: put apt, libpcre2 and the apt
     # library back to the versions of the release pocket
     ex "$plain" '. /etc/os-release; pk=""
@@ -216,20 +244,45 @@ for v in 2204 2404; do
       done
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk >/dev/null 2>&1'
     cap "$plain" $d apt_pending $apt
+    polcap apt_policy_pending
     # the same simulation against a source list without the security suite: the
     # packages are then available from -updates only
     ex "$plain" '. /etc/os-release
       f=$(ls /var/lib/apt/lists | grep -- "-updates_InRelease$" | head -1); base=${f%%_dists_*}; uri="http://${base//_//}"
       printf "deb %s %s main restricted universe multiverse\ndeb %s %s-updates main restricted universe multiverse\n" "$uri" "$VERSION_CODENAME" "$uri" "$VERSION_CODENAME" > /tmp/kw-nosecurity.list'
-    cap "$plain" $d apt_updates_only apt-get -s -o Debug::NoLocking=true -o Dir::Etc::sourcelist=/tmp/kw-nosecurity.list -o Dir::Etc::sourceparts=/nonexistent dist-upgrade
+    cap "$plain" $d apt_updates_only apt-get -s -o Debug::NoLocking=true $nocache -o Dir::Etc::sourcelist=/tmp/kw-nosecurity.list -o Dir::Etc::sourceparts=/nonexistent dist-upgrade
+    cap "$plain" $d apt_policy_updates_only bash -c "export LC_ALL=C; so='-o Dir::Etc::sourcelist=/tmp/kw-nosecurity.list -o Dir::Etc::sourceparts=/nonexistent'; names=\$(apt-get -s -o Debug::NoLocking=true $nocache \$so dist-upgrade | sed -n 's/^Inst \\([^ ]*\\) .*/\\1/p' | sort | tr '\\n' ' '); apt-cache $nocache \$so policy -- \$names"
     ex "$plain" 'rm -f /tmp/kw-nosecurity.list'
     cap "$plain" $d apt_notroot setpriv --reuid=65534 --regid=65534 --clear-groups $apt
     # a failing run: the dpkg status file is replaced by one that does not parse
     ex "$plain" 'printf "Package: foo\nthis is not\n a valid control stanza\n\n\0garbage" > /tmp/kw-badstatus'
-    cap "$plain" $d apt_error apt-get -s -o Debug::NoLocking=true -o Dir::State::status=/tmp/kw-badstatus dist-upgrade
+    cap "$plain" $d apt_error apt-get -s -o Debug::NoLocking=true $nocache -o Dir::State::status=/tmp/kw-badstatus dist-upgrade
     ex "$plain" 'rm -f /tmp/kw-badstatus'
     ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
     cap "$plain" $d apt_current $apt
+    # a security fix that a newer -updates version has superseded: one package
+    # goes back to the release pocket's version, while the security pocket
+    # carries a version in between and the updates pocket one above it
+    case $v in 2204) sup=libapparmor1 ;; 2404) sup=krb5-locales ;; esac
+    ex "$plain" '. /etc/os-release
+      ver=$(apt-cache madison '$sup' | awk -v s="$VERSION_CODENAME/" "index(\$0, s) && !/-updates|-security/ {print \$3; exit}")
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades '$sup'="$ver" >/dev/null 2>&1'
+    cap "$plain" $d apt_superseded $apt
+    polcap apt_policy_superseded
+    cap "$plain" $d apt_policy_superseded_one apt-cache $nocache policy -- $sup
+    ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
+    # Inst lines that end in annotation groups: the e2fsprogs family back to the
+    # release pocket's versions
+    ex "$plain" '. /etc/os-release; pk=""
+      for p in e2fsprogs libext2fs2 libext2fs2t64 libcom-err2 libss2 logsave; do
+        dpkg-query -W -f="\${Status}" $p 2>/dev/null | grep -q "install ok installed" || continue
+        ver=$(apt-cache madison "$p" | awk -v s="$VERSION_CODENAME/" "index(\$0, s) && !/-updates|-security/ {print \$3; exit}")
+        pk="$pk $p=$ver"
+      done
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk >/dev/null 2>&1'
+    cap "$plain" $d apt_annotations $apt
+    polcap apt_policy_annotations
+    ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
   fi
 
   # ---- authorized_keys: key files and the sshd -T lines that name them -----------
@@ -303,6 +356,8 @@ for v in 2204 2404; do
     startdockerd
     cap "$plain" $d docker_pid cat /run/docker.pid
     cap "$plain" $d dockerd_cmdline_plain bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    cap "$plain" $d dockerd_comm bash -c 'cat /proc/$(cat /run/docker.pid)/comm'
+    cap "$plain" $d dockerd_proc_owner bash -c 'stat -c %u /proc/$(cat /run/docker.pid)'
     cap "$plain" $d docker_ps_none docker ps -q --no-trunc
     fwcap "$plain" $d docker
     ex "$plain" 'docker image inspect alpine:3 >/dev/null 2>&1 || docker pull -q alpine:3 >/dev/null
@@ -333,6 +388,12 @@ for v in 2204 2404; do
     startdockerd -H unix:///var/run/docker.sock -H tcp://127.0.0.1:2375
     ex "$plain" 'docker -H tcp://127.0.0.1:2375 version >/dev/null'
     cap "$plain" $d dockerd_cmdline_tcp bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    stopdockerd
+    # single-dash letters combined: pflag reads -DH as -D and -H, and this
+    # daemon listens on TCP only
+    docker exec -d "$plain" bash -c "dockerd -DH tcp://127.0.0.1:2375 >/tmp/dockerd.log 2>&1"
+    ex "$plain" 'for i in $(seq 1 40); do docker -H tcp://127.0.0.1:2375 info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+    cap "$plain" $d dockerd_cmdline_group bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
     stopdockerd
     cap "$plain" $d docker_ps_nodaemon docker ps -q --no-trunc
     ex "$plain" 'rm -f /etc/docker/daemon.json'

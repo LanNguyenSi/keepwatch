@@ -15,15 +15,18 @@ var (
 	fwUfw   = []string{"ufw", "status", "verbose"}
 	fwIpt   = []string{"iptables", "-S", "INPUT"}
 	fwIpt6  = []string{"ip6tables", "-S", "INPUT"}
-	fwAllOf = [][]string{fwNft, fwUfw, fwIpt, fwIpt6}
+	fwIptV  = []string{"iptables", "-V"}
+	fwIpt6V = []string{"ip6tables", "-V"}
+	fwAllOf = [][]string{fwNft, fwUfw, fwIpt, fwIpt6, fwIptV, fwIpt6V}
 )
 
 func fwProbe(t *testing.T) probes.Probe { return prepare(t, "firewall_default", nil) }
 
-// fwFixtures serves the four captured commands of one scenario.
+// fwFixtures serves the captured commands of one scenario.
 func fwFixtures(v, scenario string) *fake.FakeRunner {
 	p := v + "/fw_" + scenario + "_"
-	return newRunner().Add(fwUfw, p+"ufw").Add(fwNft, p+"nft").Add(fwIpt, p+"iptables").Add(fwIpt6, p+"ip6tables")
+	return newRunner().Add(fwUfw, p+"ufw").Add(fwNft, p+"nft").Add(fwIpt, p+"iptables").Add(fwIpt6, p+"ip6tables").
+		Add(fwIptV, p+"iptablesV").Add(fwIpt6V, p+"ip6tablesV")
 }
 
 // A minimal nft document with the given chains; each chain is
@@ -67,6 +70,11 @@ func TestFirewallCapturedScenarios(t *testing.T) {
 		{"nft_dormant", result.Fail, []string{"input/ipv4", "input/ipv6"}, ""},
 		{"ipt_drop", result.Pass, nil, "iptables INPUT policy DROP"},
 		{"ipt_drop4", result.Fail, []string{"input/ipv6"}, ""},
+		// iptables-nft prints -P INPUT DROP for tables that nft has made dormant: nothing is dropped
+		{"ipt_drop_dormant", result.Fail, []string{"input/ipv4", "input/ipv6"}, "not hooked according to nft"},
+		{"ipt_drop_dormant6", result.Fail, []string{"input/ipv6"}, "ip6tables (nf_tables)"},
+		// the legacy variant programs the kernel directly, its policy counts
+		{"ipt_legacy_drop", result.Pass, nil, "iptables (legacy) INPUT policy DROP"},
 		// a running Docker daemon changes forward and nat chains, not the input policy
 		{"docker", result.Fail, []string{"input/ipv4", "input/ipv6"}, ""},
 	}
@@ -115,8 +123,24 @@ func allText(o probes.Outcome) string {
 	return s
 }
 
+const (
+	iptLegacy = "iptables v1.8.7 (legacy)\n"
+	iptNFT    = "iptables v1.8.7 (nf_tables)\n"
+)
+
+// fwRunner is a host whose iptables is the legacy variant, so that a DROP
+// there counts on its own; fwRunnerNFT is the nf_tables variant.
 func fwRunner(nft, ipt4, ipt6 string, ufw string) *fake.FakeRunner {
+	return fwRunnerV(iptLegacy, nft, ipt4, ipt6, ufw)
+}
+
+func fwRunnerNFT(nft, ipt4, ipt6 string, ufw string) *fake.FakeRunner {
+	return fwRunnerV(iptNFT, nft, ipt4, ipt6, ufw)
+}
+
+func fwRunnerV(variant, nft, ipt4, ipt6 string, ufw string) *fake.FakeRunner {
 	r := newRunner()
+	r.AddResult(fwIptV, inline(variant, 0)).AddResult(fwIpt6V, inline(strings.Replace(variant, "iptables", "ip6tables", 1), 0))
 	r.AddResult(fwNft, inline(nft, 0)).AddResult(fwIpt, inline(ipt4, 0)).AddResult(fwIpt6, inline(ipt6, 0))
 	if ufw == "" {
 		r.AddError(fwUfw, execx.ErrNotFound)
@@ -356,4 +380,105 @@ func TestFirewallArgvAndOptions(t *testing.T) {
 	if nft == nil || nft.Opts.MaxOutput < 4<<20 {
 		t.Fatalf("nft call %+v: large rulesets need a larger output limit", nft)
 	}
+}
+
+func TestFirewallDormantTablesAreNotADrop(t *testing.T) {
+	nftDrop := nftDoc("ip filter INPUT filter input drop", "ip6 filter INPUT filter input drop")
+	dormant := func(fam string) string {
+		return `{"table": {"family": "` + fam + `", "name": "filter", "handle": 1, "flags": "filter"}}`
+	}
+	// the document nft prints for dormant tables: the tables carry flags
+	dormantDoc := strings.Replace(strings.Replace(nftDrop, `{"table": {"family": "ip", "name": "filter", "handle": 1}}`, dormant("ip"), 1),
+		`{"table": {"family": "ip6", "name": "filter", "handle": 1}}`, dormant("ip6"), 1)
+	if dormantDoc == nftDrop {
+		t.Fatal("the test document was not changed")
+	}
+	t.Run("nf_tables iptables reports DROP for a dormant table: fail", func(t *testing.T) {
+		o := exec(fwProbe(t), fwRunnerNFT(dormantDoc, iptDrop, iptDrop, ""), nil)
+		wantStatus(t, o, result.Fail)
+		if !eq(subjects(o), []string{"input/ipv4", "input/ipv6"}) {
+			t.Fatalf("subjects %v", subjects(o))
+		}
+		wantSummary(t, o, "2 of 2")
+		if !strings.Contains(allText(o), "dormant") {
+			t.Fatalf("the dormant table is not named: %s", allText(o))
+		}
+	})
+	t.Run("the same documents with a legacy iptables: the policy counts", func(t *testing.T) {
+		o := exec(fwProbe(t), fwRunner(dormantDoc, iptDrop, iptDrop, ""), nil)
+		wantStatus(t, o, result.Pass)
+		wantSummary(t, o, "iptables (legacy) INPUT policy DROP")
+	})
+	t.Run("an active table that drops: iptables agrees", func(t *testing.T) {
+		o := exec(fwProbe(t), fwRunnerNFT(nftDrop, iptDrop, iptDrop, ""), nil)
+		wantStatus(t, o, result.Pass)
+		wantSummary(t, o, "IPv4 by nftables ip filter/INPUT, iptables INPUT policy DROP")
+	})
+	t.Run("nf_tables iptables with DROP and an empty nft view: not counted", func(t *testing.T) {
+		o := exec(fwProbe(t), fwRunnerNFT(nftNothing, iptDrop, iptDrop, ""), nil)
+		wantStatus(t, o, result.Fail)
+	})
+	t.Run("only one family dormant", func(t *testing.T) {
+		doc := strings.Replace(nftDrop, `{"table": {"family": "ip6", "name": "filter", "handle": 1}}`, dormant("ip6"), 1)
+		o := exec(fwProbe(t), fwRunnerNFT(doc, iptDrop, iptDrop, ""), nil)
+		wantStatus(t, o, result.Fail)
+		if !eq(subjects(o), []string{"input/ipv6"}) {
+			t.Fatalf("subjects %v", subjects(o))
+		}
+	})
+	t.Run("nft is not installed: the policy counts, with a note", func(t *testing.T) {
+		o := exec(fwProbe(t), fwRunnerNFT(nftNothing, iptDrop, iptDrop, "").AddError(fwNft, execx.ErrNotFound), nil)
+		wantStatus(t, o, result.Pass)
+		wantSummary(t, o, "nft is not installed, so it was not checked whether the table iptables programs is hooked")
+	})
+	t.Run("nft cannot be read: a DROP of the nf_tables variant is not trusted", func(t *testing.T) {
+		for _, nft := range []execx.Result{{ExitCode: 1, Stderr: []byte("Operation not permitted\n")}, {Stdout: []byte("garbage")}} {
+			o := exec(fwProbe(t), fwRunnerNFT(nftNothing, iptDrop, iptDrop, "").AddResult(fwNft, nft), nil)
+			wantStatus(t, o, result.Error)
+		}
+		o := exec(fwProbe(t), fwRunnerNFT(nftNothing, iptDrop, iptDrop, "").AddError(fwNft, execx.ErrTimeout), nil)
+		wantStatus(t, o, result.Error)
+	})
+}
+
+func TestFirewallIptablesVariant(t *testing.T) {
+	run := func(v4, v6 string) probes.Outcome {
+		r := fwRunner(nftNothing, iptDrop, iptDrop, "").AddResult(fwIptV, inline(v4, 0)).AddResult(fwIpt6V, inline(v6, 0))
+		return exec(fwProbe(t), r, nil)
+	}
+	t.Run("no suffix is the legacy variant", func(t *testing.T) {
+		wantStatus(t, run("iptables v1.6.1\n", "ip6tables v1.6.1\n"), result.Pass)
+	})
+	t.Run("legacy is read per tool", func(t *testing.T) {
+		// IPv4 legacy drops, IPv6 is the nf_tables variant with an empty nft view
+		o := run("iptables v1.8.10 (legacy)\n", "ip6tables v1.8.10 (nf_tables)\n")
+		wantStatus(t, o, result.Fail)
+		if !eq(subjects(o), []string{"input/ipv6"}) {
+			t.Fatalf("subjects %v", subjects(o))
+		}
+	})
+	for name, out := range map[string]string{
+		"empty":                    "",
+		"another program":          "ip6tables v1.8.10 (legacy)\n",
+		"an unknown variant":       "iptables v1.8.10 (xtables)\n",
+		"text after the version":   "iptables v1.8.10 (legacy) extra\n",
+		"two lines":                "iptables v1.8.10 (legacy)\niptables v1.8.10 (legacy)\n",
+		"no version number":        "iptables (legacy)\n",
+		"an error message on out":  "Fatal: can't open lock file\n",
+		"the legacy word, no vers": "legacy\n",
+	} {
+		t.Run("unreadable: "+name, func(t *testing.T) {
+			o := run(out, "ip6tables v1.8.10 (legacy)\n")
+			wantStatus(t, o, result.Error)
+			wantSummary(t, o, "iptables -V")
+		})
+	}
+	t.Run("-V exits non-zero", func(t *testing.T) {
+		r := fwRunner(nftNothing, iptDrop, iptDrop, "").AddResult(fwIptV, execx.Result{Stdout: []byte(iptLegacy), ExitCode: 1})
+		wantStatus(t, exec(fwProbe(t), r, nil), result.Error)
+	})
+	t.Run("-V is killed", func(t *testing.T) {
+		r := fwRunner(nftNothing, iptDrop, iptDrop, "").AddResult(fwIpt6V, execx.Result{Stdout: []byte("ip6tables v1.8.10 (legacy)\n"), Signaled: true, ExitCode: -1})
+		wantStatus(t, exec(fwProbe(t), r, nil), result.Error)
+	})
 }

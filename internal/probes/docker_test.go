@@ -51,6 +51,7 @@ func dockerHost(daemonJSON, cmdline string) probestest.FakeFS {
 	if cmdline != "" {
 		files["/run/docker.pid"] = "4242"
 		files["/proc/4242/cmdline"] = cmdline
+		files["/proc/4242/comm"] = "dockerd\n"
 	}
 	return probestest.FakeFS{Files: files}
 }
@@ -104,6 +105,21 @@ func TestDockerCapturedDaemon(t *testing.T) {
 				t.Fatalf("evidence %+v", o.Evidence)
 			}
 		})
+		t.Run(v+"/tcp host in a group of combined flags (dockerd -DH tcp://...)", func(t *testing.T) {
+			o := exec(dockerProbe(t), none, dockerHost(fixtureFile(t, v+"/daemon_json_plain.stdout"), fixtureFile(t, v+"/dockerd_cmdline_group.stdout")))
+			wantStatus(t, o, result.Fail)
+			if !eq(subjects(o), []string{"dockerd tcp://127.0.0.1:2375"}) {
+				t.Fatalf("evidence %+v", o.Evidence)
+			}
+		})
+		t.Run(v+"/the captured process name is what the probe expects", func(t *testing.T) {
+			if got := strings.TrimSpace(fixtureFile(t, v+"/dockerd_comm.stdout")); got != "dockerd" {
+				t.Fatalf("comm %q", got)
+			}
+			if got := strings.TrimSpace(fixtureFile(t, v+"/dockerd_proc_owner.stdout")); got != "0" {
+				t.Fatalf("owner %q", got)
+			}
+		})
 		t.Run(v+"/daemon not reachable", func(t *testing.T) {
 			r := newRunner().Add(dockerPs, v+"/docker_ps_nodaemon")
 			o := exec(dockerProbe(t), r, dockerHost(fixtureFile(t, v+"/daemon_json_plain.stdout"), ""))
@@ -148,9 +164,17 @@ func TestDockerNotInstalled(t *testing.T) {
 		o := exec(dockerProbe(t), missing, dockerHost(`{"hosts": ["tcp://0.0.0.0:2375"]}`, ""))
 		wantStatus(t, o, result.Fail)
 	})
-	t.Run("only a pid file", func(t *testing.T) {
+	t.Run("only a pid file: a running dockerd and no docker command is an error", func(t *testing.T) {
 		o := exec(dockerProbe(t), missing, dockerHost("", "dockerd\x00-H\x00tcp://0.0.0.0:2375\x00"))
-		wantStatus(t, o, result.Fail)
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, "dockerd is running but the docker command is not installed")
+		if !eq(subjects(o), []string{"dockerd tcp://0.0.0.0:2375"}) {
+			t.Fatalf("the confirmed finding is lost: %+v", o.Evidence)
+		}
+	})
+	t.Run("a stale pid file and no docker command is not an error", func(t *testing.T) {
+		fsys := probestest.FakeFS{Files: map[string]string{"/run/docker.pid": "4242"}}
+		wantStatus(t, exec(dockerProbe(t), missing, fsys), result.Pass)
 	})
 }
 
@@ -180,9 +204,9 @@ func TestDockerHostEntries(t *testing.T) {
 		})
 	}
 	t.Run("both a safe and an unsafe host", func(t *testing.T) {
-		o := exec(dockerProbe(t), none, dockerHost(`{"hosts": ["fd://", "tcp://10.0.0.1:2376"]}`, ""))
+		o := exec(dockerProbe(t), none, dockerHost(`{"hosts": ["fd://", "tcp://192.0.2.1:2376"]}`, ""))
 		wantStatus(t, o, result.Fail)
-		if !eq(subjects(o), []string{"daemon.json tcp://10.0.0.1:2376"}) {
+		if !eq(subjects(o), []string{"daemon.json tcp://192.0.2.1:2376"}) {
 			t.Fatalf("subjects %v", subjects(o))
 		}
 	})
@@ -261,23 +285,62 @@ func TestDockerCommandLine(t *testing.T) {
 	}
 	t.Run("config file named on the command line replaces daemon.json", func(t *testing.T) {
 		for _, args := range [][]string{{"--config-file", "/etc/alt.json"}, {"--config-file=/etc/alt.json"}} {
-			fsys := dockerHost(`{"hosts": ["tcp://1.2.3.4:1"]}`, cmd(args...))
-			fsys.Files["/etc/alt.json"] = `{"hosts": ["tcp://5.6.7.8:2"]}`
+			fsys := dockerHost(`{"hosts": ["tcp://198.51.100.1:1"]}`, cmd(args...))
+			fsys.Files["/etc/alt.json"] = `{"hosts": ["tcp://203.0.113.1:2"]}`
 			o := exec(dockerProbe(t), none, fsys)
 			wantStatus(t, o, result.Fail)
-			if !eq(subjects(o), []string{"daemon.json tcp://5.6.7.8:2"}) {
+			if !eq(subjects(o), []string{"daemon.json tcp://203.0.113.1:2"}) {
 				t.Fatalf("subjects %v", subjects(o))
 			}
 		}
-		fsys := dockerHost(`{"hosts": ["tcp://1.2.3.4:1"]}`, cmd("--config-file", "/etc/none.json"))
+		fsys := dockerHost(`{"hosts": ["tcp://198.51.100.1:1"]}`, cmd("--config-file", "/etc/none.json"))
 		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Pass)
 		wantStatus(t, exec(dockerProbe(t), none, dockerHost("", cmd("--config-file", "relative.json"))), result.Error)
 		wantStatus(t, exec(dockerProbe(t), none, dockerHost("", cmd("--config-file"))), result.Error)
 	})
 	t.Run("a pid that is not a dockerd", func(t *testing.T) {
+		// the command line says sshd
 		o := exec(dockerProbe(t), none, dockerHost("", "/usr/sbin/sshd\x00-H\x00tcp://0.0.0.0:2375\x00"))
-		wantStatus(t, o, result.Pass)
+		wantStatus(t, o, result.Error)
 		wantSummary(t, o, "not dockerd")
+		// the process name says sshd
+		fsys := dockerHost("", cmd("-H", "tcp://0.0.0.0:2375"))
+		fsys.Files["/proc/4242/comm"] = "sshd\n"
+		o = exec(dockerProbe(t), none, fsys)
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, "not dockerd")
+		if len(o.Evidence) != 0 {
+			t.Fatalf("the command line of a process that is not the daemon was read: %+v", o.Evidence)
+		}
+	})
+	t.Run("a pid of a process that root does not own is not trusted", func(t *testing.T) {
+		// pid reuse: a process of an unprivileged user, whose --config-file would be read as root
+		fsys := dockerHost("", cmd("--config-file", "/etc/alt.json", "-H", "tcp://0.0.0.0:2375"))
+		fsys.Files["/etc/alt.json"] = `{"hosts": ["tcp://198.51.100.1:1"]}`
+		fsys.Owners = map[string]uint32{"/proc/4242": 1000}
+		o := exec(dockerProbe(t), none, fsys)
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, "owned by uid 1000")
+		if len(o.Evidence) != 0 {
+			t.Fatalf("that process's arguments were used: %+v", o.Evidence)
+		}
+		fsys.Owners = map[string]uint32{"/proc/4242": 0}
+		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Fail)
+	})
+	t.Run("the owner cannot be told", func(t *testing.T) {
+		fsys := dockerHost("", cmd())
+		fsys.Errs = map[string]error{"/proc/4242": fs.ErrPermission}
+		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Error)
+		// a file system without the operation
+		files := probestest.MemFS{"/run/docker.pid": "4242", "/proc/4242/cmdline": cmd(), "/proc/4242/comm": "dockerd\n"}
+		wantStatus(t, exec(dockerProbe(t), none, files), result.Error)
+	})
+	t.Run("the process vanishes after its owner was read", func(t *testing.T) {
+		fsys := dockerHost("", cmd())
+		fsys.Errs = map[string]error{"/proc/4242/comm": fs.ErrNotExist}
+		o := exec(dockerProbe(t), none, fsys)
+		wantStatus(t, o, result.Pass)
+		wantSummary(t, o, "stale")
 	})
 	t.Run("a dockerd under another path", func(t *testing.T) {
 		wantStatus(t, exec(dockerProbe(t), none, dockerHost("", "/opt/x/dockerd\x00-H\x00tcp://0.0.0.0:2375\x00")), result.Fail)
@@ -289,23 +352,23 @@ func TestDockerCommandLine(t *testing.T) {
 		wantSummary(t, o, "stale")
 	})
 	t.Run("the second pid file is used when the first is missing", func(t *testing.T) {
-		fsys := probestest.FakeFS{Files: map[string]string{"/var/run/docker.pid": "4242", "/proc/4242/cmdline": cmd("-H", "tcp://0.0.0.0:1")}}
+		fsys := probestest.FakeFS{Files: map[string]string{"/var/run/docker.pid": "4242", "/proc/4242/cmdline": cmd("-H", "tcp://0.0.0.0:1"), "/proc/4242/comm": "dockerd\n"}}
 		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Fail)
 	})
 	t.Run("pid files that hold no pid", func(t *testing.T) {
 		for _, pid := range []string{"", "abc", "12abc", "0", "-5", "042", "1 2", "99999999999999999999"} {
-			fsys := probestest.FakeFS{Files: map[string]string{"/run/docker.pid": pid, "/proc/42/cmdline": cmd()}}
+			fsys := probestest.FakeFS{Files: map[string]string{"/run/docker.pid": pid, "/proc/42/cmdline": cmd(), "/proc/42/comm": "dockerd\n"}}
 			o := exec(dockerProbe(t), none, fsys)
 			if o.Status != result.Error {
 				t.Errorf("pid %q: status %s (%s)", pid, o.Status, o.Summary)
 			}
 		}
-		wantStatus(t, exec(dockerProbe(t), none, probestest.FakeFS{Files: map[string]string{"/run/docker.pid": "4242\n", "/proc/4242/cmdline": cmd()}}), result.Pass)
+		wantStatus(t, exec(dockerProbe(t), none, probestest.FakeFS{Files: map[string]string{"/run/docker.pid": "4242\n", "/proc/4242/cmdline": cmd(), "/proc/4242/comm": "dockerd\n"}}), result.Pass)
 	})
 	t.Run("unreadable pid file and command line", func(t *testing.T) {
 		fsys := probestest.FakeFS{Errs: map[string]error{"/run/docker.pid": fs.ErrPermission}}
 		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Error)
-		fsys = probestest.FakeFS{Files: map[string]string{"/run/docker.pid": "7"}, Errs: map[string]error{"/proc/7/cmdline": fs.ErrPermission}}
+		fsys = probestest.FakeFS{Files: map[string]string{"/run/docker.pid": "7", "/proc/7/comm": "dockerd\n"}, Errs: map[string]error{"/proc/7/cmdline": fs.ErrPermission}}
 		wantStatus(t, exec(dockerProbe(t), none, fsys), result.Error)
 	})
 }
@@ -635,5 +698,54 @@ func TestDockerArgvIsFixed(t *testing.T) {
 	want := []string{"docker ps -q --no-trunc", "docker inspect --type container -- " + ids[0] + " " + ids[1]}
 	if !eq(got, want) {
 		t.Fatalf("calls %q, want %q", got, want)
+	}
+}
+
+// dockerd reads its flags with pflag, which lets single-dash letters be
+// combined: "-DH tcp://..." is -D and -H. The expected results were checked
+// against a real dockerd (see the notes of the task), not only against this
+// reading of pflag.
+func TestDockerCommandLineShorthandGroups(t *testing.T) {
+	none := newRunner().AddResult(dockerPs, inline("", 0))
+	cmd := func(args ...string) string { return "/usr/bin/dockerd\x00" + strings.Join(args, "\x00") + "\x00" }
+	const tcp = "tcp://192.0.2.1:2375"
+	cases := []struct {
+		name string
+		args []string
+		want result.Status
+		sub  string
+	}{
+		{"-DH separate value", []string{"-DH", tcp}, result.Fail, "dockerd " + tcp},
+		{"-DH with attached value", []string{"-DH" + tcp}, result.Fail, "dockerd " + tcp},
+		{"-DH= value", []string{"-DH=" + tcp}, result.Fail, "dockerd " + tcp},
+		{"switches before and a value taker after", []string{"-Dv", "-DvH", tcp}, result.Fail, "dockerd " + tcp},
+		{"another value taker before H in a group is its value", []string{"-sH", tcp}, result.Pass, ""},
+		{"-p takes the rest of the group", []string{"-pH" + tcp}, result.Pass, ""},
+		{"-G separate then -H", []string{"-G", "docker", "-H", tcp}, result.Fail, "dockerd " + tcp},
+		{"-b with attached value then -DH", []string{"-bbr0", "-DH", tcp}, result.Fail, "dockerd " + tcp},
+		{"-DH at the end has no value", []string{"-DH"}, result.Error, "-H without a value"},
+		{"-D alone", []string{"-D"}, result.Pass, ""},
+		{"-D=false then -H", []string{"-D=false", "-H", tcp}, result.Fail, "dockerd " + tcp},
+		{"-vh", []string{"-vh"}, result.Pass, ""},
+		{"unix host in a group", []string{"-DH", "unix:///var/run/docker.sock"}, result.Pass, ""},
+		{"unknown scheme in a group", []string{"-DH", "gopher://x"}, result.Error, "not understood"},
+		{"an unknown letter before H: cannot be read", []string{"-xH", tcp}, result.Error, "cannot be read"},
+		{"letters after H are its value", []string{"-Hx", tcp}, result.Fail, "dockerd x"},
+		{"an unknown letter, no H in the group", []string{"-xyz", "-H", tcp}, result.Fail, "dockerd " + tcp},
+		{"a lone dash is not a flag", []string{"-", "-H", tcp}, result.Fail, "dockerd " + tcp},
+		{"tls=false then tlsverify", []string{"--tls=false", "--tlsverify", "-DH", tcp}, result.Fail, "tlsverify on"},
+		{"tlsverify=false", []string{"--tlsverify=false", "-H", tcp}, result.Fail, "no TLS"},
+		{"tls=false after tls", []string{"--tls", "--tls=false", "-H", tcp}, result.Fail, "no TLS"},
+		{"tls with a value that is not a bool", []string{"--tls=maybe", "-H", tcp}, result.Error, "not understood"},
+		{"--host= in a mix", []string{"-D", "--host=" + tcp}, result.Fail, "dockerd " + tcp},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := exec(dockerProbe(t), none, dockerHost("", cmd(c.args...)))
+			wantStatus(t, o, c.want)
+			if c.sub != "" && !strings.Contains(allText(o), c.sub) {
+				t.Fatalf("%q lacks %q", allText(o), c.sub)
+			}
+		})
 	}
 }

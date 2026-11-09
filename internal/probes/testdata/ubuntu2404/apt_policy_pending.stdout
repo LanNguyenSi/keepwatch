@@ -1,0 +1,30 @@
+apt:
+  Installed: 2.7.14build2
+  Candidate: 2.8.4ubuntu0.1
+  Version table:
+     2.8.4ubuntu0.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+ *** 2.7.14build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libapt-pkg6.0t64:
+  Installed: 2.7.14build2
+  Candidate: 2.8.4ubuntu0.1
+  Version table:
+     2.8.4ubuntu0.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+ *** 2.7.14build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+libpcre2-8-0:
+  Installed: 10.42-4ubuntu2
+  Candidate: 10.42-4ubuntu2.2
+  Version table:
+     10.42-4ubuntu2.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages
+ *** 10.42-4ubuntu2 500
+        500 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages
+        100 /var/lib/dpkg/status

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,22 +24,35 @@ const nftMaxOutput = int64(16 << 20)
 //
 // It takes no parameters (and so has no list parameters).
 //
-// What counts is what the kernel enforces, so the verdict comes from the two
+// What counts is what the kernel enforces, so the verdict comes from the
 // kernel-level views, and a packet is dropped as soon as any hook drops it:
 //
 //	nft -j list ruleset   a base chain of type filter on hook input with
 //	                      policy drop, in a table of family ip (IPv4), ip6
 //	                      (IPv6) or inet (both). Chains on other hooks (a
 //	                      forward chain with policy drop, as Docker sets one
-//	                      up) and chains of type nat do not count, nor does a
-//	                      table that is dormant or carries flags keepwatch does
-//	                      not know.
+//	                      up), chains without a hook and chains of type nat
+//	                      do not count, nor does a table that is dormant or
+//	                      carries flags keepwatch does not know.
+//	iptables -V           which iptables this is: "(nf_tables)" or "(legacy)";
+//	                      no suffix (iptables before 1.8) is legacy
 //	iptables -S INPUT     "-P INPUT DROP" (IPv4)
 //	ip6tables -S INPUT    "-P INPUT DROP" (IPv6)
 //
-// A family passes when at least one readable source drops it. On Ubuntu
-// 22.04 and 24.04 iptables is the nftables variant, so both views usually show
-// the same rules.
+// The iptables variant decides what a DROP there means. The legacy variant
+// programs the kernel's xtables directly, so its policy counts. The nf_tables
+// variant (the one Ubuntu 22.04 and 24.04 install) only writes the table
+// "filter" of nftables, and prints "-P INPUT DROP" for a table that nft shows
+// as dormant (flags dormant), whose chains are not hooked and drop nothing
+// (measured on both releases: a connection to a listening port is accepted).
+// For that variant the policy line therefore adds nothing to what nft shows:
+// it counts as a drop only through the nft view above, and a DROP that nft
+// does not confirm is named in the detail and not counted. When nft is not
+// installed the policy line of the nf_tables variant counts, with a note that
+// the table could not be checked for being dormant; when nft is installed but
+// cannot be read the DROP is not counted and the result is error.
+//
+// A family passes when at least one readable source drops it.
 //
 // ufw is read as well ("ufw status verbose") but it only configures iptables:
 // it can neither add a drop nor take one away, and it can report "deny" while
@@ -60,11 +74,19 @@ const nftMaxOutput = int64(16 << 20)
 // Failing evidence has one item per family that is not dropped, with subject
 // "input/ipv4" or "input/ipv6".
 //
-// Limits: it judges the default policy, not the rules. A chain with policy
-// drop whose first rule accepts everything passes. Rules in iptables-legacy
-// and in nftables that a different tool shows are seen only through the
-// variant "iptables" points to and through nft. A host without IPv6 support in
-// the kernel makes ip6tables fail, which is error here.
+// Limits: it judges the default policy of the base chains, not their rules,
+// and what it cannot see it does not weigh. A chain with policy drop whose
+// first rule accepts everything passes (that is the administrator's rule, not a
+// default). Base chains on the same hook do not override each other the way a
+// chain order might suggest: an accept in a chain with a lower priority number
+// ends the evaluation of that chain only, the packet goes on to the later
+// chains, and a policy drop there still drops it (measured on both releases
+// with a priority -10 chain that accepts everything and a priority 0 chain with
+// policy drop: the connection is dropped). So an input chain with policy drop
+// at any priority counts, and what is not a limit is the order. Rules in
+// iptables-legacy next to nftables that a different tool shows are seen only
+// through the variant "iptables" points to and through nft. A host without IPv6
+// support in the kernel makes ip6tables fail, which is error here.
 type firewallDefault struct{}
 
 func (firewallDefault) Name() string { return "firewall_default" }
@@ -105,18 +127,28 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 	installed := 0
 
 	// nftables
+	const (
+		nftNotInstalled = iota
+		nftUnreadable
+		nftRead
+	)
+	nftState := nftNotInstalled
+	var nftChains nftView
 	if res, out := runWith(ctx, env, []string{"nft", "-j", "list", "ruleset"}, execx.Opts{Timeout: 30 * time.Second, MaxOutput: nftMaxOutput}, false); out != nil {
 		v.sourceProblem("nft", out)
 		if out.Status != result.Skipped {
 			installed++
+			nftState = nftUnreadable
 		}
 	} else {
 		installed++
+		nftState = nftUnreadable
 		if res.ExitCode != 0 {
 			v.failures = append(v.failures, unexpectedExit("nft", res).Summary)
 		} else if chains, err := parseNft(res.Stdout); err != nil {
 			v.failures = append(v.failures, "nft: "+err.Error())
 		} else {
+			nftState, nftChains = nftRead, chains
 			for f := fam4; f <= fam6; f++ {
 				v.readable[f] = true
 				if len(chains.drops[f]) > 0 {
@@ -134,7 +166,7 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 		prog string
 		fam  int
 	}{{"iptables", fam4}, {"ip6tables", fam6}} {
-		res, out := run(ctx, env, []string{t.prog, "-S", "INPUT"}, 0)
+		vres, out := run(ctx, env, []string{t.prog, "-V"}, 0)
 		if out != nil {
 			v.sourceProblem(t.prog, out)
 			if out.Status != result.Skipped {
@@ -143,6 +175,20 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 			continue
 		}
 		installed++
+		if vres.ExitCode != 0 {
+			v.failures = append(v.failures, unexpectedExit(t.prog+" -V", vres).Summary)
+			continue
+		}
+		legacy, err := iptablesIsLegacy(t.prog, string(vres.Stdout))
+		if err != nil {
+			v.failures = append(v.failures, fmt.Sprintf("%s -V: %v", t.prog, err))
+			continue
+		}
+		res, out := run(ctx, env, []string{t.prog, "-S", "INPUT"}, 0)
+		if out != nil {
+			v.sourceProblem(t.prog, out)
+			continue
+		}
 		if res.ExitCode != 0 {
 			v.failures = append(v.failures, unexpectedExit(t.prog, res).Summary)
 			continue
@@ -153,10 +199,24 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 			continue
 		}
 		v.readable[t.fam] = true
-		if policy == "DROP" {
-			v.dropBy[t.fam] = append(v.dropBy[t.fam], t.prog+" INPUT policy DROP")
-		} else {
+		if policy != "DROP" {
 			v.openSeen[t.fam] = append(v.openSeen[t.fam], t.prog+": INPUT policy ACCEPT")
+			continue
+		}
+		switch {
+		case legacy:
+			v.dropBy[t.fam] = append(v.dropBy[t.fam], t.prog+" (legacy) INPUT policy DROP")
+		case nftState == nftRead && len(nftChains.drops[t.fam]) > 0:
+			// the same chain nft shows: nothing new, but it agrees
+			v.dropBy[t.fam] = append(v.dropBy[t.fam], t.prog+" INPUT policy DROP")
+		case nftState == nftRead:
+			v.notes = append(v.notes, fmt.Sprintf("%s (nf_tables) prints INPUT policy DROP but nft shows no active input chain that drops %s: not counted", t.prog, famName[t.fam]))
+			v.openSeen[t.fam] = append(v.openSeen[t.fam], t.prog+" (nf_tables): INPUT policy DROP, not hooked according to nft")
+		case nftState == nftNotInstalled:
+			v.dropBy[t.fam] = append(v.dropBy[t.fam], t.prog+" (nf_tables) INPUT policy DROP")
+			v.notes = append(v.notes, "nft is not installed, so it was not checked whether the table "+t.prog+" programs is hooked")
+		default:
+			v.openSeen[t.fam] = append(v.openSeen[t.fam], t.prog+" (nf_tables): INPUT policy DROP, not confirmed because nft could not be read")
 		}
 	}
 
@@ -198,6 +258,9 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 		}
 		if ufwState != "" {
 			d += "; ufw: " + ufwState
+		}
+		if len(v.notes) > 0 {
+			d += "; " + clean(strings.Join(v.notes, "; "), 400)
 		}
 		ev = append(ev, result.Evidence{Subject: famSubject[f], Detail: d})
 	}
@@ -293,6 +356,20 @@ func parseUFW(out string) (active bool, incoming string, err error) {
 		return false, "", fmt.Errorf("unexpected incoming default %q", clean(in, 20))
 	}
 	return false, "", errors.New("active, but no Default line")
+}
+
+var iptablesVersionRe = regexp.MustCompile(`^(ip6?tables) v\d+\.\d+\.\d+(?: \((legacy|nf_tables)\))?$`)
+
+// iptablesIsLegacy reads "iptables -V": "iptables v1.8.7 (nf_tables)",
+// "iptables v1.8.10 (legacy)", or "iptables v1.6.1" from before the two
+// variants existed, which is legacy.
+func iptablesIsLegacy(prog, out string) (bool, error) {
+	line := strings.TrimRight(out, "\n")
+	m := iptablesVersionRe.FindStringSubmatch(line)
+	if m == nil || m[1] != prog {
+		return false, fmt.Errorf("not a version line: %q", clean(line, 60))
+	}
+	return m[2] != "nf_tables", nil
 }
 
 // parseIptablesInput reads "iptables -S INPUT" / "ip6tables -S INPUT": one

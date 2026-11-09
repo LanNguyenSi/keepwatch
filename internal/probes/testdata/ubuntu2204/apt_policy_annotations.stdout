@@ -1,0 +1,55 @@
+e2fsprogs:
+  Installed: 1.46.5-2ubuntu1
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+     1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libcom-err2:
+  Installed: 1.46.5-2ubuntu1
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+     1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libext2fs2:
+  Installed: 1.46.5-2ubuntu1
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+     1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libss2:
+  Installed: 1.46.5-2ubuntu1
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+     1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+logsave:
+  Installed: 1.46.5-2ubuntu1
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+     1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status

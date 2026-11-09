@@ -106,8 +106,8 @@ deviation: nothing failed, but something needs a look.
 | `fail2ban_jail` | `fail2ban-client -- status <jail>` | `jail` |
 | `listeners` | `ss -Hltn` and `ss -Hlun`, compared with `listeners.allow`; `ss -Hltnp` and `ss -Hlunp` only to name the processes | `allow_loopback` (default true), `protos` (list, default tcp and udp) |
 | `reboot_required` | `/var/run/reboot-required` and `.pkgs`, and `needrestart -b -k -r l` when installed | none |
-| `firewall_default` | `nft -j list ruleset`, `iptables -S INPUT`, `ip6tables -S INPUT`; `ufw status verbose` for the explanation | none |
-| `security_updates` | `apt-get -s -o Debug::NoLocking=true dist-upgrade` and the age of `/var/lib/apt/lists/*InRelease` | `max_list_age_hours` (default 48) |
+| `firewall_default` | `nft -j list ruleset`, `iptables -V` and `-S INPUT`, `ip6tables -V` and `-S INPUT`; `ufw status verbose` for the explanation | none |
+| `security_updates` | `apt-get -s -o Debug::NoLocking=true dist-upgrade`, `apt-cache policy -- <packages>` for the packages it upgrades, and the age of `/var/lib/apt/lists/*InRelease` | `max_list_age_hours` (default 48) |
 | `docker_exposure` | `/etc/docker/daemon.json`, the running dockerd's command line, `docker ps` and `docker inspect` | none |
 | `authorized_keys` | `sshd -T` (the shared run), `/etc/passwd`, and the users' authorized keys files | none (`authorized_keys.expected` is a top-level section) |
 | `disk_usage` | `/proc/self/mountinfo` and statfs on the mounts | `warn_percent` (80), `fail_percent` (90), `fstypes` (list) |
@@ -139,47 +139,80 @@ path component and only if they are regular files.
 filter on the input hook with policy drop in an `ip`, `ip6` or `inet` nftables
 table, and `-P INPUT DROP` of iptables (IPv4) and ip6tables (IPv6). Both
 families need a drop, from any one readable source, because a drop in any hook
-is final. Forward and nat chains (Docker sets some up) and tables that are
-dormant do not count. `ufw` is only read to explain: it can neither add a drop
-nor remove one, and the check says when it reports `deny` while the kernel does
-not drop. A source that cannot be read does not stop a pass that another source
-confirms, but turns a fail into `error`. Limit: it judges the default policy,
-not the rules; a drop chain that starts with a rule accepting everything
-passes.
+is final. Forward and nat chains (Docker sets some up), chains without a hook
+and tables that are dormant do not count. Which iptables it is decides what its
+`DROP` means: the legacy variant programs the kernel's xtables, so its policy
+counts; the `nf_tables` variant (what Ubuntu 22.04 and 24.04 install) only
+writes an nftables table, and prints `-P INPUT DROP` for a table that nft shows
+as dormant, where packets are accepted. For that variant the policy counts
+only when nft shows the active chain, or (with a note) when nft is not
+installed; when nft cannot be read the result is `error`. `ufw` is only read to
+explain: it can neither add a drop nor remove one, and the check says when it
+reports `deny` while the kernel does not drop. A source that cannot be read
+does not stop a pass that another source confirms, but turns a fail into
+`error`. Limit: it judges the default policy of the base chains, not their
+rules; a drop chain that starts with a rule accepting everything passes. The
+priority order of several input chains does not matter: an accept in a chain
+with a lower priority number ends only that chain, so a later chain with policy
+drop still drops the packet (measured on both releases).
 
-`security_updates` simulates `apt-get dist-upgrade` (nothing is written, no lock
-is taken, and `apt-get update` is not run) and fails for every package whose
-new version is available from a `-security` pocket (`-infra-security` and
-`-apps-security` too), one evidence item per package. It also reports how old
-the package lists are and warns when they are older than `max_list_age_hours`
-or missing, because then it cannot see newer updates. Held-back and phased
-packages are counted in the summary, not judged.
+`security_updates` simulates `apt-get dist-upgrade` (nothing is installed, no lock
+is taken, and `apt-get update` is not run) and asks `apt-cache policy` about the
+packages it upgrades. Both run with `-o Dir::Cache::pkgcache= -o
+Dir::Cache::srcpkgcache=`, which keeps apt from writing its cache files under
+`/var/cache/apt` (about 130 MB when the distribution's `docker-clean` snippet
+is absent; measured on both releases: nothing under `/var/cache/apt` or
+`/var/lib/apt` changes). A package fails when any version that a `-security`
+pocket carries (`-infra-security` and `-apps-security` too) is newer than the
+installed one, even if the version the simulation would install comes from
+`-updates` and has superseded the security fix; the order of versions is apt's
+own, the check compares no version strings. One evidence item per package. It
+also reports how old the package lists are and warns when they are older than
+`max_list_age_hours` or missing, because then it cannot see newer updates.
+Held-back and phased packages are counted in the summary, not judged (a held
+package with a security fix is not seen). At most 2000 upgraded packages are
+looked up; with more the result is `error`.
 
 `docker_exposure` fails when the daemon listens on TCP (an entry in
-`daemon.json` `hosts`, or `-H`/`--host` on the running dockerd's command line;
-an entry without a scheme counts as TCP) and for every running container that
+`daemon.json` `hosts`, or `-H`/`--host` on the running dockerd's command line,
+including combined single-dash letters such as `-DH tcp://...`, which pflag
+reads as `-D` and `-H`; an entry without a scheme counts as TCP) and for every running container that
 is privileged, shares the host's PID or network namespace, or has a Docker
 socket mounted; the subject is the container name. A listener that systemd
-opens for `-H fd://` is seen by the `listeners` check. At most 500 running
-containers are examined. Without the `docker` program it is skipped, unless a
-daemon configuration exists.
+opens for `-H fd://` is seen by the `listeners` check. The process behind the pid
+file must be owned by root and be a `dockerd` before its command line (and a
+`--config-file` in it) is used; otherwise the result is `error`. A running
+dockerd without the `docker` program is an `error` too (the containers cannot
+be examined). At most 500 running containers are examined. Without the `docker`
+program it is skipped, unless a daemon configuration exists. Limit: an
+exception matches the container name, so it also covers any new reason the same
+container gets later (for example a privileged container that was only
+host-networked when the exception was written).
 
 `authorized_keys` compares the SHA256 fingerprints of the keys in each user's
 authorized keys files with the top-level `authorized_keys.expected` section
 (user name to a list of `SHA256:...` fingerprints, as `ssh-keygen -lf` prints
-them); without it the check is skipped. Users are the accounts with uid 0 or
-1000 and above and a login shell, plus the users named in `expected`. The files
-come from `AuthorizedKeysFile` in `sshd -T`. A key that is not expected is a
-`fail` (subject `user:SHA256:...`); an expected key that is missing, a file that
-could not be read or has lines that are not keys, and an
-`AuthorizedKeysCommand` (whose keys cannot be checked) are `warn`. The users own
-their files and every directory below their home, so a path inside the home is
-resolved by the kernel inside the home: a symbolic link that leaves it, a file
-that is not a regular file, one owned by somebody else, and one over 256 KiB are
-refused and reported, never read. A line that is not a key is reported by line
-number and never quoted. Certificates in `authorized_keys` are not compared
-and count as lines that are not keys. Limit: `Match` blocks of `sshd_config` are
-not evaluated.
+them); without it the check is skipped. Users are the accounts of `/etc/passwd`
+with uid 0 or 1000 and above and a login shell, plus the users named in
+`expected` (accounts that only exist in NSS or LDAP are not seen). A passwd line
+that does not have exactly seven fields is a `warn` and its user is not
+examined. The files come from `AuthorizedKeysFile` in `sshd -T`. A key that is
+not expected is a `fail` (subject `user:SHA256:...`); an expected key that is
+missing, a file that could not be read or has lines that are not keys, and an
+`AuthorizedKeysCommand` (whose keys cannot be checked) are `warn`. Lines are
+read the way OpenSSH reads them (a port of `sshkey_advance_past_options`: quotes
+and backslash-quote in the options, a line ends at a NUL, the options are
+stepped over and not interpreted) and a comment of any length is ignored; the
+fingerprints equal those of `ssh-keygen -l` for every line of the test set
+captured on both releases. The users own their files and every directory below
+their home, so a path inside the home is resolved by the kernel inside the home:
+a symbolic link that leaves it (sshd would follow it), a file that is not a
+regular file, one owned by somebody else, and one over 256 KiB are refused and
+reported as a `warn`, never read, so their keys are not listed. A line that is
+not a key is reported by line number and never quoted. Certificates in
+`authorized_keys` are not compared and count as lines that are not keys.
+Limits: `Match` blocks of `sshd_config` are not evaluated, and a `warn` of this
+check deserves attention, because it can stand for keys that were not checked.
 
 `disk_usage` examines the mounts of the given file system types (`fstypes`
 replaces the default list ext4, xfs, btrfs, vfat, zfs; network and pseudo file
@@ -189,9 +222,11 @@ inodes, computed like `df`. Each statfs call has a timeout.
 `cert_expiry` reads certificate files (`paths`, and files matching `globs`;
 setting `paths` does not remove the default glob, `globs: []` does) and examines
 the first certificate in each. Symbolic links are followed (certbot's `live/`
-points into `archive/`) only when the resolved file and every directory above it
-are owned by root and not writable by group or others; otherwise that file is
-an `error` with the reason. A listed path that does not exist is an `error`;
+points into `archive/`) only when every directory the path goes through (the ones
+that hold a link as well as the ones it leads into), every link and the resolved
+file are owned by root and not writable by group or others; otherwise that file
+is an `error` with the reason. A link in a directory that a user can write to is
+refused although it names a root-owned certificate. A listed path that does not exist is an `error`;
 with no file found at all the check is `skipped`.
 
 At most 100 evidence items come back from a check, sorted by subject; when
@@ -216,9 +251,11 @@ the catalog does not have (an exception may also name `exception_expired`).
 An active exception without `match` covers the whole check. With `match` it
 covers the evidence items whose subject equals `match` exactly (for example
 `tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). A check
-whose failing items are all covered becomes `excepted`; otherwise it stays
-`fail` and the covered items are marked. Exceptions never change an `error` or
-a `warn`.
+whose failing items are all covered becomes `excepted`, unless the check also
+found warnings (for example an expected key that is missing next to an
+unexpected one): then it becomes `warn`, its evidence the warnings, because an
+exception removes failures and never warnings. Otherwise it stays `fail` and the
+covered items are marked. Exceptions never change an `error` or a `warn`.
 An `error` of a check that reads two sources (`reboot_required`, and
 `listeners` with tcp and udp) keeps the failing items that the readable source
 confirmed and says in its summary that the picture is partial.

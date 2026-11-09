@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
@@ -55,6 +56,10 @@ type FakeFS struct {
 	Errs map[string]error
 	// GlobErr, when set, is returned by every Glob.
 	GlobErr error
+	// Owners maps a path to its owner's user id for Owner; a path that is
+	// not listed is owned by root (0) when it is, or is the directory of, a
+	// key of Files, and does not exist otherwise.
+	Owners map[string]uint32
 }
 
 var (
@@ -63,6 +68,7 @@ var (
 	_ probes.ModTimer      = FakeFS{}
 	_ probes.TrustedReader = FakeFS{}
 	_ probes.HomeReader    = FakeFS{}
+	_ probes.OwnerReader   = FakeFS{}
 )
 
 // HomeKey builds the key of a Homes or Errs entry for ReadHomeFile.
@@ -140,4 +146,20 @@ func (f FakeFS) ReadHomeFile(home string, _ uint32, rel string, max int64) ([]by
 		return nil, probes.ErrTooLarge
 	}
 	return []byte(s), nil
+}
+
+// Owner implements probes.OwnerReader.
+func (f FakeFS) Owner(p string) (uint32, error) {
+	if err, ok := f.Errs[p]; ok {
+		return 0, err
+	}
+	if uid, ok := f.Owners[p]; ok {
+		return uid, nil
+	}
+	for k := range f.Files {
+		if k == p || strings.HasPrefix(k, p+"/") {
+			return 0, nil
+		}
+	}
+	return 0, notExist(p)
 }

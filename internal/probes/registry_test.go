@@ -44,7 +44,7 @@ func TestPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"apt-get", "docker", "ip6tables", "iptables", "nft", "sshd", "ufw"}; !eq(got, sorted(want)) {
+	if want := []string{"apt-cache", "apt-get", "docker", "ip6tables", "iptables", "nft", "sshd", "ufw"}; !eq(got, sorted(want)) {
 		t.Fatalf("Programs = %v", got)
 	}
 	if got, err := probes.Programs(); err != nil || len(got) != 0 {

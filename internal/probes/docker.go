@@ -46,14 +46,27 @@ var dockerPidFiles = []string{"/run/docker.pid", "/var/run/docker.pid"}
 //	                           TCP)
 //	the running daemon         the pid from /run/docker.pid or
 //	                           /var/run/docker.pid, then /proc/<pid>/cmdline,
-//	                           which must be a dockerd: every -H, -Hvalue,
+//	                           read the way pflag reads it: every -H, -Hvalue,
 //	                           -H=value, --host value and --host=value that is
-//	                           TCP in that sense
+//	                           TCP in that sense, also inside a group of
+//	                           combined single-dash letters ("-DH tcp://...",
+//	                           "-DHtcp://...": a letter that takes a value
+//	                           ends the group, the rest of the group or the
+//	                           next argument is its value). The letters are
+//	                           those of dockerd --help: b G H l p s take a
+//	                           value, D v h do not. A group with a letter
+//	                           that is not known and an H anywhere is error.
+//
+// The process behind the pid file must be owned by root (uid 0), its name
+// (/proc/<pid>/comm) must be dockerd and the first word of its command line
+// must be dockerd, before anything from its command line is used: the pid
+// may have been given to another process since, and the --config-file of a
+// stranger's process would otherwise be read as root. Anything else is error.
+// No such process (a stale pid file) is a note.
 //
 // The detail names whether TLS is on ("tls" or "tlsverify" in the file, or the
 // flags): a TCP listener with client verification is still a finding, only a
-// weaker one, and the operator decides with an exception. A stale pid file (no
-// such process, or not a dockerd) is a note. The scheme "unix://", "fd://" and
+// weaker one, and the operator decides with an exception. The scheme "unix://", "fd://" and
 // "npipe://" are not TCP; any other scheme is not understood and makes the
 // check error. A listener that systemd opens for "-H fd://" is not visible
 // here; the listeners check sees it.
@@ -68,7 +81,8 @@ var dockerPidFiles = []string{"/run/docker.pid", "/var/run/docker.pid"}
 // the subject is the container name. The name is text a user of the Docker
 // API chooses, so it is cut and sanitised, and a name that does not look like a
 // Docker name is replaced by "id:" and the first twelve characters of the id.
-// An exception matches that subject. Required fields that are missing in the
+// An exception matches that subject, and so it covers every reason the
+// container has now or later (a limit, see the README). Required fields that are missing in the
 // inspect output are an error, never "not privileged". At most 500 running
 // containers are examined; with more the result is error (partial). A
 // container that stops between the two commands is ignored and said so in the
@@ -79,7 +93,9 @@ var dockerPidFiles = []string{"/run/docker.pid", "/var/run/docker.pid"}
 // is the JSON array of the others. Anything else, and a docker daemon that
 // cannot be reached ("Cannot connect to the Docker daemon", status 1), is
 // error. When docker is not installed the containers are not examined; if
-// there is no daemon.json and no pid file either, the check is skipped. A file
+// there is no daemon.json and no pid file either, the check is skipped; if
+// the pid file names a running dockerd the result is error (the containers
+// cannot be examined). A file
 // that cannot be read, or an error of one source, makes the status error but
 // keeps the findings already confirmed in the evidence.
 type dockerExposure struct{}
@@ -109,6 +125,9 @@ func (dockerProbe) Run(ctx context.Context, env *Env) Outcome {
 	d.tcpFindings(cmdTLS, cfgTLS)
 
 	installed := d.containers(ctx)
+	if !installed && d.daemonRunning {
+		d.causes = append(d.causes, "dockerd is running but the docker command is not installed: the containers cannot be examined")
+	}
 	if !installed && !cfgSeen && !d.pidSeen && len(d.causes) == 0 {
 		return Outcome{Status: result.Skipped, Summary: `program "docker" is not installed and the daemon left no configuration, check skipped`}
 	}
@@ -139,6 +158,8 @@ type dockerRun struct {
 	pidSeen    bool
 	examined   int
 	haveDocker bool
+	// daemonRunning: a root-owned dockerd is running, found through the pid file
+	daemonRunning bool
 }
 
 func (d *dockerRun) names() string {
@@ -225,7 +246,38 @@ func (d *dockerRun) readCmdline() []tcpHost {
 			d.causes = append(d.causes, fmt.Sprintf("%s does not hold a process id", pf))
 			return nil
 		}
-		raw, err := d.env.FS.ReadFile("/proc/"+strconv.Itoa(pid)+"/cmdline", maxCmdline)
+		proc := "/proc/" + strconv.Itoa(pid)
+		// The pid file can be stale, and the pid can have been given to another
+		// process since: only a root-owned process called dockerd is the daemon,
+		// and only then is its --config-file read.
+		uid, err := d.env.owner(proc)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			d.notes = append(d.notes, "the docker pid file is stale (no such process), the running daemon was not examined")
+			return nil
+		case errors.Is(err, errNoCapability):
+			d.causes = append(d.causes, err.Error())
+			return nil
+		case err != nil:
+			d.causes = append(d.causes, fmt.Sprintf("cannot examine process %d: %s", pid, clean(err.Error(), 120)))
+			return nil
+		case uid != 0:
+			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, which is owned by uid %d and not by root: the pid file is stale, the running daemon was not examined", pid, uid))
+			return nil
+		}
+		comm, err := d.env.FS.ReadFile(proc+"/comm", 64)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			d.notes = append(d.notes, "the docker pid file is stale (no such process), the running daemon was not examined")
+			return nil
+		case err != nil:
+			d.causes = append(d.causes, fmt.Sprintf("cannot read the name of process %d: %s", pid, clean(err.Error(), 120)))
+			return nil
+		case strings.TrimSpace(string(comm)) != "dockerd":
+			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, which is %q and not dockerd: the pid file is stale, the running daemon was not examined", pid, clean(strings.TrimSpace(string(comm)), 20)))
+			return nil
+		}
+		raw, err := d.env.FS.ReadFile(proc+"/cmdline", maxCmdline)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			d.notes = append(d.notes, "the docker pid file is stale (no such process), the running daemon was not examined")
@@ -236,7 +288,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 		}
 		args := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
 		if path.Base(args[0]) != "dockerd" {
-			d.notes = append(d.notes, "the docker pid file points to a process that is not dockerd, the running daemon was not examined")
+			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, whose command is not dockerd: the pid file is stale, the running daemon was not examined", pid))
 			return nil
 		}
 		hosts, cfg, tls, err := parseDockerdArgs(args[1:])
@@ -245,6 +297,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 			return nil
 		}
 		d.configFile = cfg
+		d.daemonRunning = true
 		for i := range hosts {
 			hosts[i].tls = tls
 		}
@@ -253,8 +306,19 @@ func (d *dockerRun) readCmdline() []tcpHost {
 	return nil
 }
 
-// parseDockerdArgs reads the daemon's arguments: the -H/--host values, the
-// --config-file value and the TLS flags.
+// dockerd's single-letter flags (dockerd --help on docker.io 29.1): the ones
+// that take a value, and the switches. The command line is parsed by pflag, so
+// single-dash letters may be combined ("-DH tcp://..."), and a flag that takes
+// a value ends the group: the rest of the group is its value, and without a
+// rest the next argument is.
+const (
+	dockerdValueShorthands = "bGHlps" // bridge, group, host, log-level, pidfile, storage-driver
+	dockerdBoolShorthands  = "Dvh"    // debug, version, help
+)
+
+// parseDockerdArgs reads the daemon's arguments the way pflag does: the
+// -H/--host values, the --config-file value and the TLS flags. A group of
+// single-dash letters that cannot be read and may hold -H is an error.
 func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, err error) {
 	add := func(v string) error {
 		tcp, known := dockerTCPHost(v)
@@ -268,48 +332,79 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		next := func() (string, bool) {
+		// next consumes the following argument as a flag's value
+		next := func(flag string) (string, error) {
 			if i+1 < len(args) {
 				i++
-				return args[i], true
+				return args[i], nil
 			}
-			return "", false
+			return "", fmt.Errorf("%s without a value", flag)
 		}
 		switch {
 		case a == "--":
-			return
-		case a == "-H" || a == "--host":
-			v, ok := next()
-			if !ok {
-				return nil, "", tls, fmt.Errorf("%s without a value", a)
+			return hosts, cfg, tls, nil
+		case strings.HasPrefix(a, "--"):
+			name, val, hasVal := strings.Cut(a[2:], "=")
+			switch name {
+			case "host", "config-file":
+				if !hasVal {
+					if val, err = next("--" + name); err != nil {
+						return nil, "", tls, err
+					}
+				}
+				if name == "config-file" {
+					cfg = val
+				} else if err = add(val); err != nil {
+					return nil, "", tls, err
+				}
+			case "tls", "tlsverify":
+				on := !hasVal || val == "true"
+				if hasVal && val != "true" && val != "false" {
+					return nil, "", tls, fmt.Errorf("--%s=%s is not understood", name, clean(val, 20))
+				}
+				if name == "tlsverify" {
+					tls.verify = on
+					tls.tls = tls.tls || on
+				} else {
+					tls.tls = on
+				}
 			}
-			if err = add(v); err != nil {
-				return nil, "", tls, err
+		case len(a) > 1 && a[0] == '-':
+			group := a[1:]
+		letters:
+			for len(group) > 0 {
+				c := group[0]
+				switch {
+				case strings.IndexByte(dockerdValueShorthands, c) >= 0:
+					var val string
+					switch {
+					case len(group) > 2 && group[1] == '=':
+						val = group[2:]
+					case len(group) > 1:
+						val = group[1:]
+					default:
+						if val, err = next("-" + string(c)); err != nil {
+							return nil, "", tls, err
+						}
+					}
+					if c == 'H' {
+						if err = add(val); err != nil {
+							return nil, "", tls, err
+						}
+					}
+					break letters
+				case strings.IndexByte(dockerdBoolShorthands, c) >= 0:
+					if len(group) > 1 && group[1] == '=' {
+						break letters
+					}
+					group = group[1:]
+				default:
+					if strings.Contains(a, "H") {
+						return nil, "", tls, fmt.Errorf("the flags %q cannot be read, and may hold -H", clean(a, 30))
+					}
+					break letters
+				}
 			}
-		case strings.HasPrefix(a, "--host="):
-			if err = add(strings.TrimPrefix(a, "--host=")); err != nil {
-				return nil, "", tls, err
-			}
-		case strings.HasPrefix(a, "-H="):
-			if err = add(strings.TrimPrefix(a, "-H=")); err != nil {
-				return nil, "", tls, err
-			}
-		case strings.HasPrefix(a, "-H") && len(a) > 2:
-			if err = add(a[2:]); err != nil {
-				return nil, "", tls, err
-			}
-		case a == "--config-file":
-			v, ok := next()
-			if !ok {
-				return nil, "", tls, errors.New("--config-file without a value")
-			}
-			cfg = v
-		case strings.HasPrefix(a, "--config-file="):
-			cfg = strings.TrimPrefix(a, "--config-file=")
-		case a == "--tlsverify" || a == "--tlsverify=true":
-			tls.verify, tls.tls = true, true
-		case a == "--tls" || a == "--tls=true":
-			tls.tls = true
 		}
 	}
 	return hosts, cfg, tls, nil

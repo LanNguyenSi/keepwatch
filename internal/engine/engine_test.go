@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -373,6 +374,29 @@ func TestCancelledContextRunsNothing(t *testing.T) {
 	}
 }
 
+var (
+	aptNoCache = []string{"-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache="}
+	aptArgv    = append(append([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true"}, aptNoCache...), "dist-upgrade")
+)
+
+// upgradedNames returns the sorted names of the packages that the captured
+// simulation upgrades.
+func upgradedNames(t *testing.T, v string) []string {
+	t.Helper()
+	b, err := os.ReadFile("../probes/testdata/" + v + "/apt_pending.stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) > 2 && f[0] == "Inst" && strings.HasPrefix(f[2], "[") {
+			names = append(names, f[1])
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func TestProgramsIsTheUnionOverTheCatalog(t *testing.T) {
 	if got := strings.Join(engine.Programs(mini(t)), ","); got != "ss,sshd,systemctl" {
 		t.Fatalf("Programs = %s", got)
@@ -381,7 +405,7 @@ func TestProgramsIsTheUnionOverTheCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "apt-get,docker,dpkg-query,fail2ban-client,ip6tables,iptables,needrestart,nft,ss,sshd,systemctl,ufw"
+	want := "apt-cache,apt-get,docker,dpkg-query,fail2ban-client,ip6tables,iptables,needrestart,nft,ss,sshd,systemctl,ufw"
 	if got := strings.Join(engine.Programs(base), ","); got != want {
 		t.Fatalf("Programs = %s, want %s", got, want)
 	}
@@ -428,7 +452,10 @@ func TestBaseCatalogAgainstCapturedHost(t *testing.T) {
 				Add([]string{"nft", "-j", "list", "ruleset"}, v+"/fw_none_nft").
 				Add([]string{"iptables", "-S", "INPUT"}, v+"/fw_none_iptables").
 				Add([]string{"ip6tables", "-S", "INPUT"}, v+"/fw_none_ip6tables").
-				Add([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true", "dist-upgrade"}, v+"/apt_pending").
+				Add([]string{"iptables", "-V"}, v+"/fw_none_iptablesV").
+				Add([]string{"ip6tables", "-V"}, v+"/fw_none_ip6tablesV").
+				Add(aptArgv, v+"/apt_pending").
+				Add(append(append([]string{"apt-cache"}, aptNoCache...), append([]string{"policy", "--"}, upgradedNames(t, v)...)...), v+"/apt_policy_pending").
 				Add([]string{"docker", "ps", "-q", "--no-trunc"}, v+"/docker_ps_none")
 			mountinfo, err := os.ReadFile("../probes/testdata/" + v + "/mountinfo.stdout")
 			if err != nil {
@@ -533,7 +560,10 @@ func TestProbeCommandsAreCoveredByTheAllowlist(t *testing.T) {
 		// every other command finds no program.
 		r := fake.New(fx).
 			Add(ssTCP, "ubuntu2404/ss_tcp_mixed").Add(ssUDP, "ubuntu2404/ss_udp_mixed").
-			Add(ssTCPp, "ubuntu2404/ssp_tcp_mixed").Add(ssUDPp, "ubuntu2404/ssp_udp_mixed")
+			Add(ssTCPp, "ubuntu2404/ssp_tcp_mixed").Add(ssUDPp, "ubuntu2404/ssp_udp_mixed").
+			// the update check asks apt-cache about the packages the simulation upgrades
+			Add(aptArgv, "ubuntu2404/apt_pending").
+			Add(append(append([]string{"apt-cache"}, aptNoCache...), append([]string{"policy", "--"}, upgradedNames(t, "ubuntu2404")...)...), "ubuntu2404/apt_policy_pending")
 		probe.Run(context.Background(), &probes.Env{Runner: r, FS: probestest.MemFS{}})
 		if len(r.Calls()) == 0 && len(declared) > 0 {
 			t.Errorf("%s: the probe ran no command", e.ID)
@@ -589,7 +619,7 @@ checks:
 	fx := os.DirFS("../probes/testdata")
 	r := fake.New(fx).
 		Add(sshdArgv, "ubuntu2404/sshd_T_default").
-		Add([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true", "dist-upgrade"}, "ubuntu2404/apt_current")
+		Add(aptArgv, "ubuntu2404/apt_current")
 	passwd, _ := os.ReadFile("../probes/testdata/ubuntu2404/etc_passwd.stdout")
 	far := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
 	fsys := probestest.FakeFS{
