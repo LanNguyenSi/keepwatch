@@ -103,8 +103,11 @@ const (
 // other than none (subject "authorizedkeyscommand", its keys cannot be
 // checked) make the status warn. When there is a fail, the warnings are
 // counted in the summary and not listed, because every evidence item of a
-// failing result is a failing item. A user who makes their own file
-// unreadable or unusable gets a warning, never a pass.
+// failing result is a failing item. The warnings of a failing result are
+// carried separately as well (Outcome.Warnings): an exception that covers
+// every unexpected key leaves the check as a warn with those warnings, not as
+// excepted. A user who makes their own file unreadable or unusable gets a
+// warning, never a pass.
 type authorizedKeys struct{}
 
 func (authorizedKeys) Name() string       { return "authorized_keys" }
@@ -256,7 +259,8 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; also %d warning(s): %s", len(warns), subjectList(sortedEvidence(warns), 5))
 		}
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown}
+		shownWarns, _ := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
 	case len(warns) > 0:
 		shown, hidden := limitEvidence(warns)
 		return Outcome{

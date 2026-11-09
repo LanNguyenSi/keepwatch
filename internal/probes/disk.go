@@ -56,7 +56,8 @@ const defaultStatfsTimeout = 10 * time.Second
 // check). The highest of the two decides. A mount at or above fail_percent is
 // a fail, one at or above warn_percent a warn, subject = the mount point,
 // detail the percentages. With a fail the warnings are counted in the summary
-// only. No mount of a checked type means skipped.
+// and carried in Outcome.Warnings (an exception for every failing mount leaves
+// a warn). No mount of a checked type means skipped.
 type diskUsage struct{}
 
 func (diskUsage) Name() string       { return "disk_usage" }
@@ -160,7 +161,8 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; %d more at or above %d%%", len(warns), d.warn)
 		}
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown}
+		shownWarns, _ := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
 	case len(warns) > 0:
 		shown, hidden := limitEvidence(warns)
 		return Outcome{

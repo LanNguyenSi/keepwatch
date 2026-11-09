@@ -43,9 +43,12 @@ const (
 //
 // Every candidate file is read with ReadTrusted: symbolic links are followed
 // (certbot keeps the current certificate in live/ as a link into archive/), but
-// only when the resolved file and every directory above it are owned by root
-// and not writable by group or others; otherwise that file is error with the
-// reason. This holds for plain files in other places as well: a certificate in
+// only when every directory the path goes through (the ones that hold a link
+// as well as the ones it leads into), every link and the resolved file are
+// owned by root and not writable by group or others; otherwise that file is
+// error with the reason. A link in a directory that a user can write to is
+// refused although the certificate it names is root's: its owner could repoint
+// it at any other root-owned certificate. This holds for plain files in other places as well: a certificate in
 // a directory a user can write to would let that user decide the date. A file
 // larger than 1 MiB, not a regular file, or one that does not parse is error
 // for that file, and the status is error with the confirmed findings of the
@@ -58,7 +61,8 @@ const (
 // fullchain.pem that is the leaf). Remaining validity is NotAfter minus now:
 // below fail_days days is a fail, below warn_days a warn, subject = the path as
 // listed or matched, detail = subject common name, the NotAfter date and the
-// days left. With a fail the warnings are counted in the summary only. At most
+// days left. With a fail the warnings are counted in the summary and carried in
+// Outcome.Warnings (an exception for every failing certificate leaves a warn). At most
 // 1000 candidate files are read.
 type certExpiry struct{}
 
@@ -201,7 +205,8 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; %d more within %s", len(warns), daysText(c.warn))
 		}
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown}
+		shownWarns, _ := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
 	case len(warns) > 0:
 		shown, hidden := limitEvidence(warns)
 		return Outcome{

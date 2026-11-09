@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,12 @@ type TrustedReader interface {
 	ReadTrusted(path string, max int64) ([]byte, string, error)
 }
 
+// OwnerReader is an FS that can tell which user owns a path (without following
+// a symbolic link in its last component).
+type OwnerReader interface {
+	Owner(path string) (uint32, error)
+}
+
 // HomeReader is an FS that can read a file below a home directory without
 // ever leaving it. The user owns the files and every directory below the home,
 // so a path inside it cannot be trusted. rel is relative to home.
@@ -67,6 +74,13 @@ func (e *Env) modTime(path string) (time.Time, error) {
 		return m.ModTime(path)
 	}
 	return time.Time{}, errNoCapability
+}
+
+func (e *Env) owner(path string) (uint32, error) {
+	if o, ok := e.FS.(OwnerReader); ok {
+		return o.Owner(path)
+	}
+	return 0, errNoCapability
 }
 
 func (e *Env) readTrusted(path string, max int64) ([]byte, string, error) {
@@ -167,6 +181,19 @@ func (OSFS) ModTime(path string) (time.Time, error) {
 	return fi.ModTime(), nil
 }
 
+// Owner implements OwnerReader. It does not open the path.
+func (OSFS) Owner(path string) (uint32, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0, err
+	}
+	uid, ok := ownerUID(fi)
+	if !ok {
+		return 0, fmt.Errorf("%w: cannot tell who owns %s", ErrUnsafe, path)
+	}
+	return uid, nil
+}
+
 func (o OSFS) trusted(uid uint32) bool {
 	owners := o.TrustedOwners
 	if owners == nil {
@@ -196,14 +223,27 @@ func (o OSFS) checkNode(path string, fi os.FileInfo, what string) error {
 	return nil
 }
 
+// maxTrustedLinks bounds the symbolic links ReadTrusted follows; the kernel
+// allows 40.
+const maxTrustedLinks = 40
+
 // ReadTrusted reads the file at path and returns its content and the path it
 // resolved to. Symbolic links are followed (Let's Encrypt keeps its current
 // certificate as a link into an archive directory), but only when nothing on
-// the way can be changed by anyone but the trusted owners: the path is
-// resolved completely first, and then the resolved file and every directory
-// from CheckFrom down to its parent must be owned by a trusted owner (root)
-// and not writable by group or others. A violation is an error that wraps
-// ErrUnsafe and names the offender.
+// the way can be changed by anyone but the trusted owners.
+//
+// The path is resolved here, one component at a time (Lstat, Readlink), not by
+// the kernel and not by filepath.EvalSymlinks, because the directories that
+// matter are all the directories the walk goes through, including the one that
+// holds a link and the ones the links lead into. Every directory the walk
+// enters, from CheckFrom down, must be owned by a trusted owner (root) and not
+// writable by group or others; every link must be owned by a trusted owner;
+// and the file at the end must be a regular file with the same property. Otherwise the
+// owner of a directory on the way could repoint a link at any other file that
+// the trusted directories hold, and the check would read that file instead
+// of the one it was asked for. At most 40 links are followed. A violation is an
+// error that wraps ErrUnsafe and names the offender; a path that does not exist
+// is an error for which errors.Is(err, fs.ErrNotExist) holds.
 //
 // The file is then opened by its resolved path, without following a link
 // (O_NOFOLLOW) and without blocking, and checked again on the descriptor: a
@@ -215,43 +255,8 @@ func (o OSFS) ReadTrusted(path string, max int64) ([]byte, string, error) {
 	if !filepath.IsAbs(path) {
 		return nil, "", fmt.Errorf("%w: %q is not absolute", ErrUnsafe, path)
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := o.resolveTrusted(path)
 	if err != nil {
-		return nil, "", err
-	}
-	from := o.CheckFrom
-	if from == "" {
-		from = "/"
-	}
-	from = filepath.Clean(from)
-	// Directories from the top down to the parent of the file.
-	var dirs []string
-	for d := filepath.Dir(resolved); ; d = filepath.Dir(d) {
-		dirs = append(dirs, d)
-		if d == from || d == filepath.Dir(d) {
-			break
-		}
-	}
-	for i := len(dirs) - 1; i >= 0; i-- {
-		fi, err := os.Lstat(dirs[i])
-		if err != nil {
-			return nil, "", err
-		}
-		if !fi.IsDir() {
-			return nil, "", fmt.Errorf("%w: %s is not a directory", ErrUnsafe, dirs[i])
-		}
-		if err := o.checkNode(dirs[i], fi, "directory"); err != nil {
-			return nil, "", err
-		}
-	}
-	fi, err := os.Lstat(resolved)
-	if err != nil {
-		return nil, "", err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, "", fmt.Errorf("%w: %s is not a regular file", ErrUnsafe, resolved)
-	}
-	if err := o.checkNode(resolved, fi, "file"); err != nil {
 		return nil, "", err
 	}
 	f, err := os.OpenFile(resolved, openFlags, 0)
@@ -259,7 +264,7 @@ func (o OSFS) ReadTrusted(path string, max int64) ([]byte, string, error) {
 		return nil, "", err
 	}
 	defer f.Close()
-	fi, err = f.Stat()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, "", err
 	}
@@ -271,6 +276,111 @@ func (o OSFS) ReadTrusted(path string, max int64) ([]byte, string, error) {
 	}
 	b, err := readCapped(f, max)
 	return b, resolved, err
+}
+
+// resolveTrusted walks the absolute path component by component and returns
+// the path of the regular file it ends at, without a link in it.
+func (o OSFS) resolveTrusted(path string) (string, error) {
+	from := o.CheckFrom
+	if from == "" {
+		from = "/"
+	}
+	from = filepath.Clean(from)
+	// above reports whether dir lies strictly above the point from which the
+	// walk checks (tests start below a world-writable /tmp).
+	above := func(dir string) bool {
+		return dir != from && (dir == "/" || strings.HasPrefix(from, dir+"/"))
+	}
+	checked := map[string]bool{}
+	enter := func(dir string) error {
+		if checked[dir] || above(dir) {
+			return nil
+		}
+		fi, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%w: %s is not a directory", ErrUnsafe, dir)
+		}
+		if err := o.checkNode(dir, fi, "directory"); err != nil {
+			return err
+		}
+		checked[dir] = true
+		return nil
+	}
+	pending := splitPathComponents(path)
+	cur := "/"
+	if err := enter(cur); err != nil {
+		return "", err
+	}
+	links := 0
+	for len(pending) > 0 {
+		comp := pending[0]
+		pending = pending[1:]
+		switch comp {
+		case ".":
+			continue
+		case "..":
+			// cur never contains a link, so its lexical parent is its real parent
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, comp)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			links++
+			if links > maxTrustedLinks {
+				return "", fmt.Errorf("%w: more than %d symbolic links on the way to %s", ErrUnsafe, maxTrustedLinks, path)
+			}
+			if !above(cur) {
+				uid, ok := ownerUID(fi)
+				if !ok || !o.trusted(uid) {
+					return "", fmt.Errorf("%w: link %s is owned by uid %d", ErrUnsafe, next, uid)
+				}
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				return "", err
+			}
+			if filepath.IsAbs(target) {
+				cur = "/"
+			}
+			pending = append(splitPathComponents(target), pending...)
+		case len(pending) == 0:
+			if !fi.Mode().IsRegular() {
+				return "", fmt.Errorf("%w: %s is not a regular file", ErrUnsafe, next)
+			}
+			if err := o.checkNode(next, fi, "file"); err != nil {
+				return "", err
+			}
+			return next, nil
+		default:
+			if !fi.IsDir() {
+				return "", fmt.Errorf("%w: %s is not a directory", ErrUnsafe, next)
+			}
+			if err := enter(next); err != nil {
+				return "", err
+			}
+			cur = next
+		}
+	}
+	return "", fmt.Errorf("%w: %s does not end in a regular file", ErrUnsafe, path)
+}
+
+// splitPathComponents splits a path at "/" and drops the empty parts.
+func splitPathComponents(p string) []string {
+	var out []string
+	for _, c := range strings.Split(p, "/") {
+		if c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // ReadHomeFile reads the file rel (a relative path) below the directory home

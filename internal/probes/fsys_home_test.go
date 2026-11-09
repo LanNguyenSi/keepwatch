@@ -4,6 +4,7 @@ package probes_test
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -396,14 +397,108 @@ func TestReadTrusted(t *testing.T) {
 			}
 		})
 	}
-	t.Run("the directory of the link does not matter, the resolved path does", func(t *testing.T) {
+	// The owner of a directory can repoint a link in it at any file that the
+	// trusted directories hold, so the directory that holds a link matters as
+	// much as the one the link leads to.
+	t.Run("a link in a directory others can write to is refused", func(t *testing.T) {
 		b := certTree(t)
-		// live/ is writable by others, but the file is read from archive/
 		if err := os.Chmod(filepath.Join(b, "live/example"), 0o777); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/example/fullchain.pem"), 100); err != nil {
+		_, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/example/fullchain.pem"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "live/example") || !strings.Contains(err.Error(), "writable by group or others") {
 			t.Fatalf("err = %v", err)
+		}
+		// the target itself, asked for directly, is still readable
+		if _, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "archive/example/fullchain1.pem"), 100); err != nil {
+			t.Fatalf("direct: %v", err)
+		}
+	})
+	t.Run("a link in a user directory that points at a root-owned certificate", func(t *testing.T) {
+		b := certTree(t)
+		// the certificate that is really expected, in a trusted directory
+		real := filepath.Join(b, "archive/example/fullchain1.pem")
+		// /srv/x style: a directory its owner can write to, holding a link to the certificate
+		user := filepath.Join(b, "srv")
+		if err := os.Mkdir(user, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(user, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		link(t, real, filepath.Join(user, "cert.pem"))
+		_, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(user, "cert.pem"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "srv") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("every directory a chain of links goes through is checked", func(t *testing.T) {
+		b := certTree(t)
+		hop := filepath.Join(b, "hop")
+		if err := os.Mkdir(hop, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(hop, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		// live/example/a -> ../../hop/b -> ../archive/example/fullchain1.pem
+		link(t, "../archive/example/fullchain1.pem", filepath.Join(hop, "b"))
+		link(t, "../../hop/b", filepath.Join(b, "live/example/a"))
+		_, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/example/a"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "hop") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a link that is owned by somebody else is refused", func(t *testing.T) {
+		if me() != 0 {
+			t.Skip("needs root to create a link owned by another user")
+		}
+		b := certTree(t)
+		l := filepath.Join(b, "live/example/fullchain.pem")
+		if err := os.Lchown(l, 4242, 4242); err != nil {
+			t.Skipf("cannot chown: %v", err)
+		}
+		if _, _, err := trustedFS(t, b).ReadTrusted(l, 100); !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "link") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("absolute links and dot-dot after a link", func(t *testing.T) {
+		b := certTree(t)
+		link(t, filepath.Join(b, "archive/example"), filepath.Join(b, "live/abs"))
+		got, resolved, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/abs/fullchain1.pem"), 100)
+		if err != nil || string(got) != "pem\n" || resolved != filepath.Join(b, "archive/example/fullchain1.pem") {
+			t.Fatalf("%q %q %v", got, resolved, err)
+		}
+		// live/abs/../../live/example/fullchain.pem: ".." after a directory link is the parent of the link target
+		got, _, err = trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/abs/../../live/example/fullchain.pem"), 100)
+		if err != nil || string(got) != "pem\n" {
+			t.Fatalf("%q %v", got, err)
+		}
+	})
+	t.Run("a loop of links ends", func(t *testing.T) {
+		b := certTree(t)
+		link(t, "b", filepath.Join(b, "live/a"))
+		link(t, "a", filepath.Join(b, "live/b"))
+		_, _, err := trustedFS(t, b).ReadTrusted(filepath.Join(b, "live/a"), 100)
+		if !errors.Is(err, probes.ErrUnsafe) || !strings.Contains(err.Error(), "symbolic links") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("at most forty links", func(t *testing.T) {
+		b := certTree(t)
+		prev := filepath.Join(b, "archive/example/fullchain1.pem")
+		for i := 1; i <= 40; i++ {
+			l := filepath.Join(b, "live", fmt.Sprintf("l%02d", i))
+			link(t, prev, l)
+			prev = l
+		}
+		if _, _, err := trustedFS(t, b).ReadTrusted(prev, 100); err != nil {
+			t.Fatalf("40 links: %v", err)
+		}
+		l := filepath.Join(b, "live", "l41")
+		link(t, prev, l)
+		if _, _, err := trustedFS(t, b).ReadTrusted(l, 100); !errors.Is(err, probes.ErrUnsafe) {
+			t.Fatalf("41 links: %v", err)
 		}
 	})
 	t.Run("a link that leads into a writable directory is refused", func(t *testing.T) {

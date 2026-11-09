@@ -52,17 +52,22 @@ type Probe interface {
 // evidence items are the things to look at. When a check finds both failing
 // and warning items the status is fail, the evidence holds the failing items
 // only, and the summary counts the warnings, so an exception for the failing
-// items still sees only failing items. A skipped outcome carries no evidence.
-// An error outcome carries none either, except for a check that reads several
-// sources and could not read all of them: it keeps the failing items that the
-// sources it could read confirmed, and its summary says the picture is
-// partial (see partialError). The status stays error, so no exception
-// applies to it. No outcome carries more than maxEvidence items; see
-// limitEvidence.
+// items still sees only failing items; the warning items are carried in
+// Warnings. If the exceptions then cover every failing item, the engine does
+// not report the check as excepted but as warn, with Warnings as its evidence:
+// an exception can remove a failure, never a warning. A skipped outcome
+// carries no evidence. An error outcome carries none either, except for a check
+// that reads several sources and could not read all of them: it keeps the
+// failing items that the sources it could read confirmed, and its summary says
+// the picture is partial (see partialError). The status stays error, so no
+// exception applies to it. No outcome carries more than maxEvidence items in
+// Evidence or in Warnings; see limitEvidence.
 type Outcome struct {
 	Status   result.Status
 	Summary  string
 	Evidence []result.Evidence
+	// Warnings are the warning items found next to failing ones (Status fail).
+	Warnings []result.Evidence
 }
 
 // Env is everything a probe may use besides its parameters.

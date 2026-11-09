@@ -1,15 +1,20 @@
 package engine_test
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/LanNguyenSi/keepwatch/internal/catalog"
 	"github.com/LanNguyenSi/keepwatch/internal/config"
 	"github.com/LanNguyenSi/keepwatch/internal/engine"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
+	"github.com/LanNguyenSi/keepwatch/internal/probes"
+	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -330,4 +335,133 @@ func TestExceptionsDoNotHideEvidenceBeyondTheLimit(t *testing.T) {
 	if got := byID(t, run(t, withExceptions(exc("t.listeners", "", "all", day)), r, day), "t.listeners"); got.Status != result.Excepted {
 		t.Fatalf("status %s", got.Status)
 	}
+}
+
+// keysHost is a host with the authorized_keys check: alice holds the keys of
+// the given files, and the configuration expects the given fingerprints.
+func keysRun(t *testing.T, aliceKeys string, expected []string, es ...config.Exception) result.Result {
+	t.Helper()
+	cat, err := catalog.Parse([]byte(`
+checks:
+  - id: t.keys
+    title: Keys
+    kind: authorized_keys
+    severity: high
+    rationale: r
+    fix_hint: f
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwd, err := os.ReadFile("../probes/testdata/ubuntu2404/etc_passwd.stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys := probestest.FakeFS{
+		Files: map[string]string{"/etc/passwd": string(passwd)},
+		Homes: map[string]string{probestest.HomeKey("/home/alice", ".ssh/authorized_keys"): aliceKeys},
+	}
+	r := fake.New(os.DirFS("../probes/testdata")).Add(sshdArgv, "ubuntu2404/sshd_T_default")
+	cfg := &config.Config{Exceptions: es}
+	cfg.AuthorizedKeys.Expected = map[string][]string{"alice": expected}
+	rs, err := engine.Run(context.Background(), cat, cfg, deps2(r, fsys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return byID(t, rs, "t.keys")
+}
+
+func deps2(r execx.Runner, fsys probes.FS) engine.Deps {
+	return engine.Deps{Runner: r, FS: fsys, Now: func() time.Time { return day }}
+}
+
+func keyLine(t *testing.T, name string) (line, fp string) {
+	t.Helper()
+	b, err := os.ReadFile("../probes/testdata/ubuntu2404/sshkey_" + name + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.ReadFile("../probes/testdata/ubuntu2404/sshkey_" + name + "_fp.stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(b)), strings.Fields(string(f))[1]
+}
+
+// An exception removes failures, never warnings: when every failing item is
+// excepted and warnings remain, the check is a warn that carries the warnings.
+func TestExceptedFailuresLeaveTheWarnings(t *testing.T) {
+	ed, edFP := keyLine(t, "ed25519")
+	ec, ecFP := keyLine(t, "ecdsa")
+	_, rsaFP := keyLine(t, "rsa")
+	// ecdsa is unexpected (fail), the expected rsa key is missing (warn)
+	files := ed + "\n" + ec + "\n"
+	expected := []string{edFP, rsaFP}
+	failing := "alice:" + ecFP
+	warning := "alice:" + rsaFP
+
+	t.Run("without an exception: fail, the warning is not evidence", func(t *testing.T) {
+		got := keysRun(t, files, expected)
+		if got.Status != result.Fail || len(got.Evidence) != 1 || got.Evidence[0].Subject != failing {
+			t.Fatalf("result %+v", got)
+		}
+	})
+	t.Run("every failing item excepted, a warning remains: warn", func(t *testing.T) {
+		got := keysRun(t, files, expected, exc("t.keys", failing, "known key", day))
+		if got.Status != result.Warn {
+			t.Fatalf("status %s: %+v", got.Status, got)
+		}
+		if len(got.Evidence) != 1 || got.Evidence[0].Subject != warning || got.Evidence[0].Excepted {
+			t.Fatalf("evidence %+v", got.Evidence)
+		}
+		for _, want := range []string{"failing items excepted: known key", "1 warning(s) remain"} {
+			if !strings.Contains(got.Summary, want) {
+				t.Fatalf("summary %q lacks %q", got.Summary, want)
+			}
+		}
+		if len(got.ExceptionReasons) != 1 || got.ExceptionReasons[0] != "known key" {
+			t.Fatalf("reasons %v", got.ExceptionReasons)
+		}
+	})
+	t.Run("a whole-check exception leaves the warning too", func(t *testing.T) {
+		got := keysRun(t, files, expected, exc("t.keys", "", "accepted", day))
+		if got.Status != result.Warn || len(got.Evidence) != 1 || got.Evidence[0].Subject != warning {
+			t.Fatalf("result %+v", got)
+		}
+	})
+	t.Run("no warning remains: excepted, as before", func(t *testing.T) {
+		got := keysRun(t, files, []string{edFP}, exc("t.keys", failing, "known key", day))
+		if got.Status != result.Excepted || !strings.Contains(got.Summary, "excepted: known key") {
+			t.Fatalf("result %+v", got)
+		}
+		if len(got.Evidence) != 1 || !got.Evidence[0].Excepted {
+			t.Fatalf("evidence %+v", got.Evidence)
+		}
+	})
+	t.Run("only some failing items excepted: still fail, the warning stays out", func(t *testing.T) {
+		rsa, _ := keyLine(t, "rsa")
+		two := ed + "\n" + ec + "\n" + rsa + "\n"
+		got := keysRun(t, two, []string{edFP, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, exc("t.keys", failing, "known key", day))
+		if got.Status != result.Fail || len(got.Evidence) != 2 {
+			t.Fatalf("result %+v", got)
+		}
+		excepted := 0
+		for _, e := range got.Evidence {
+			if e.Excepted {
+				excepted++
+			}
+			if strings.Contains(e.Detail, "expected key not found") {
+				t.Fatalf("a warning became evidence of the failure: %+v", e)
+			}
+		}
+		if excepted != 1 {
+			t.Fatalf("evidence %+v", got.Evidence)
+		}
+	})
+	t.Run("an unreadable key file is a warning that an exception does not hide", func(t *testing.T) {
+		got := keysRun(t, ec+"\nthis is not a key\n", []string{edFP}, exc("t.keys", "alice:"+ecFP, "known key", day))
+		if got.Status != result.Warn || len(got.Evidence) != 2 {
+			t.Fatalf("result %+v", got)
+		}
+	})
 }

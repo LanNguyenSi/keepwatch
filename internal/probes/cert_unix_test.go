@@ -59,3 +59,32 @@ func TestCertExpiryDefaultTrustIsRoot(t *testing.T) {
 	wantStatus(t, o, result.Error)
 	wantSummary(t, o, "owned by uid")
 }
+
+// The owner of /srv/x can repoint a link in it at any root-owned certificate,
+// so a certificate reached through a link in such a directory is an error for
+// that file, not a reading of the certificate the link happens to name now.
+func TestCertExpiryRefusesALinkInAWritableDirectory(t *testing.T) {
+	b := certTree(t)
+	archive := filepath.Join(b, "archive/example/fullchain1.pem")
+	if err := os.WriteFile(archive, []byte(pemCert(t, "example.test", t0.Add(days(100)))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	user := filepath.Join(b, "srv")
+	if err := os.Mkdir(user, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(user, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	link(t, archive, filepath.Join(user, "cert.pem"))
+	p := certProbe(t, map[string]any{"paths": []any{filepath.Join(user, "cert.pem")}, "globs": []any{}})
+	o := execAt(p, fake.New(nil), trustedFS(t, b), t0)
+	wantStatus(t, o, result.Error)
+	wantSummary(t, o, "writable by group or others")
+	if len(o.Evidence) != 0 {
+		t.Fatalf("evidence %+v", o.Evidence)
+	}
+	// the certificate itself, asked for by its own path, is fine
+	p = certProbe(t, map[string]any{"paths": []any{archive}, "globs": []any{}})
+	wantStatus(t, execAt(p, fake.New(nil), trustedFS(t, b), t0), result.Pass)
+}
