@@ -39,7 +39,7 @@ func TestBadFlagExits2(t *testing.T) {
 }
 
 func TestStubsExit3(t *testing.T) {
-	for _, args := range [][]string{{"check"}, {"report"}, {"config", "check"}, {"doctor"}, {"init"}, {"install"}, {"uninstall"}} {
+	for _, args := range [][]string{{"check"}, {"report"}, {"doctor"}, {"install"}, {"uninstall"}} {
 		code, _, stderr := run(args...)
 		if code != 3 || !strings.Contains(stderr, "not implemented") {
 			t.Errorf("%v: exit = %d stderr = %q", args, code, stderr)
