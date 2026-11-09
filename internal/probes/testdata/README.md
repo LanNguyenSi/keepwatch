@@ -56,16 +56,6 @@ All of them are captured output, not synthesised, except where marked.
 | `ss_tcp_<scenario>`, `ss_udp_<scenario>` | `ss -Hltn`, `ss -Hlun` | the socket set the probe trusts: no process column. No UDP socket prints nothing |
 | `ssp_tcp_<scenario>`, `ssp_udp_<scenario>` | `ss -Hltnp`, `ss -Hlunp` | the same state with the process column, taken right after; the probe reads it only to name processes |
 
-Scenarios of the `ss` fixtures:
-
-| Scenario | State |
-|---|---|
-| `sshd_only` | only sshd listens |
-| `mixed` | `listen.pl` binds IPv4 and IPv6 wildcard and loopback sockets, one dual-stack socket (printed as `*:3000`), UDP sockets |
-| `resolved` | systemd container: systemd-resolved on `127.0.0.53%lo:53` (interface suffix), sshd socket-activated by PID 1 on 24.04 |
-| `zones` | `zones.pl` binds sockets to a device (`SO_BINDTODEVICE`) to `lo` and to a dummy interface `dum0` that holds `fe80::1`, and two IPv4-mapped sockets. ss prints the interface after the address and, for IPv6, after the closing bracket: `[::]%lo:7001`, `*%lo:7002`, `0.0.0.0%lo:7003`, `[fe80::1]%dum0:7007`. The same forms appear on 22.04 and 24.04 |
-| `newline` | `newline.pl` renames itself (`/proc/self/comm`) to `a`, a newline and `LISTEN 0 0 x`, and listens on three ports. In the `ssp_` files that name splits the record over two lines, the second one starting with `LISTEN` (also in the UDP output); the `ss_` files are unaffected |
-
 | `dpkg_installed` | `dpkg-query -W -f=${Status}\t${Version}\n -- fail2ban` | installed |
 | `dpkg_unknown` | the same for `nosuchpkg-x` | exit 1, `no packages found matching` on stderr |
 | `dpkg_config_files` | the same for `rsync` after `apt-get remove` | `deinstall ok config-files`, exit 0 |
@@ -80,6 +70,16 @@ Scenarios of the `ss` fixtures:
 | `fail2ban_status_server_down` | `fail2ban-client -- status sshd` with the server stopped | `Failed to access socket path` on stderr, exit 255 |
 | `needrestart_kernel` | `needrestart -b -k -r l` | plain container: kernel status 0 (unknown), exit 0 |
 | `needrestart_kernel_in_container` | the same in the systemd container | needrestart detects the container, skips the kernel check and prints only the version line, exit 0 |
+
+Scenarios of the `ss` fixtures:
+
+| Scenario | State |
+|---|---|
+| `sshd_only` | only sshd listens |
+| `mixed` | `listen.pl` binds IPv4 and IPv6 wildcard and loopback sockets, one dual-stack socket (printed as `*:3000`), UDP sockets |
+| `resolved` | systemd container: systemd-resolved on `127.0.0.53%lo:53` (interface suffix), sshd socket-activated by PID 1 on 24.04 |
+| `zones` | `zones.pl` binds sockets to a device (`SO_BINDTODEVICE`) to `lo` and to a dummy interface `dum0` that holds `fe80::1`, and two IPv4-mapped sockets. ss prints the interface after the address and, for IPv6, after the closing bracket: `[::]%lo:7001`, `*%lo:7002`, `0.0.0.0%lo:7003`, `[fe80::1]%dum0:7007`. The same forms appear on 22.04 and 24.04 |
+| `newline` | `newline.pl` renames itself (`/proc/self/comm`) to `a`, a newline and `LISTEN 0 0 x`, and listens on three ports. In the `ssp_` files that name splits the record over two lines, the second one starting with `LISTEN` (also in the UDP output); the `ss_` files are unaffected |
 
 On 22.04 the sshd jail needs a log file to start; the script touches
 `/var/log/auth.log` first. The package status of `rsync` is the only package

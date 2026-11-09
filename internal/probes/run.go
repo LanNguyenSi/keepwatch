@@ -26,7 +26,15 @@ import (
 // A non-zero exit status is NOT mapped here: only the caller knows which
 // statuses its command documents. It must treat every other status as error.
 func run(ctx context.Context, env *Env, argv []string, timeout time.Duration) (execx.Result, *Outcome) {
-	res, err := env.Runner.Run(ctx, argv, execx.Opts{Timeout: timeout})
+	return runWith(ctx, env, argv, execx.Opts{Timeout: timeout}, false)
+}
+
+// runWith is run with full options. With keepTruncated a run whose output was
+// cut at the size limit is NOT turned into an error outcome: the caller gets
+// the result with Truncated set and must treat the output as incomplete (it
+// may parse the complete lines of the prefix, but must never report pass).
+func runWith(ctx context.Context, env *Env, argv []string, opts execx.Opts, keepTruncated bool) (execx.Result, *Outcome) {
+	res, err := env.Runner.Run(ctx, argv, opts)
 	switch {
 	case err == nil:
 	case errors.Is(err, execx.ErrNotFound):
@@ -43,7 +51,7 @@ func run(ctx context.Context, env *Env, argv []string, timeout time.Duration) (e
 	switch {
 	case res.Signaled || res.ExitCode < 0:
 		return res, errorOutcome("%s was terminated before it exited", argv[0])
-	case res.Truncated:
+	case res.Truncated && !keepTruncated:
 		return res, errorOutcome("%s output was truncated at the size limit", argv[0])
 	}
 	return res, nil

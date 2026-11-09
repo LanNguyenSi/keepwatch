@@ -520,8 +520,8 @@ func TestListenersErrorKeepsConfirmedEvidence(t *testing.T) {
 			[]string{"udp/0.0.0.0:5353"}, []string{"tcp: ss exited with status 1", "partial", "udp/0.0.0.0:5353"}},
 		{"tcp confirmed, udp output unparseable", inline(tcpBad, 0), inline("garbage\n", 0),
 			[]string{"tcp/0.0.0.0:8080", "tcp/[::]:8080"}, []string{"ss -Hlun", "partial"}},
-		{"tcp confirmed, udp truncated", inline(tcpBad, 0), execx.Result{Stdout: []byte(udpBad), Truncated: true},
-			[]string{"tcp/0.0.0.0:8080", "tcp/[::]:8080"}, []string{"truncated", "partial"}},
+		{"tcp confirmed, udp truncated: its complete lines count too", inline(tcpBad, 0), execx.Result{Stdout: []byte(udpBad), Truncated: true},
+			[]string{"tcp/0.0.0.0:8080", "tcp/[::]:8080", "udp/0.0.0.0:5353"}, []string{"truncated", "partial"}},
 		{"tcp confirmed, udp killed", inline(tcpBad, 0), execx.Result{ExitCode: -1, Signaled: true},
 			[]string{"tcp/0.0.0.0:8080", "tcp/[::]:8080"}, []string{"terminated", "partial"}},
 		{"tcp allowed, udp exits 1: nothing to keep", inline("LISTEN 0 5 0.0.0.0:22 0.0.0.0:*\n", 0), inline("", 1),
@@ -642,5 +642,80 @@ func TestListenersParams(t *testing.T) {
 	}
 	for name, params := range bad {
 		t.Run(name, func(t *testing.T) { prepareErr(t, "listeners", params) })
+	}
+}
+
+// A truncated trusted run is never pass: the complete lines of the prefix are
+// examined, the not allowed sockets there stay as evidence, the status is error.
+func TestListenersTruncatedOutput(t *testing.T) {
+	good := "LISTEN 0 5 0.0.0.0:22 0.0.0.0:*\n"
+	bad := "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:*\n"
+	udpOK := inline("UNCONN 0 0 0.0.0.0:22 0.0.0.0:*\n", 0)
+	trunc := func(s string) execx.Result { return execx.Result{Stdout: []byte(s), Truncated: true} }
+	cases := []struct {
+		name     string
+		tcp      execx.Result
+		wantSubj []string
+		partial  bool
+	}{
+		{"complete lines with an unallowed socket", trunc(good + bad), []string{"tcp/0.0.0.0:8080"}, true},
+		{"cut last line is dropped, earlier ones kept", trunc(good + bad + "LISTEN 0 5 0.0.0.0:99"), []string{"tcp/0.0.0.0:8080"}, true},
+		{"only the cut last line would be unallowed", trunc(good + "LISTEN 0 5 0.0.0.0:80"), nil, false},
+		{"no complete line at all", trunc("LISTEN 0 5 0.0"), nil, false},
+		{"only allowed sockets before the cut", trunc(good), nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRunner().AddResult(ssTCP, c.tcp).AddResult(ssUDP, udpOK).
+				AddResult(ssTCPp, inline(bad, 0)).AddResult(ssUDPp, inline("", 0))
+			o := exec(listenersProbe(t, nil), r, nil, rule("tcp", 22, "*"), rule("udp", 22, "*"))
+			wantStatus(t, o, result.Error)
+			wantSummary(t, o, "truncated")
+			if !eq(subjects(o), c.wantSubj) {
+				t.Fatalf("subjects = %v, want %v", subjects(o), c.wantSubj)
+			}
+			if c.partial {
+				wantSummary(t, o, "partial")
+			} else if strings.Contains(o.Summary, "partial") {
+				t.Fatalf("summary %q claims a partial picture without evidence", o.Summary)
+			}
+		})
+	}
+}
+
+// A complete line of a truncated run that does not parse is an error without
+// evidence from that run, as for any output.
+func TestListenersTruncatedGarbageLine(t *testing.T) {
+	r := newRunner().AddResult(ssTCP, execx.Result{Stdout: []byte("LISTEN 0 5 0.0.0.0:8080 0.0.0.0:*\ngarbage\n"), Truncated: true}).
+		AddResult(ssUDP, inline("UNCONN 0 0 0.0.0.0:22 0.0.0.0:*\n", 0))
+	o := exec(listenersProbe(t, nil), r, nil, rule("udp", 22, "*"))
+	wantStatus(t, o, result.Error)
+	if len(o.Evidence) != 0 {
+		t.Fatalf("evidence from an unparseable run: %+v", o.Evidence)
+	}
+}
+
+// The runs that decide the socket set get the 64 MiB limit; the best-effort
+// -p runs keep the execx default (zero).
+func TestListenersOutputLimits(t *testing.T) {
+	r := ssRunner("ubuntu2404", "mixed")
+	exec(listenersProbe(t, nil), r, nil)
+	seen := map[string]int64{}
+	for _, c := range r.Calls() {
+		seen[strings.Join(c.Argv, " ")] = c.Opts.MaxOutput
+	}
+	for _, a := range []string{"ss -Hltn", "ss -Hlun"} {
+		if seen[a] != 64<<20 {
+			t.Errorf("%s: MaxOutput = %d, want %d", a, seen[a], int64(64<<20))
+		}
+	}
+	for _, a := range []string{"ss -Hltnp", "ss -Hlunp"} {
+		v, ok := seen[a]
+		if !ok {
+			t.Fatalf("%s was not run", a)
+		}
+		if v != 0 {
+			t.Errorf("%s: MaxOutput = %d, want the default (0)", a, v)
+		}
 	}
 }

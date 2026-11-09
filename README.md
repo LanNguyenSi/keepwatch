@@ -117,7 +117,15 @@ interface after the address, for example `udp/[fe80::1]%eth0:546` or
 `tcp/*%lo:7002`. `listeners.allow` cannot name an interface, so such a
 listener is allowed by an entry for its address without the interface, or by
 `bind: "*"`; `allow_loopback` only covers loopback addresses, not a wildcard
-bound to `lo`. Files are read without following a symbolic link in the last
+bound to `lo`. An IPv4-mapped listener (`[::ffff:0.0.0.0]:N`) matches only an
+entry with bind `*` or the mapped literal. The two runs that decide the socket
+set may print up to 64 MiB, so a flood of listening sockets from an
+unprivileged process does not reach the limit. If the output is cut anyway,
+the complete lines before the cut are still examined and the result is
+`error`, with the not allowed sockets found there as evidence and a summary
+that says the output was truncated; it is never `pass`. The limit that
+remains: `ss` prints in the order of the kernel, so a flood beyond 64 MiB can
+hide sockets that come after the cut. Files are read without following a symbolic link in the last
 path component and only if they are regular files.
 
 Under `checks.<id>` in the configuration, `enabled: false` skips a check,

@@ -9,8 +9,18 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
+
+// trustedMaxOutput is the output limit of the runs that decide the socket
+// set ("ss -Hltn", "ss -Hlun"). The execx default of 1 MiB is far below what
+// an unprivileged process can print: every listening socket is one line of
+// about 60 bytes, and any local user can open tens of thousands (SO_REUSEPORT
+// on one port needs no privilege). 64 MiB holds about a million lines, which
+// is beyond what a host can hold open, and still bounds the memory of the
+// run. The best-effort "-p" runs keep the execx default.
+const trustedMaxOutput = int64(64 << 20)
 
 // listeners compares the listening sockets of the host with the listener
 // allowlist of the configuration (listeners.allow).
@@ -54,6 +64,17 @@ import (
 // If one protocol cannot be read, the result is error, but the listeners
 // that the other protocol confirmed as not allowed stay in the evidence and
 // the summary says that the picture is partial.
+//
+// Output limit: the two runs that decide the socket set may print up to 64
+// MiB (trustedMaxOutput), so a local flood of listening sockets does not
+// reach the limit. If the output is cut anyway, the complete lines of the
+// prefix are parsed (a last line without its newline is dropped; a complete
+// line that does not parse makes the run error without evidence as for any
+// output), the sockets found there that are not allowed stay in the evidence
+// and the result is error, partial. Residual limit: ss prints sockets in
+// the order of the kernel, not sorted, so a flood that exceeds even 64 MiB can
+// still hide sockets that come after the cut. The result is then error
+// with the evidence of the prefix, never pass.
 //
 // A listener is allowed when an allowlist entry has the same port and
 // protocol and a bind that is "*" (any address) or the same address. The
@@ -140,7 +161,7 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	var failures []string
 	for i, proto := range l.protos {
 		sp := specFor(proto)
-		res, out := run(ctx, env, []string{"ss", sp.flag}, 0)
+		res, out := runWith(ctx, env, []string{"ss", sp.flag}, execx.Opts{MaxOutput: trustedMaxOutput}, true)
 		if out != nil {
 			if out.Status == result.Skipped && i == 0 {
 				return *out
@@ -152,12 +173,19 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 			failures = append(failures, proto+": "+unexpectedExit("ss", res).Summary)
 			continue
 		}
-		got, err := parseSS(string(res.Stdout), proto, sp.state)
+		stdout := string(res.Stdout)
+		if res.Truncated {
+			stdout = completeLines(stdout)
+		}
+		got, err := parseSS(stdout, proto, sp.state)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("ss %s: %v", sp.flag, err))
 			continue
 		}
 		socks = append(socks, got...)
+		if res.Truncated {
+			failures = append(failures, fmt.Sprintf("%s: ss output was truncated at the size limit", proto))
+		}
 	}
 	if len(failures) == 0 && len(socks) == 0 {
 		return *errorOutcome("ss reported no listening sockets at all, which cannot be told apart from a broken ss")
@@ -260,6 +288,15 @@ const (
 var zonePattern = regexp.MustCompile(`^%[A-Za-z0-9._@-]{1,32}$`)
 
 var procEntry = regexp.MustCompile(`\("(.*?)",pid=[0-9]+,fd=[0-9]+\)`)
+
+// completeLines cuts a truncated output back to its last newline, so a line
+// that was cut in the middle is never parsed.
+func completeLines(out string) string {
+	if i := strings.LastIndexByte(out, '\n'); i >= 0 {
+		return out[:i+1]
+	}
+	return ""
+}
 
 // parseSS parses the output of "ss -H" without -p for one protocol. The
 // format is strict: exactly five columns per line.
