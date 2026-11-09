@@ -186,6 +186,14 @@ func TestSecurityUpdatesPockets(t *testing.T) {
 			t.Fatalf("subjects %v", subjects(o))
 		}
 	})
+	t.Run("a reinstalled package is counted with the others", func(t *testing.T) {
+		out := "Reading package lists...\n0 upgraded, 0 newly installed, 1 reinstalled, 0 to remove and 0 not upgraded.\n" +
+			"Inst pkg-a [1] (1 Ubuntu:24.04/noble-security [amd64])\n"
+		o := execAt(updatesProbe(t, nil), aptRunner(out), lists(time.Hour), t0)
+		wantStatus(t, o, result.Fail)
+		out = strings.Replace(out, "1 reinstalled", "0 reinstalled", 1)
+		wantStatus(t, execAt(updatesProbe(t, nil), aptRunner(out), lists(time.Hour), t0), result.Error)
+	})
 	t.Run("removals and kept-back packages are noted, not judged", func(t *testing.T) {
 		out := "Reading package lists...\nThe following packages have been kept back:\n  held-pkg\nThe following packages will be REMOVED:\n  old\n" +
 			"0 upgraded, 0 newly installed, 1 to remove and 2 not upgraded.\nRemv old [1]\n"
@@ -267,6 +275,8 @@ func TestSecurityUpdatesParams(t *testing.T) {
 	}
 	prepare(t, "security_updates", map[string]any{"max_list_age_hours": 24 * 365})
 	prepare(t, "security_updates", map[string]any{"max_list_age_hours": int64(5)})
+	prepareErr(t, "security_updates", map[string]any{"max_list_age_hours": int64(0)})
+	prepareErr(t, "security_updates", map[string]any{"max_list_age_hours": int64(1) << 40})
 }
 
 func TestSecurityUpdatesArgvIsReadOnlyAndLockFree(t *testing.T) {

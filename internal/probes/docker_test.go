@@ -375,6 +375,17 @@ func TestDockerInspectOutput(t *testing.T) {
 			}
 		}
 	})
+	t.Run("other namespace modes are not the host's", func(t *testing.T) {
+		for _, mode := range []string{"container:abc", "private", "none", "bridge", "default", "myproject_default"} {
+			o := run1(inspectDoc(ids, func(_ int, c map[string]any) {
+				hostConfig(c)["PidMode"] = mode
+				hostConfig(c)["NetworkMode"] = mode
+			}), 0, "")
+			if o.Status != result.Pass {
+				t.Errorf("mode %q: %s %+v", mode, o.Status, o.Evidence)
+			}
+		}
+	})
 	t.Run("not a docker socket", func(t *testing.T) {
 		for _, src := range []string{"/var/run", "/run", "/", "/var/run/docker.sock.bak", "/var/run/docker.sock/../x", "docker.sock", "/data/docker.socket"} {
 			o := run1(inspectDoc(ids, func(_ int, c map[string]any) {
