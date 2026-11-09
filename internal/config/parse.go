@@ -47,34 +47,85 @@ func (es Errors) Error() string {
 // the schema itself is validated against the node tree so that every
 // error can name file and line. The second result maps every node of
 // this file to the file name for the merged-tree error reporting. An
-// empty file yields a nil root and no error.
-func parseFile(file string) (*yaml.Node, map[*yaml.Node]string, *Error) {
-	data, err := os.ReadFile(file)
+// empty file yields a nil root and no error. Problems found while
+// parsing (syntax, content after the first document reported at the
+// line of the second document, duplicate keys within one mapping at
+// any depth) are returned as Errors; a file with a problem yields a
+// nil root.
+func parseFile(file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, Errors) {
+	origins := map[*yaml.Node]string{}
+	f, _, err := openSecure(file, p)
 	if err != nil {
-		return nil, nil, &Error{File: file, Msg: "cannot read: " + cleanErr(err)}
+		return nil, origins, Errors{{File: file, Msg: "cannot read: " + cleanErr(err)}}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigSize))
+	f.Close()
+	if err != nil {
+		return nil, origins, Errors{{File: file, Msg: "cannot read: " + cleanErr(err)}}
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
 		if !errors.Is(err, io.EOF) {
-			return nil, nil, syntaxError(file, err)
+			return nil, origins, Errors{*syntaxError(file, err)}
 		}
 	}
 	var extra yaml.Node
 	if err := dec.Decode(&extra); err == nil {
-		return nil, nil, &Error{File: file, Msg: "unexpected content after the first document"}
+		return nil, origins, Errors{{File: file, Line: nodeLine(&extra), Msg: "unexpected content after the first document"}}
 	} else if !errors.Is(err, io.EOF) {
-		return nil, nil, syntaxError(file, err)
+		return nil, origins, Errors{*syntaxError(file, err)}
 	}
 
-	origins := map[*yaml.Node]string{}
 	if doc.Kind == 0 || len(doc.Content) == 0 {
 		return nil, origins, nil
 	}
 	root := doc.Content[0]
 	register(root, file, origins)
-	return root, origins, nil
+	var errs Errors
+	walkDuplicate(root, file, &errs)
+	return root, origins, errs
+}
+
+// nodeLine reports the best line for a decoded node: its own line, or
+// the line of its first child for wrapper nodes such as documents.
+func nodeLine(n *yaml.Node) int {
+	if n.Line > 0 {
+		return n.Line
+	}
+	if len(n.Content) > 0 {
+		return n.Content[0].Line
+	}
+	return 0
+}
+
+// walkDuplicate reports every key that appears more than once in the
+// same mapping, at any depth. Node decoding does not enforce yaml.v3's
+// unique-key check, so duplicates would silently drop the earlier
+// value. The error names the line of the repeated key and the line of
+// the first occurrence.
+func walkDuplicate(n *yaml.Node, file string, errs *Errors) {
+	if n.Kind == yaml.MappingNode {
+		seen := map[string]int{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, val := n.Content[i], n.Content[i+1]
+			if key.Kind == yaml.ScalarNode {
+				if first, dup := seen[key.Value]; dup {
+					*errs = append(*errs, Error{File: file, Line: key.Line,
+						Msg: fmt.Sprintf("duplicate key %q (first at line %d)", key.Value, first)})
+				} else {
+					seen[key.Value] = key.Line
+				}
+			}
+			walkDuplicate(key, file, errs)
+			walkDuplicate(val, file, errs)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		walkDuplicate(c, file, errs)
+	}
 }
 
 func register(n *yaml.Node, file string, origins map[*yaml.Node]string) {

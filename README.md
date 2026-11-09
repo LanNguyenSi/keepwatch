@@ -35,6 +35,32 @@ and scalars are replaced by the later file. A missing `conf.d` is fine;
 a missing main file is an error. Unknown keys, wrong types and out-of-range
 values are rejected, each error naming `file:line`.
 
+More rules, all reported with `file:line`:
+
+- The root of every file must be a mapping (an empty or null document
+  is treated as empty; a file never replaces another file's root).
+- A key repeated within the same mapping of the same file is an error
+  at any depth; the same key set again by a later file is an override.
+- Scalars are matched by YAML type: `enabled` is true/false, `port` is
+  an integer, strings are strings (quoted `"22"` is not a port),
+  `expires` is a `YYYY-MM-DD` date. A null (`~`) value counts as absent
+  for optional fields and is an error for required ones.
+- `*.yml` in `conf.d` is an error; use the `.yaml` extension.
+- Because keepwatch runs as root, loaded files and the `conf.d`
+  directory must not be symlinks, must be owned by root or the running
+  user, and must not be writable by group or other (mode 0644 or
+  stricter for files). Symlinks are never followed and checks run on
+  the open file itself.
+- `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
+  http only for loopback; a URL port must be 1-65535).
+- `notify.ntfy.token_file` must be a regular file, at most 4096 bytes,
+  mode 0600 or stricter, owned by the running user; it is validated
+  without reading and re-checked when the token is read, so swapping
+  the path after startup cannot redirect the secret.
+- `keepwatch init` writes the example file atomically (temp file +
+  rename, mode 0640) and refuses to follow symlinks; `--force` only
+  replaces a regular file.
+
 ```sh
 keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml

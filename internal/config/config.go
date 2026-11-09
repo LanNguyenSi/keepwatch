@@ -2,22 +2,46 @@
 //
 // The main file (default /etc/keepwatch/keepwatch.yaml) is read first,
 // then every *.yaml file in the conf.d directory next to it, in
-// lexicographic order. Each file is decoded with a yaml.Decoder that has
-// KnownFields(true) set; the schema is then validated against the parsed
-// yaml.Node tree so that every error names file and line and so that all
-// errors are collected, not only the first.
+// lexicographic order. Each file is decoded with a yaml.Decoder that
+// has KnownFields(true) set; the schema is then validated against the
+// parsed yaml.Node tree so that every error names file and line and so
+// that all errors are collected, not only the first. A *.yml file in
+// conf.d is an error (use the .yaml extension), and a file whose root
+// is not a mapping (an empty or null document is fine) is an error; a
+// file never replaces another file's root.
 //
 // Merge rule: a conf.d file may only set or override the top-level
 // sections it names. Mappings merge per key, recursively, and a key set
 // by a later file wins. Sequences (such as exceptions and
 // listeners.allow) append: main file first, then conf.d files in
 // lexicographic order. Scalars are replaced by the later file. A missing
-// conf.d directory is fine; a missing main file is an error.
+// conf.d directory is fine; a missing main file is an error. Repeated
+// keys within one mapping of one file are an error at any depth
+// (duplicate key "x" (first at line N)); a key repeated across files is
+// an override and fine.
+//
+// Scalars are validated by their resolved YAML tag: booleans are
+// !!bool (1 and "false" are rejected), ports are !!int, string fields
+// are !!str, and expires is a YYYY-MM-DD date. A !!null value counts
+// as absent for optional fields and is an error where the field is
+// required.
+//
+// File access rules, because keepwatch runs as root: every loaded file
+// (main and conf.d) is opened without ever following a symlink, and
+// its type, size (max 1 MiB), permissions (no group or other write
+// bits) and ownership (uid 0 or the running user) are checked on the
+// file descriptor itself. The conf.d directory itself must be a real
+// directory, owned by uid 0 or the running user, and not writable by
+// group or other. notify.ntfy.token_file is stricter: regular file, at
+// most 4096 bytes, mode 0600 or stricter, owned by the running user,
+// validated without reading it and re-checked every time ReadToken
+// opens it, so swapping the path after Load cannot redirect the read.
 package config
 
 import (
 	_ "embed"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -105,13 +129,15 @@ type Ntfy struct {
 type Option func(*options)
 
 type options struct {
-	ownerOf func(path string) (int, error) // file owner uid; injectable for tests
+	ownerOf OwnerOf // file owner uid from the fd's fstat; injectable for tests
 }
 
-// WithOwnerOf replaces the file-owner lookup used when validating a
-// notify.ntfy.token_file. Tests use it to simulate foreign owners
-// without privileges. A non-nil error is reported as a config error.
-func WithOwnerOf(fn func(path string) (int, error)) Option {
+// WithOwnerOf replaces the file-owner lookup (which receives the
+// fs.FileInfo from the file descriptor's fstat) used when validating
+// the configuration files and notify.ntfy.token_file. Tests use it to
+// simulate foreign owners without privileges. A non-nil error is
+// reported as a config error.
+func WithOwnerOf(fn OwnerOf) Option {
 	return func(o *options) { o.ownerOf = fn }
 }
 
@@ -131,11 +157,14 @@ func Load(path string, opts ...Option) (*Config, error) {
 	}
 
 	var errs Errors
-	root, origins, err := parseFile(path)
-	if err != nil {
-		return nil, Errors{*err}
-	}
-	if root == nil {
+	policy := configPolicy(opt.ownerOf)
+	root, origins, perrs := parseFile(path, policy)
+	errs = append(errs, perrs...)
+	switch {
+	case root == nil || isNull(root): // empty file or null document: nothing to merge
+		root = emptyMapping()
+	case !isMapping(root):
+		errs = append(errs, Error{File: path, Line: root.Line, Msg: "the configuration root must be a mapping"})
 		root = emptyMapping()
 	}
 
@@ -144,42 +173,61 @@ func Load(path string, opts ...Option) (*Config, error) {
 	names, dirErr := osReadDir(dir)
 	switch {
 	case dirErr == nil:
-		for _, name := range names {
-			if filepath.Ext(name) != ".yaml" {
-				continue
+		// keepwatch runs as root: a conf.d that group or other can
+		// write, or that is a symlink, could suppress findings or
+		// redirect the token. It must be a real, owned, non-writable
+		// directory before any of its files are read.
+		if derr := checkConfigDir(dir, opt.ownerOf); derr != nil {
+			errs = append(errs, Error{File: dir, Msg: cleanErr(derr)})
+		} else {
+			for _, name := range names {
+				p := filepath.Join(dir, name)
+				switch filepath.Ext(name) {
+				case ".yaml":
+					confd = append(confd, p)
+				case ".yml":
+					errs = append(errs, Error{File: p, Msg: `unsupported extension ".yml": use the .yaml extension`})
+				}
 			}
-			confd = append(confd, filepath.Join(dir, name))
 		}
 	case !isNotExist(dirErr):
 		errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + dirErr.Error()})
 	}
 
 	for _, file := range confd {
-		node, fileOrigins, err := parseFile(file)
+		node, fileOrigins, ferrs := parseFile(file, policy)
 		for n, f := range fileOrigins {
 			origins[n] = f
 		}
-		if err != nil {
-			errs = append(errs, *err)
+		errs = append(errs, ferrs...)
+		if node == nil || isNull(node) {
 			continue
 		}
-		if node == nil {
+		if !isMapping(node) {
+			errs = append(errs, Error{File: file, Line: node.Line, Msg: "the configuration root must be a mapping"})
 			continue
 		}
-		if isMapping(root) && isMapping(node) {
-			mergeMapping(root, node)
-		} else {
-			root = node // later file wins wholesale when the kinds differ
-		}
+		mergeMapping(root, node)
 	}
-	if len(errs) > 0 {
-		return nil, errs
-	}
-
+	// Validate the merged tree even when some file had a parse problem:
+	// every file that parses gets validated, and all problems from all
+	// files are reported together, sorted by file then line.
 	cfg, verrs := validate(root, origins, path, opt)
-	if len(verrs) > 0 {
-		return nil, verrs
+	errs = append(errs, verrs...)
+	if len(errs) == 0 {
+		cfg.Sources = Sources{Main: path, ConfD: confd}
+		return cfg, nil
 	}
-	cfg.Sources = Sources{Main: path, ConfD: confd}
-	return cfg, nil
+	sortErrors(errs)
+	return nil, errs
+}
+
+// sortErrors orders errors by file, then line, stably.
+func sortErrors(errs Errors) {
+	sort.SliceStable(errs, func(i, j int) bool {
+		if errs[i].File != errs[j].File {
+			return errs[i].File < errs[j].File
+		}
+		return errs[i].Line < errs[j].Line
+	})
 }

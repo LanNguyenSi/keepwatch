@@ -4,6 +4,11 @@
 # are loaded in lexicographic order and merged into it: mappings merge
 # per key (later files win), sequences such as exceptions and
 # listeners.allow append, and scalars are replaced by the later file.
+#
+# keepwatch runs as root, so this file, the conf.d directory and every
+# conf.d file must be owned by root or the running user and not
+# writable by group or other (0644 or stricter here), and must not be
+# symlinks; a repeated key within one mapping is rejected.
 
 # Free-form description of this host.
 host:
@@ -54,11 +59,12 @@ exceptions:
     reason: temporary jump host
     expires: 2099-12-31
 
-# Notification channels. topic is required when ntfy is set. url must be
-# https, or http only for a loopback host. token_file is an optional
-# absolute path to a file that must be owned by the running user and not
-# readable or writable by group or other (mode 0600 or stricter); its
-# content is never read during validation.
+# Notification channels. When ntfy is set, url and topic are required.
+# url must be https, or http only for a loopback host, and any URL port
+# must be 1-65535. token_file is an optional absolute path to a file
+# that must be owned by the running user, mode 0600 or stricter, and at
+# most 4 KiB; its content is never read during validation and is
+# re-checked against these rules each time the token is read.
 notify:
   ntfy:
     url: https://ntfy.example.com/keepwatch-alerts

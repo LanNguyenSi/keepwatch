@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -24,24 +22,19 @@ type validator struct {
 	main    string
 	errs    Errors
 	token   *yaml.Node // the notify.ntfy.token_file node, for the secret checks
-	uid     int
-	ownerOf func(path string) (int, error)
+	ownerOf OwnerOf
 }
 
 func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt options) (*Config, Errors) {
-	v := &validator{origins: origins, main: main, uid: os.Getuid(), ownerOf: opt.ownerOf}
+	v := &validator{origins: origins, main: main, ownerOf: opt.ownerOf}
 	cfg := &Config{StateDir: DefaultStateDir}
-	if !isMapping(root) {
-		v.fail(root, "the configuration root must be a mapping")
-		return nil, v.errs
-	}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		k, val := root.Content[i], root.Content[i+1]
 		switch k.Value {
 		case "host":
 			cfg.Host = v.host(val)
 		case "state_dir":
-			if s, ok := v.str(val, "state_dir"); ok {
+			if s, present, ok := v.str(val, "state_dir"); ok && present {
 				if !filepath.IsAbs(s) {
 					v.fail(val, "state_dir: must be an absolute path")
 				} else {
@@ -65,12 +58,6 @@ func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt o
 	if cfg.Notify.Ntfy != nil && cfg.Notify.Ntfy.TokenFile != "" {
 		v.checkTokenFile(v.token, cfg.Notify.Ntfy.TokenFile)
 	}
-	sort.SliceStable(v.errs, func(i, j int) bool {
-		if v.errs[i].File != v.errs[j].File {
-			return v.errs[i].File < v.errs[j].File
-		}
-		return v.errs[i].Line < v.errs[j].Line
-	})
 	if len(v.errs) == 0 {
 		return cfg, nil
 	}
@@ -85,25 +72,91 @@ func (v *validator) fail(n *yaml.Node, msg string) {
 	v.errs = append(v.errs, Error{File: file, Line: n.Line, Msg: msg})
 }
 
-func (v *validator) str(n *yaml.Node, path string) (string, bool) {
+// str validates a string-valued scalar by its resolved tag, so quoted
+// "22" or 1 are not strings. A !!null value counts as absent: the
+// second result is false without an error, and the caller decides
+// whether absent is fine (optional) or an error (required, via its
+// own presence check). The third result is false when an error was
+// reported.
+func (v *validator) str(n *yaml.Node, path string) (string, bool, bool) {
 	if !isScalar(n) {
 		v.fail(n, path+": expected a string")
-		return "", false
+		return "", false, false
 	}
-	return n.Value, true
+	switch n.ShortTag() {
+	case "!!null":
+		return "", false, true
+	case "!!str":
+		return n.Value, true, true
+	default:
+		v.fail(n, path+": expected a string")
+		return "", false, false
+	}
 }
 
-func (v *validator) boolVal(n *yaml.Node, path string) (bool, bool) {
+// boolVal validates a boolean scalar (tag !!bool): 1 and "false" are
+// not booleans. Null is absent; see str for the result pattern.
+func (v *validator) boolVal(n *yaml.Node, path string) (bool, bool, bool) {
 	if !isScalar(n) {
 		v.fail(n, path+": expected true or false")
-		return false, false
+		return false, false, false
 	}
-	b, err := strconv.ParseBool(n.Value)
-	if err != nil {
+	switch n.ShortTag() {
+	case "!!null":
+		return false, false, true
+	case "!!bool":
+		b, err := strconv.ParseBool(n.Value)
+		if err != nil {
+			v.fail(n, path+": expected true or false, got "+strconv.Quote(n.Value))
+			return false, false, false
+		}
+		return b, true, true
+	default:
 		v.fail(n, path+": expected true or false, got "+strconv.Quote(n.Value))
-		return false, false
+		return false, false, false
 	}
-	return b, true
+}
+
+// intVal validates an integer scalar (tag !!int): a quoted "22" is a
+// string, not an integer. Null is absent; see str.
+func (v *validator) intVal(n *yaml.Node, path string) (int, bool, bool) {
+	if !isScalar(n) {
+		v.fail(n, path+": expected an integer")
+		return 0, false, false
+	}
+	switch n.ShortTag() {
+	case "!!null":
+		return 0, false, true
+	case "!!int":
+		i, err := strconv.ParseInt(n.Value, 0, 64)
+		if err != nil {
+			v.fail(n, path+": expected an integer, got "+strconv.Quote(n.Value))
+			return 0, false, false
+		}
+		return int(i), true, true
+	default:
+		v.fail(n, path+": expected an integer, got "+strconv.Quote(n.Value))
+		return 0, false, false
+	}
+}
+
+// date returns the text of an expires value: a quoted string or a
+// plain date (yaml resolves plain YYYY-MM-DD to !!timestamp). Null is
+// absent; see str. The caller parses the text.
+func (v *validator) date(n *yaml.Node, path string) (string, bool, bool) {
+	if !isScalar(n) {
+		v.fail(n, path+": expected a date in YYYY-MM-DD form")
+		return "", false, false
+	}
+	switch n.ShortTag() {
+	case "!!null":
+		return "", false, true
+	case "!!str", "!!timestamp":
+		return n.Value, true, true
+	default:
+		v.fail(n, path+": expected a date in YYYY-MM-DD form")
+		return "", false, false
+	}
 }
 
 func (v *validator) host(n *yaml.Node) Host {
@@ -116,7 +169,7 @@ func (v *validator) host(n *yaml.Node) Host {
 		k, val := n.Content[i], n.Content[i+1]
 		switch k.Value {
 		case "profile":
-			if s, ok := v.str(val, "host.profile"); ok {
+			if s, present, ok := v.str(val, "host.profile"); ok && present {
 				h.Profile = s
 			}
 		default:
@@ -149,11 +202,11 @@ func (v *validator) checks(n *yaml.Node) map[string]Check {
 			ik, iv := val.Content[j], val.Content[j+1]
 			switch ik.Value {
 			case "enabled":
-				if b, ok := v.boolVal(iv, path+".enabled"); ok {
+				if b, present, ok := v.boolVal(iv, path+".enabled"); ok && present {
 					c.Enabled = b
 				}
 			case "severity":
-				if s, ok := v.str(iv, path+".severity"); ok {
+				if s, present, ok := v.str(iv, path+".severity"); ok && present {
 					if !contains(severities, s) {
 						v.fail(iv, path+".severity: "+strconv.Quote(s)+" is not one of "+strings.Join(severities, ", "))
 					} else {
@@ -216,20 +269,17 @@ func (v *validator) allow(seq *yaml.Node, path string) []Listener {
 			k, val := entry.Content[j], entry.Content[j+1]
 			switch k.Value {
 			case "port":
-				sawPort = true
-				if s, ok := v.str(val, p+".port"); ok {
-					port, err := strconv.Atoi(s)
-					if err != nil {
-						v.fail(val, p+".port: expected an integer, got "+strconv.Quote(s))
-					} else if port < 1 || port > 65535 {
+				if port, present, ok := v.intVal(val, p+".port"); ok && present {
+					sawPort = true
+					if port < 1 || port > 65535 {
 						v.fail(val, p+".port: must be between 1 and 65535, got "+strconv.Itoa(port))
 					} else {
 						l.Port = port
 					}
 				}
 			case "proto":
-				sawProto = true
-				if s, ok := v.str(val, p+".proto"); ok {
+				if s, present, ok := v.str(val, p+".proto"); ok && present {
+					sawProto = true
 					if s != "tcp" && s != "udp" {
 						v.fail(val, p+".proto: "+strconv.Quote(s)+" is not tcp or udp")
 					} else {
@@ -237,7 +287,7 @@ func (v *validator) allow(seq *yaml.Node, path string) []Listener {
 					}
 				}
 			case "bind":
-				if s, ok := v.str(val, p+".bind"); ok {
+				if s, present, ok := v.str(val, p+".bind"); ok && present {
 					if s != "*" && net.ParseIP(s) == nil {
 						v.fail(val, p+".bind: "+strconv.Quote(s)+" is not an IP literal or \"*\"")
 					} else {
@@ -277,6 +327,10 @@ func (v *validator) authorizedKeys(n *yaml.Node) AuthorizedKeys {
 		}
 		for j := 0; j+1 < len(val.Content); j += 2 {
 			uk, uv := val.Content[j], val.Content[j+1]
+			if !isScalar(uk) || uk.ShortTag() != "!!str" {
+				v.fail(uk, "authorized_keys.expected: expected a string user name")
+				continue
+			}
 			user := uk.Value
 			if user == "" {
 				v.fail(uk, "authorized_keys.expected: a user name must not be empty")
@@ -288,11 +342,7 @@ func (v *validator) authorizedKeys(n *yaml.Node) AuthorizedKeys {
 				continue
 			}
 			for _, fp := range uv.Content {
-				if !isScalar(fp) {
-					v.fail(fp, path+": expected a string fingerprint")
-					continue
-				}
-				if !fingerprint.MatchString(fp.Value) {
+				if !isScalar(fp) || fp.ShortTag() != "!!str" || !fingerprint.MatchString(fp.Value) {
 					v.fail(fp, path+": "+strconv.Quote(fp.Value)+" is not a SHA256:<base64> fingerprint")
 					continue
 				}
@@ -321,8 +371,8 @@ func (v *validator) exceptions(seq *yaml.Node) []Exception {
 			k, val := entry.Content[j], entry.Content[j+1]
 			switch k.Value {
 			case "check":
-				sawCheck = true
-				if s, ok := v.str(val, p+".check"); ok {
+				if s, present, ok := v.str(val, p+".check"); ok && present {
+					sawCheck = true
 					if s == "" {
 						v.fail(val, p+".check: must not be empty")
 					} else {
@@ -330,12 +380,12 @@ func (v *validator) exceptions(seq *yaml.Node) []Exception {
 					}
 				}
 			case "match":
-				if s, ok := v.str(val, p+".match"); ok {
+				if s, present, ok := v.str(val, p+".match"); ok && present {
 					e.Match = s
 				}
 			case "reason":
-				sawReason = true
-				if s, ok := v.str(val, p+".reason"); ok {
+				if s, present, ok := v.str(val, p+".reason"); ok && present {
+					sawReason = true
 					if strings.TrimSpace(s) == "" {
 						v.fail(val, p+".reason: must not be empty")
 					} else {
@@ -343,8 +393,8 @@ func (v *validator) exceptions(seq *yaml.Node) []Exception {
 					}
 				}
 			case "expires":
-				sawExpires = true
-				if s, ok := v.str(val, p+".expires"); ok {
+				if s, present, ok := v.date(val, p+".expires"); ok && present {
+					sawExpires = true
 					t, err := parseDate(s)
 					if err != nil {
 						v.fail(val, p+".expires: "+strconv.Quote(s)+" is not a date in YYYY-MM-DD form")
@@ -397,18 +447,19 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 		return nil, false
 	}
 	nf := &Ntfy{}
-	sawTopic := false
+	sawTopic, sawURL := false, false
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k, val := n.Content[i], n.Content[i+1]
 		switch k.Value {
 		case "url":
-			if s, ok := v.str(val, "notify.ntfy.url"); ok {
+			if s, present, ok := v.str(val, "notify.ntfy.url"); ok && present {
+				sawURL = true
 				v.ntfyURL(val, s)
 				nf.URL = s
 			}
 		case "topic":
-			sawTopic = true
-			if s, ok := v.str(val, "notify.ntfy.topic"); ok {
+			if s, present, ok := v.str(val, "notify.ntfy.topic"); ok && present {
+				sawTopic = true
 				if s == "" {
 					v.fail(val, "notify.ntfy.topic: must not be empty")
 				} else {
@@ -416,7 +467,7 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 				}
 			}
 		case "token_file":
-			if s, ok := v.str(val, "notify.ntfy.token_file"); ok {
+			if s, present, ok := v.str(val, "notify.ntfy.token_file"); ok && present {
 				if !filepath.IsAbs(s) {
 					v.fail(val, "notify.ntfy.token_file: must be an absolute path")
 				} else {
@@ -427,6 +478,9 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 		default:
 			v.fail(k, "notify.ntfy: unknown key "+strconv.Quote(k.Value))
 		}
+	}
+	if !sawURL {
+		v.fail(n, "notify.ntfy.url: required when notify.ntfy is set")
 	}
 	if !sawTopic {
 		v.fail(n, "notify.ntfy.topic: required when notify.ntfy is set")
@@ -439,6 +493,13 @@ func (v *validator) ntfyURL(n *yaml.Node, raw string) {
 	if err != nil || u.Host == "" {
 		v.fail(n, "notify.ntfy.url: "+strconv.Quote(raw)+" is not a valid absolute URL")
 		return
+	}
+	if p := u.Port(); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 {
+			v.fail(n, "notify.ntfy.url: port must be between 1 and 65535, got "+p)
+			return
+		}
 	}
 	switch u.Scheme {
 	case "https":
@@ -459,36 +520,22 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// checkTokenFile validates the token file's existence, type, size,
+// permissions and ownership through the same secure-open used by
+// ReadToken, then closes it without reading it. The checks run on the
+// fd, so a later path swap cannot pass validation on one file and read
+// another; ReadToken re-checks when it opens.
 func (v *validator) checkTokenFile(n *yaml.Node, path string) {
-	fi, err := os.Lstat(path)
+	f, _, err := openSecure(path, tokenPolicy(v.ownerOf))
 	if err != nil {
 		if isNotExist(err) {
 			v.fail(n, "notify.ntfy.token_file: "+path+": does not exist")
 		} else {
-			v.fail(n, "notify.ntfy.token_file: "+path+": cannot stat: "+cleanErr(err))
+			v.fail(n, "notify.ntfy.token_file: "+err.Error())
 		}
 		return
 	}
-	if !fi.Mode().IsRegular() {
-		found := "found " + fi.Mode().Type().String()
-		if fi.Mode()&os.ModeSymlink != 0 {
-			found = "it is a symlink"
-		}
-		v.fail(n, "notify.ntfy.token_file: "+path+": must be a regular file, "+found)
-		return
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		v.fail(n, fmt.Sprintf("notify.ntfy.token_file: %s: permissions 0%03o grant access to group or other, want 0600 or stricter", path, fi.Mode().Perm()))
-		return
-	}
-	uid, err := v.ownerOf(path)
-	if err != nil {
-		v.fail(n, "notify.ntfy.token_file: "+path+": cannot check owner: "+cleanErr(err))
-		return
-	}
-	if uid != v.uid {
-		v.fail(n, fmt.Sprintf("notify.ntfy.token_file: %s: owned by uid %d, expected uid %d", path, uid, v.uid))
-	}
+	f.Close()
 }
 
 func contains(set []string, s string) bool {

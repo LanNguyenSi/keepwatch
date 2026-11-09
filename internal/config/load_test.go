@@ -272,10 +272,9 @@ func TestConfDPrecedence(t *testing.T) {
 			want: "/from-b",
 		},
 		{
-			name: "non-yaml files are ignored",
+			name: "non-yaml non-yml files are ignored",
 			files: map[string]string{
 				"keepwatch.yaml": "state_dir: /from-main\n",
-				"conf.d/a.yml":   "state_dir: /from-a\n",
 				"conf.d/notes":   "state_dir: /from-n\n",
 			},
 			want: "/from-main",

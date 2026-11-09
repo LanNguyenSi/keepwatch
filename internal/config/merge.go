@@ -14,6 +14,10 @@ func isSequence(n *yaml.Node) bool { return n != nil && n.Kind == yaml.SequenceN
 
 func isScalar(n *yaml.Node) bool { return n != nil && n.Kind == yaml.ScalarNode }
 
+// isNull reports a null document or null value (a bare ~, null or empty
+// plain scalar after tag resolution).
+func isNull(n *yaml.Node) bool { return isScalar(n) && n.ShortTag() == "!!null" }
+
 // mergeMapping merges src into dst per the package merge rule: mappings
 // merge per key recursively with the later (src) value winning,
 // sequences append (dst first, then src), scalars and kind changes are

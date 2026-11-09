@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +90,15 @@ func TestTokenFileChecks(t *testing.T) {
 			}
 			var opts []Option
 			if strings.Contains(tc.name, "foreign owner") {
-				opts = append(opts, WithOwnerOf(func(string) (int, error) { return 60001, nil }))
+				// Foreign owner only for the token file; the config
+				// files keep their real owner so the error below can
+				// only come from the token check.
+				opts = append(opts, WithOwnerOf(func(fi fs.FileInfo) (int, error) {
+					if fi.Name() == "token" {
+						return 60001, nil
+					}
+					return ownerOf(fi)
+				}))
 			}
 			_, err := Load(main, opts...)
 			if tc.wantOK {
