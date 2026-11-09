@@ -294,7 +294,13 @@ func TestDiskUsageUnreadableMountsAreError(t *testing.T) {
 		release := make(chan struct{})
 		defer close(release)
 		env := &probes.Env{Runner: fake.New(nil), FS: mountFS(mi(1, "/", "ext4")), Statfs: func(string) (probes.Statfs, error) { <-release; return probes.Statfs{}, nil }}
-		wantStatus(t, diskProbe(t, nil).Run(ctx, env), result.Error)
+		start := time.Now()
+		o := diskProbe(t, nil).Run(ctx, env)
+		wantStatus(t, o, result.Error)
+		wantSummary(t, o, "context canceled")
+		if time.Since(start) > 3*time.Second {
+			t.Fatalf("a cancelled run waited for the timeout")
+		}
 	})
 }
 
@@ -317,6 +323,9 @@ func TestDiskUsageMountinfoIsParsedStrictly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			o := execDisk(diskProbe(t, nil), probestest.MemFS{"/proc/self/mountinfo": content}, st())
 			wantStatus(t, o, result.Error)
+			if !strings.Contains(o.Summary, "/proc/self/mountinfo: ") {
+				t.Fatalf("a mountinfo problem must be named as one, not left to statfs: %q", o.Summary)
+			}
 		})
 	}
 	t.Run("optional fields before the separator", func(t *testing.T) {

@@ -439,6 +439,9 @@ func TestDockerInspectOutput(t *testing.T) {
 				t.Errorf("%s: %s (%s)", name, o.Status, o.Summary)
 			}
 		}
+		if o := run1(inspectDoc([]string{ids[0], ids[0]}, nil), 0, ""); !strings.Contains(o.Summary, "not asked for") {
+			t.Errorf("a repeated container: %q", o.Summary)
+		}
 	})
 	t.Run("exit status 1", func(t *testing.T) {
 		gone := "Error response from daemon: No such container: " + ids[0] + "\n"
@@ -571,13 +574,14 @@ func TestDockerPsOutput(t *testing.T) {
 	for name, out := range map[string]string{
 		"a name instead of an id": "web-1\n",
 		"short id":                strings.Repeat("a", 12) + "\n",
-		"upper case":              strings.ToUpper(idsN(1)[0]) + "\n",
+		"upper case":              fmt.Sprintf("%064X", 255) + "\n",
 		"id with a suffix":        idsN(1)[0] + " x\n",
 		"an option":               "--all\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			o := exec(dockerProbe(t), newRunner().AddResult(dockerPs, inline(out, 0)), probestest.FakeFS{})
 			wantStatus(t, o, result.Error)
+			wantSummary(t, o, "not a container id")
 		})
 	}
 	t.Run("exit status 1 with an id on stdout", func(t *testing.T) {

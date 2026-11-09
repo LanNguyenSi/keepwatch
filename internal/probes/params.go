@@ -77,25 +77,21 @@ func (p *paramReader) integer(key string, def, min, max int) int {
 	if !ok {
 		return def
 	}
-	var n int
+	var n int64
 	switch x := v.(type) {
 	case int:
-		n = x
+		n = int64(x)
 	case int64:
-		if x < int64(min) || x > int64(max) {
-			p.fail("%s: %d is not between %d and %d", key, x, min, max)
-			return def
-		}
-		n = int(x)
+		n = x
 	default:
 		p.fail("%s: expected an integer, got %T", key, v)
 		return def
 	}
-	if n < min || n > max {
+	if n < int64(min) || n > int64(max) {
 		p.fail("%s: %d is not between %d and %d", key, n, min, max)
 		return def
 	}
-	return n
+	return int(n)
 }
 
 // strList reads a list of strings, each checked with valid. A missing

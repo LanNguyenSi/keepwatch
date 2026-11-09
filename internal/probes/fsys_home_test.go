@@ -498,3 +498,35 @@ func TestOSFSGlobAndModTime(t *testing.T) {
 		t.Fatalf("missing: %v", err)
 	}
 }
+
+// A path is looked at before it is opened. A FIFO nobody may open shows it:
+// opening it would fail with a permission error, looking at it first says what
+// it is. (Root may open anything, so the test cannot tell there.)
+func TestSpecialFilesAreRefusedBeforeTheyAreOpened(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can open a FIFO without permission")
+	}
+	home, _ := homeTree(t)
+	mk := func(path string) {
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Skipf("no FIFO here: %v", err)
+		}
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plain := filepath.Join(home, "fifo")
+	mk(plain)
+	if _, err := (probes.OSFS{}).ReadFile(plain, 10); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if _, err := (probes.OSFS{}).ReadHomeFile(home, me(), "fifo", 10); !errors.Is(err, probes.ErrUnsafe) {
+		t.Fatalf("ReadHomeFile: %v", err)
+	}
+	b := certTree(t)
+	trusted := filepath.Join(b, "archive/example/fifo")
+	mk(trusted)
+	if _, _, err := trustedFS(t, b).ReadTrusted(trusted, 10); !errors.Is(err, probes.ErrUnsafe) {
+		t.Fatalf("ReadTrusted: %v", err)
+	}
+}

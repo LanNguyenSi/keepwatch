@@ -92,6 +92,9 @@ func TestCertExpiryThresholds(t *testing.T) {
 				return
 			}
 			e := o.Evidence[0]
+			if strings.Contains(e.Detail, ", file ") {
+				t.Fatalf("the path is the file: %q", e.Detail)
+			}
 			if e.Subject != leGlob || !strings.Contains(e.Detail, "CN site.example.test") || !strings.Contains(e.Detail, "not after "+t0.Add(c.left).UTC().Format("2006-01-02")) {
 				t.Fatalf("evidence %+v", e)
 			}
@@ -172,7 +175,7 @@ func TestCertExpiryFiles(t *testing.T) {
 	t.Run("a glob that matches nothing is not an error, but with nothing at all the check is skipped", func(t *testing.T) {
 		o := execCert(certProbe(t, nil), certFS(nil))
 		wantStatus(t, o, result.Skipped)
-		wantSummary(t, o, "no certificate file found")
+		wantSummary(t, o, "no certificate file found (0 path(s), 1 pattern(s))")
 	})
 	t.Run("a listed path that is missing is an error", func(t *testing.T) {
 		fsys := certFS(map[string]string{"/opt/b.pem": good("b", days(5))})
@@ -288,6 +291,12 @@ func TestCertExpiryManyFiles(t *testing.T) {
 		t.Fatalf("%d items", len(o.Evidence))
 	}
 	wantSummary(t, o, "and 51 more")
+
+	thousand := map[string]string{}
+	for i := 0; i < 1000; i++ {
+		thousand[fmt.Sprintf("/opt/c%04d.pem", i)] = one
+	}
+	wantStatus(t, execCert(certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}), certFS(thousand)), result.Fail)
 
 	many := map[string]string{}
 	for i := 0; i < 1001; i++ {

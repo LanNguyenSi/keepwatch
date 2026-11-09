@@ -241,10 +241,9 @@ func TestFirewallGarbageIsNeverAPass(t *testing.T) {
 	}
 	for i, g := range garbage {
 		t.Run("nft "+string(rune('a'+i)), func(t *testing.T) {
+			// nothing else drops, so the unreadable source might: error, not fail
 			o := exec(fwProbe(t), fwRunner(g, iptAccept, iptAccept, ""), nil)
-			if o.Status == result.Pass {
-				t.Fatalf("pass on %q", g)
-			}
+			wantStatus(t, o, result.Error)
 		})
 	}
 	badIpt := []string{
@@ -254,13 +253,9 @@ func TestFirewallGarbageIsNeverAPass(t *testing.T) {
 	for i, g := range badIpt {
 		t.Run("iptables "+string(rune('a'+i)), func(t *testing.T) {
 			o := exec(fwProbe(t), fwRunner(nftNothing, g, iptAccept, ""), nil)
-			if o.Status == result.Pass {
-				t.Fatalf("pass on %q", g)
-			}
+			wantStatus(t, o, result.Error)
 			o = exec(fwProbe(t), fwRunner(nftNothing, iptAccept, g, ""), nil)
-			if o.Status == result.Pass {
-				t.Fatalf("pass on %q for ip6tables", g)
-			}
+			wantStatus(t, o, result.Error)
 		})
 	}
 }
@@ -283,6 +278,14 @@ func TestFirewallUFWOnlyExplains(t *testing.T) {
 		wantStatus(t, exec(fwProbe(t), r, nil), result.Pass)
 		r = fwRunner(nftNothing, iptDrop, iptDrop, "").AddError(fwUfw, execx.ErrTimeout)
 		wantStatus(t, exec(fwProbe(t), r, nil), result.Pass)
+	})
+	t.Run("a Default line in the rule table is not the header's", func(t *testing.T) {
+		u := "Status: active\nLogging: on (low)\n\nTo   Action   From\nDefault: deny (incoming), allow (outgoing)\n"
+		o := exec(fwProbe(t), fwRunner(nftNothing, iptAccept, iptAccept, u), nil)
+		wantStatus(t, o, result.Fail)
+		if !strings.Contains(o.Evidence[0].Detail, "ufw: output not understood") {
+			t.Fatalf("detail %q", o.Evidence[0].Detail)
+		}
 	})
 	t.Run("the rule table after the header is not read", func(t *testing.T) {
 		u := "Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing)\nNew profiles: skip\n\nTo   Action   From\n22   ALLOW IN  Anywhere   # Default: allow (incoming), x\n"
@@ -313,6 +316,18 @@ func TestFirewallNftTableFlags(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A failing exit status is not trusted even when stdout looks like a drop.
+func TestFirewallExitStatusOfTheIptablesTools(t *testing.T) {
+	for _, bad := range []int{1, 3, 4, 255} {
+		for _, which := range [][]string{fwIpt, fwIpt6} {
+			r := fwRunner(nftNothing, iptAccept, iptAccept, "").AddResult(which, execx.Result{Stdout: []byte(iptDrop), ExitCode: bad})
+			o := exec(fwProbe(t), r, nil)
+			wantStatus(t, o, result.Error)
+			wantSummary(t, o, "exited with status")
+		}
 	}
 }
 

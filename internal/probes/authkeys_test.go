@@ -93,6 +93,10 @@ func TestAuthorizedKeysFailAndWarn(t *testing.T) {
 		if d := o.Evidence[0].Detail; d != "ecdsa-sha2-nistp256 key in .ssh/authorized_keys line 5" {
 			t.Fatalf("detail %q", d)
 		}
+		// the comment line is not a warning
+		if strings.Contains(o.Summary, "warning") {
+			t.Fatalf("summary %q", o.Summary)
+		}
 	})
 	t.Run("a user without an expected entry has only unexpected keys", func(t *testing.T) {
 		o := run(map[string]string{aliceAK: ed.line + "\n", bobAK: rsa.line + "\n"}, map[string][]string{"alice": {ed.fp}})
@@ -222,6 +226,9 @@ func TestAuthorizedKeysOptionsAndOddLines(t *testing.T) {
 				return
 			}
 			wantStatus(t, o, result.Warn)
+			if name == "too long" && !strings.Contains(allText(o), "line is too long") {
+				t.Fatalf("evidence %+v", o.Evidence)
+			}
 			var sub string
 			for _, e := range o.Evidence {
 				if strings.HasPrefix(e.Subject, "alice:.ssh/authorized_keys:3") {
@@ -301,7 +308,7 @@ func TestAuthorizedKeysPaths(t *testing.T) {
 		}
 	})
 	t.Run("AuthorizedKeysFile none reads nothing", func(t *testing.T) {
-		fsys := keyHost(t, v, map[string]string{"/home/alice\x00.ssh/authorized_keys": ed.line + "\n"})
+		fsys := keyHost(t, v, map[string]string{"/home/alice\x00.ssh/authorized_keys": ed.line + "\n", "/home/alice\x00none": rsa.line + "\n"})
 		o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_authkeys_none"), fsys, map[string][]string{"alice": {ed.fp}})
 		wantStatus(t, o, result.Warn)
 		if !eq(subjects(o), []string{"alice:" + ed.fp}) {

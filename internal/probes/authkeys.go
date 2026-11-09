@@ -386,7 +386,7 @@ func expandKeyPath(pattern string, a account) (rel, abs string, err error) {
 		return p, "", nil
 	}
 	p = path.Clean(p)
-	if a.home != "/" && strings.HasPrefix(p, a.home+"/") {
+	if strings.HasPrefix(p, a.home+"/") {
 		return strings.TrimPrefix(p, a.home+"/"), "", nil
 	}
 	return "", p, nil

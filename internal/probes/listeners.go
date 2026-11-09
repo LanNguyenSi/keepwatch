@@ -83,14 +83,16 @@ const trustedMaxOutput = int64(64 << 20)
 // entry with bind "*" allows "*" and "*%lo" (the dual-stack socket that ss
 // prints with no address). A socket bound to a device is not thereby a
 // loopback listener: only a loopback ADDRESS is allowed by allow_loopback.
-// At most 100 evidence items are returned, sorted by subject: the first 99
-// and a marker item "(N more not shown)"; the summary says "and N more".
-// The status is not affected, and the marker keeps an exception for the listed
-// items from hiding the rest. Each listener that is not allowed is one evidence item with subject
+// Each listener that is not allowed is one evidence item with subject
 // "<proto>/<address>:<port>" (IPv6 in brackets, the interface suffix kept
 // after the address, for example "udp/[fe80::1]%eth0:546") and the owning
 // process names in the detail, shown quoted and sanitised, never
 // interpreted.
+//
+// At most 100 evidence items are returned, sorted by subject: the first 99
+// and a marker item "(N more not shown)"; the summary says "and N more". The
+// status is not affected, and the marker keeps an exception for the listed
+// items from hiding the rest.
 type listeners struct{}
 
 func (listeners) Name() string       { return "listeners" }
