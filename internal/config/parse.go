@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"strconv"
@@ -57,12 +58,12 @@ func parseFile(file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, 
 	origins := map[*yaml.Node]string{}
 	f, _, err := openSecure(file, p)
 	if err != nil {
-		return nil, origins, Errors{{File: file, Msg: "cannot read: " + trimPath(cleanErr(err), file)}}
+		return nil, origins, Errors{{File: file, Msg: "cannot read: " + fileErr(err, file)}}
 	}
 	data, err := readCapped(f, maxConfigSize)
 	f.Close()
 	if err != nil {
-		return nil, origins, Errors{{File: file, Msg: "cannot read: " + cleanErr(err)}}
+		return nil, origins, Errors{{File: file, Msg: "cannot read: " + fileErr(err, file)}}
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -152,6 +153,18 @@ func syntaxError(file string, err error) *Error {
 
 func cleanErr(err error) string { return err.Error() }
 
+// fileErr is the message of err for an Error whose File already names
+// the path. A *fs.PathError renders as "<op> <path>: <reason>", which
+// would name the path twice, so it is reduced to "<op>: <reason>"; any
+// other message that starts with the path loses that prefix.
+func fileErr(err error, path string) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	return trimPath(cleanErr(err), path)
+}
+
 // trimPath drops a leading "<path>: " from msg: an Error is already
 // prefixed with its File, so a message that starts with the same path
 // must not name it twice.
@@ -163,10 +176,3 @@ func trimPath(msg, path string) string {
 }
 
 func isNotExist(err error) bool { return errors.Is(err, os.ErrNotExist) }
-
-// osReadDir lists dir in the lexicographic order os.ReadDir returns,
-// keeping directories (conf.d rejects them) but never hidden entries
-// or anything but direct children.
-func osReadDir(dir string) ([]os.DirEntry, error) {
-	return os.ReadDir(dir)
-}

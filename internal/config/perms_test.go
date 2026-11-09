@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigPathPermissions(t *testing.T) {
-	// D-020: keepwatch runs as root, so every loaded path must be a
+	// keepwatch runs as root, so every loaded path must be a
 	// real file/directory owned by root or the running user and not
 	// writable by group or other. Group-readable is fine.
 	t.Run("group-writable main file is rejected", func(t *testing.T) {
@@ -160,6 +160,25 @@ func TestErrorsNameThePathOnce(t *testing.T) {
 		for _, e := range errs {
 			if strings.Contains(e, main+": cannot read: "+main) {
 				t.Errorf("error repeats the path: %q", e)
+			}
+		}
+	})
+	t.Run("cannot read after a permission-denied open", func(t *testing.T) {
+		if os.Getuid() == 0 {
+			t.Skip("running as root: mode 0000 does not deny root")
+		}
+		_, main := setup(t, map[string]string{"keepwatch.yaml": "state_dir: /srv/kw\n"})
+		if err := os.Chmod(main, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		errs := errsOf(t, main)
+		want := main + ": cannot read: open: permission denied"
+		if !containsSub(errs, want) {
+			t.Fatalf("errors %q lack %q", errs, want)
+		}
+		for _, e := range errs {
+			if strings.Count(e, main) != 1 {
+				t.Errorf("error does not name the path exactly once: %q", e)
 			}
 		}
 	})

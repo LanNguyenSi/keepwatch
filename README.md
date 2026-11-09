@@ -46,7 +46,15 @@ More rules, all reported with `file:line`:
   `expires` is a `YYYY-MM-DD` date. A null (`~`) value counts as absent
   for optional fields and is an error for required ones; a section key
   with a null value (an empty `exceptions:` or `checks:`, for example)
-  counts as an absent section.
+  counts as an absent section, and so do the optional nested mappings
+  `checks.<id>.params`, `authorized_keys.expected` and `notify.ntfy`.
+- A null value in a `conf.d` file contributes nothing where an earlier
+  file already has the key: a drop-in with a bare `notify:` (or a block
+  that is entirely commented out) leaves the main file's `notify`
+  section intact. A null in an earlier file does not block a later one.
+- Entries of `conf.d` whose name starts with a dot (`.hidden.yaml`, an
+  editor lock symlink such as `.#a.yaml`) are ignored, like a shell glob
+  ignores them.
 - `*.yml` in `conf.d` is an error, and so is `a.YAML`, `b.Yml` or any
   other case of the extension: use lower-case `.yaml`. A
   subdirectory inside `conf.d` is an error too.

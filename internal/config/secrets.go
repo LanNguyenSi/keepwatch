@@ -11,13 +11,18 @@ import (
 // file's existence, type, ownership and permissions without reading
 // it. It re-opens through the same secure path (no symlink following,
 // checks on the fd itself, size cap) so a swap of the path after Load
-// is rejected rather than read. A trailing newline is trimmed; a token
+// is rejected rather than read; the directory holding the token is
+// checked again as well, so a directory made group- or other-writable
+// after Load is refused. A trailing newline is trimmed; a token
 // that is empty after trimming is an error.
 func (c *Config) ReadToken() ([]byte, error) {
 	if c.Notify.Ntfy == nil || c.Notify.Ntfy.TokenFile == "" {
 		return nil, errors.New("config: notify.ntfy.token_file is not set")
 	}
 	path := c.Notify.Ntfy.TokenFile
+	if err := checkConfigDir(filepath.Dir(path), ownerOf); err != nil {
+		return nil, fmt.Errorf("notify.ntfy.token_file: %v", err)
+	}
 	f, _, err := openSecure(path, tokenPolicy(ownerOf))
 	if err != nil {
 		return nil, err

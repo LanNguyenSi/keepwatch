@@ -12,14 +12,24 @@
 // mapping (an empty or null document is fine) is an error; a file
 // never replaces another file's root. A section key with a null value
 // (host, checks, listeners, listeners.allow, authorized_keys,
-// exceptions, notify) counts as an absent section.
+// exceptions, notify) counts as an absent section, and so do the
+// optional nested mappings checks.<id>.params, authorized_keys.expected
+// and notify.ntfy when they are null. Entries of conf.d whose name
+// starts with a dot (.hidden.yaml, an editor lock symlink such as
+// .#a.yaml, a .git directory) are ignored, as a shell glob ignores
+// them.
 //
 // Merge rule: a conf.d file may only set or override the top-level
 // sections it names. Mappings merge per key, recursively, and a key set
 // by a later file wins. Sequences (such as exceptions and
 // listeners.allow) append: main file first, then conf.d files in
-// lexicographic order. Scalars are replaced by the later file. A missing
-// conf.d directory is fine; a missing main file is an error. Repeated
+// lexicographic order. Scalars are replaced by the later file. A null
+// value in a later file contributes nothing where an earlier file
+// already has the key, at any depth: a drop-in with a bare "notify:"
+// (or a block whose lines are all commented out) leaves the main file's
+// notify section intact. A null in an earlier file does not block a
+// later file: the later value applies. A missing conf.d directory is
+// fine; a missing main file is an error. Repeated
 // keys within one mapping of one file are an error at any depth
 // (duplicate key "x" (first at line N)); a key repeated across files is
 // an override and fine.
@@ -49,6 +59,7 @@ package config
 
 import (
 	_ "embed"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -174,7 +185,7 @@ func Load(path string, opts ...Option) (*Config, error) {
 	// main file instead.
 	mainDir := filepath.Dir(path)
 	if derr := checkConfigDir(mainDir, opt.ownerOf); derr != nil && !isNotExist(derr) {
-		errs = append(errs, Error{File: mainDir, Msg: trimPath(cleanErr(derr), mainDir)})
+		errs = append(errs, Error{File: mainDir, Msg: fileErr(derr, mainDir)})
 	}
 	policy := configPolicy(opt.ownerOf)
 	root, origins, perrs := parseFile(path, policy)
@@ -189,7 +200,7 @@ func Load(path string, opts ...Option) (*Config, error) {
 
 	var confd []string
 	dir := filepath.Join(filepath.Dir(path), "conf.d")
-	names, dirErr := osReadDir(dir)
+	names, dirErr := os.ReadDir(dir)
 	switch {
 	case dirErr == nil:
 		// keepwatch runs as root: a conf.d that group or other can
@@ -197,10 +208,16 @@ func Load(path string, opts ...Option) (*Config, error) {
 		// redirect the token. It must be a real, owned, non-writable
 		// directory before any of its files are read.
 		if derr := checkConfigDir(dir, opt.ownerOf); derr != nil {
-			errs = append(errs, Error{File: dir, Msg: trimPath(cleanErr(derr), dir)})
+			errs = append(errs, Error{File: dir, Msg: fileErr(derr, dir)})
 		} else {
 			for _, e := range names {
 				name := e.Name()
+				if strings.HasPrefix(name, ".") {
+					// Hidden entries are ignored, like a shell glob
+					// ignores them: editor lock files (.#a.yaml), swap
+					// files and a stray .hidden.yaml never load.
+					continue
+				}
 				p := filepath.Join(dir, name)
 				switch {
 				case e.IsDir():
@@ -218,7 +235,7 @@ func Load(path string, opts ...Option) (*Config, error) {
 			}
 		}
 	case !isNotExist(dirErr):
-		errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + dirErr.Error()})
+		errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + fileErr(dirErr, dir)})
 	}
 
 	for _, file := range confd {

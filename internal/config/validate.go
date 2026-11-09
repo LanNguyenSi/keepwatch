@@ -220,6 +220,9 @@ func (v *validator) checks(n *yaml.Node) map[string]Check {
 					}
 				}
 			case "params":
+				if isNull(iv) { // a null params counts as absent
+					continue
+				}
 				if !isMapping(iv) {
 					v.fail(iv, path+".params: expected a mapping")
 					continue
@@ -333,6 +336,9 @@ func (v *validator) authorizedKeys(n *yaml.Node) AuthorizedKeys {
 		k, val := n.Content[i], n.Content[i+1]
 		if k.Value != "expected" {
 			v.fail(k, "authorized_keys: unknown key "+strconv.Quote(k.Value))
+			continue
+		}
+		if isNull(val) { // a null expected counts as absent
 			continue
 		}
 		if !isMapping(val) {
@@ -450,6 +456,9 @@ func (v *validator) notify(n *yaml.Node) Notify {
 		k, val := n.Content[i], n.Content[i+1]
 		switch k.Value {
 		case "ntfy":
+			if isNull(val) { // a null ntfy counts as absent
+				continue
+			}
 			nf, ok := v.ntfy(val)
 			if ok {
 				nt.Ntfy = nf
