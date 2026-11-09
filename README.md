@@ -88,12 +88,76 @@ keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented exam
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml
 ```
 
+## Checks
+
+A check is an entry of the catalog (embedded in the binary, one YAML file)
+that names a kind and its parameters. Every kind is read-only: it runs fixed
+programs without a shell, or reads a file, and never touches the network.
+A program that is not installed makes the check `skipped`; a timeout,
+truncated output, an unexpected exit status or output that does not parse
+makes it `error`, never `pass`.
+
+| Kind | Reads | Parameters |
+|---|---|---|
+| `service_active` | `systemctl is-active -- <service>` | `service` (unit name) |
+| `package_installed` | `dpkg-query -W` for one package | `package` (Debian package name) |
+| `sshd_effective` | `sshd -T`, the effective configuration with drop-ins merged in | `option`, `allow` (list), `aliases` (list, optional) |
+| `fail2ban_jail` | `fail2ban-client -- status <jail>` | `jail` |
+| `listeners` | `ss -Hltn` and `ss -Hlun`, compared with `listeners.allow`; `ss -Hltnp` and `ss -Hlunp` only to name the processes | `allow_loopback` (default true), `protos` (list, default tcp and udp) |
+| `reboot_required` | `/var/run/reboot-required` and `.pkgs`, and `needrestart -b -k -r l` when installed | none |
+
+Names that reach a command line (unit, package and jail names) are checked
+against a strict pattern, and a leading `-` is always rejected.
+
+`listeners` takes the socket set from `ss` without `-p` alone; the process
+names in the evidence come from a separate best-effort `ss -p` run that only
+fills the detail text (a failing run leaves the processes "unknown" and never
+changes the status). A listener bound to an interface is reported with the
+interface after the address, for example `udp/[fe80::1]%eth0:546` or
+`tcp/*%lo:7002`. `listeners.allow` cannot name an interface, so such a
+listener is allowed by an entry for its address without the interface, or by
+`bind: "*"`; `allow_loopback` only covers loopback addresses, not a wildcard
+bound to `lo`. An IPv4-mapped listener (`[::ffff:0.0.0.0]:N`) matches only an
+entry with bind `*` or the mapped literal. The two runs that decide the socket
+set may print up to 64 MiB, so a flood of listening sockets from an
+unprivileged process does not reach the limit. If the output is cut anyway,
+the complete lines before the cut are still examined and the result is
+`error`, with the not allowed sockets found there as evidence and a summary
+that says the output was truncated; it is never `pass`. The limit that
+remains: `ss` prints in the order of the kernel, so a flood beyond 64 MiB can
+hide sockets that come after the cut. Files are read without following a symbolic link in the last
+path component and only if they are regular files.
+
+Under `checks.<id>` in the configuration, `enabled: false` skips a check,
+`severity` replaces the catalog severity, and `params` are merged over the
+catalog's parameters key by key: a key set in the configuration replaces
+the catalog value as a whole. For the list parameters that means the
+configured list replaces the catalog default (`allow` and `aliases` of
+`sshd_effective`, `protos` of `listeners`); it never extends it. As for any
+list in the configuration, lists set in `conf.d` drop-ins are appended to the
+main file's list before the checks see them, so a drop-in can widen an
+`allow`. The listener allowlist is the top-level `listeners.allow` section,
+not a check parameter. Unknown parameter keys, wrong types and bad values
+are errors, and so is a `checks.<id>` or `exceptions[].check` that names an id
+the catalog does not have (an exception may also name `exception_expired`).
+
+An active exception without `match` covers the whole check. With `match` it
+covers the evidence items whose subject equals `match` exactly (for example
+`tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). A check
+whose failing items are all covered becomes `excepted`; otherwise it stays
+`fail` and the covered items are marked. Exceptions never change an `error`.
+An `error` of a check that reads two sources (`reboot_required`, and
+`listeners` with tcp and udp) keeps the failing items that the readable source
+confirmed and says in its summary that the picture is partial.
+Each expired exception is reported as its own `exception_expired` result
+(severity low).
+
 ## Status
 
-Pre-MVP. The command line skeleton, the program execution layer and the
-strict configuration loader exist; `config check` and `init` are
-implemented, while the commands (`check`, `report`, `doctor`, `install`,
-`uninstall`) are stubs that exit with status 3.
+Pre-MVP. The command line skeleton, the program execution layer, the
+strict configuration loader and the check engine with six check kinds exist;
+`config check` and `init` are implemented, while the commands (`check`,
+`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
 
 ## License
 

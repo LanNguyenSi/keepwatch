@@ -1,0 +1,2 @@
+/etc/ssh/sshd_config.d/10-hardening.conf: line 1: Bad configuration option: ThisIsNotAnOption
+/etc/ssh/sshd_config.d/10-hardening.conf: terminating, 1 bad configuration options
