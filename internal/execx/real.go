@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,117 +22,172 @@ var DefaultEnv = []string{
 
 // Real runs programs on the host.
 type Real struct {
-	allow map[string]bool
-	dirs  []string
-	extra []string
+	allow  map[string]bool
+	dirs   []trustedDir
+	extras []extra
+	// raw option inputs, consumed by NewReal
+	rawDirs   []string
+	rawExtras []string
 }
+
+// trustedDir is a search directory, kept in the literal form it was given in
+// and in its symlink-resolved form. Both are computed once, at construction.
+type trustedDir struct{ literal, resolved string }
+
+// extra is a WithExtraPrograms entry with its target pinned at construction.
+type extra struct{ path, pinned string }
 
 // Option configures a Real runner.
 type Option func(*Real)
 
-// WithSearchDirs replaces the directory list used to resolve bare names and
-// to decide which directories are trusted (see resolve). Intended for tests.
+// WithSearchDirs replaces the list of trusted directories used to resolve
+// bare names (see resolve). Intended for tests.
 func WithSearchDirs(dirs ...string) Option {
-	return func(r *Real) { r.dirs = dirs }
+	return func(r *Real) { r.rawDirs = dirs }
 }
 
 // WithExtraPrograms permits specific programs outside the trusted search
 // directories, given as absolute paths. This is the only way to run an
-// off-path binary; argv[0] alone never grants it. A program is matched by
-// its symlink-resolved path, and callers pass argv[0] as that absolute path.
-// Entries that are not absolute never match, because argv[0] must be absolute.
+// off-path binary. NewReal panics if an entry is not absolute (a programmer
+// error, caught at construction). Each entry is resolved once, at
+// construction, and the target is pinned: Run accepts it only when argv[0]
+// equals the configured path exactly AND the path still resolves to the
+// pinned target at that moment. The extras and all their ancestor
+// directories must be root-owned and not group- or world-writable; this is
+// not checked.
 func WithExtraPrograms(paths ...string) Option {
-	return func(r *Real) {
-		for _, p := range paths {
-			r.extra = append(r.extra, filepath.Clean(p))
-		}
-	}
+	return func(r *Real) { r.rawExtras = append(r.rawExtras, paths...) }
 }
 
 // NewReal returns a runner that only executes programs whose base name is in
-// allow (for example "sshd", "ss"), subject to the trusted-directory
-// invariant documented on resolve.
+// allow (for example "sshd", "ss"), subject to the invariant documented on
+// resolve. It panics if a WithExtraPrograms entry is not an absolute path.
 func NewReal(allow []string, opts ...Option) *Real {
-	r := &Real{allow: map[string]bool{}, dirs: filepath.SplitList(SearchPath)}
+	r := &Real{allow: map[string]bool{}, rawDirs: filepath.SplitList(SearchPath)}
 	for _, a := range allow {
 		r.allow[a] = true
 	}
 	for _, o := range opts {
 		o(r)
 	}
+	for _, d := range r.rawDirs {
+		td := trustedDir{literal: filepath.Clean(d), resolved: filepath.Clean(d)}
+		if rd, err := filepath.EvalSymlinks(d); err == nil {
+			td.resolved = rd
+		}
+		r.dirs = append(r.dirs, td)
+	}
+	for _, x := range r.rawExtras {
+		if !filepath.IsAbs(x) {
+			panic("execx: WithExtraPrograms needs absolute paths, got " + strconv.Quote(x))
+		}
+		e := extra{path: filepath.Clean(x)}
+		if t, err := filepath.EvalSymlinks(e.path); err == nil {
+			e.pinned = t
+		}
+		r.extras = append(r.extras, e)
+	}
+	r.rawDirs, r.rawExtras = nil, nil
 	return r
 }
 
 // resolve turns argv[0] into the path to execute, applying the allowlist.
 //
-// Invariant: the program that is executed is a file whose symlink-resolved
-// location lies directly in one of the trusted search directories (compared
-// by exact directory equality after EvalSymlinks of those directories), or
-// is one of the explicit WithExtraPrograms paths. Nothing else runs, however
-// it is named.
+// Invariant: the executed file's symlink-resolved location lies directly in
+// one of the trusted directories, or it is a WithExtraPrograms entry whose
+// target still equals the pinned one. Nothing else runs, however it is named.
 //
-//   - A bare name is looked up only in the trusted directories; the inherited
-//     PATH is ignored.
-//   - An absolute path is accepted only if its own directory, after
-//     EvalSymlinks, is a trusted directory. Relative paths containing '/'
-//     are refused.
-//   - The resolved target must then also be in a trusted directory, and be
-//     allowed: the base name of the target is allowlisted, OR the base name
-//     of the name as given is allowlisted. The second clause supports
-//     multi-call binaries such as busybox, where /usr/bin/ss is a symlink to
-//     /bin/busybox. Because the target must be in a trusted directory, a
-//     planted link such as /tmp/ss -> /bin/sh is refused.
+// No symlink resolution is ever applied to a directory component supplied by
+// the caller; doing so would be racy (the component could be swapped between
+// the check and the use). Trusted directories are resolved once, at
+// construction.
+//
+//   - A bare name is joined onto each trusted directory in order; the only
+//     symlink followed is the final component, which lives in a trusted
+//     directory. The inherited PATH is ignored.
+//   - An absolute argv[0] is accepted only if its cleaned directory part
+//     string-equals a trusted directory (literal or resolved form), without
+//     resolving it; it is then handled like a bare name in that directory.
+//     Everything else, including relative paths with '/', is refused.
+//   - The resolved target must be directly in a trusted directory (resolved
+//     form), and either the base name of the target or the base name of the
+//     name as given must be allowlisted. The second clause supports
+//     multi-call binaries such as busybox (/usr/bin/ss -> /bin/busybox).
+//
+// Residual: trust rests on the trusted directories being root-owned and not
+// writable by untrusted users, and on the extras and their ancestors being
+// the same. Go has no fexecve, so a check-then-exec gap on the final
+// component remains for anyone able to write into those directories.
 func (r *Real) resolve(name string) (string, error) {
-	var path string
-	if strings.ContainsRune(name, '/') {
-		if !filepath.IsAbs(name) {
-			return "", fmt.Errorf("%w: %q is neither a bare name nor an absolute path", ErrNotAllowed, name)
+	for _, e := range r.extras {
+		if name != e.path {
+			continue
 		}
-		path = filepath.Clean(name)
-	} else {
+		t, err := filepath.EvalSymlinks(e.path)
+		if err != nil || t != e.pinned {
+			return "", fmt.Errorf("%w: %s (no longer resolves to the pinned target)", ErrNotAllowed, name)
+		}
+		return t, nil
+	}
+	var cand string
+	switch {
+	case !strings.ContainsRune(name, '/'):
 		var err error
-		if path, err = r.lookup(name); err != nil {
+		if cand, err = r.lookup(name); err != nil {
 			return "", err
 		}
+	case !filepath.IsAbs(name):
+		return "", fmt.Errorf("%w: %q is neither a bare name nor an absolute path", ErrNotAllowed, name)
+	default:
+		cand = filepath.Clean(name)
+		if !r.isTrustedForm(filepath.Dir(cand)) {
+			return "", fmt.Errorf("%w: %s is not in a trusted directory", ErrNotAllowed, name)
+		}
 	}
-	target, err := filepath.EvalSymlinks(path)
+	target, err := filepath.EvalSymlinks(cand)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("%w: %s", ErrNotFound, name)
 		}
 		return "", fmt.Errorf("execx: resolve %s: %w", name, err)
 	}
-	for _, x := range r.extra {
-		if ex, err := filepath.EvalSymlinks(x); err == nil && ex == target && filepath.Clean(name) == x {
-			return target, nil
-		}
-	}
-	if !r.trusted(filepath.Dir(path)) || !r.trusted(filepath.Dir(target)) {
+	if !r.isResolvedTrusted(filepath.Dir(target)) {
 		return "", fmt.Errorf("%w: %s (resolves to %s, outside the trusted directories)", ErrNotAllowed, name, target)
 	}
-	if r.allow[filepath.Base(target)] || r.allow[filepath.Base(name)] {
+	if r.allow[filepath.Base(target)] || r.allow[filepath.Base(cand)] {
 		return target, nil
 	}
 	return "", fmt.Errorf("%w: %s (resolves to %s)", ErrNotAllowed, name, target)
 }
 
+// lookup finds the first executable regular file called name in the trusted
+// directories. Directories and non-executable files are skipped.
 func (r *Real) lookup(name string) (string, error) {
 	for _, d := range r.dirs {
-		p := filepath.Join(d, name)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+		p := filepath.Join(d.literal, name)
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
 			return p, nil
 		}
 	}
 	return "", fmt.Errorf("%w: %s", ErrNotFound, name)
 }
 
-// trusted reports whether dir, after EvalSymlinks, equals a trusted directory.
-func (r *Real) trusted(dir string) bool {
-	if rd, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = rd
-	}
+// isTrustedForm compares dir as a string, with no resolution, against the
+// literal and resolved forms of the trusted directories.
+func (r *Real) isTrustedForm(dir string) bool {
 	for _, d := range r.dirs {
-		if rd, err := filepath.EvalSymlinks(d); err == nil && rd == dir {
+		if dir == d.literal || dir == d.resolved {
+			return true
+		}
+	}
+	return false
+}
+
+// isResolvedTrusted reports whether dir, an already symlink-resolved path,
+// equals the resolved form of a trusted directory.
+func (r *Real) isResolvedTrusted(dir string) bool {
+	for _, d := range r.dirs {
+		if dir == d.resolved {
 			return true
 		}
 	}
@@ -150,7 +206,10 @@ func (r *Real) trusted(dir string) bool {
 // when Run returns on any path, so background grandchildren never outlive
 // the call. If the child exits while a grandchild still holds its output
 // pipes, Run gives up after a short grace period and returns ErrIOTimeout
-// with the output read so far.
+// with the output read so far (ExitCode 0, as only a successful exit is
+// reported this way). If such a child exits non-zero, the Go runtime reports
+// the exit status alone: Run returns it with a nil error and the output read
+// so far, and cannot tell that the pipes were cut.
 func (r *Real) Run(ctx context.Context, argv []string, opts Opts) (Result, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return Result{}, ErrEmptyArgv
@@ -198,10 +257,6 @@ func (r *Real) Run(ctx context.Context, argv []string, opts Opts) (Result, error
 		return res, fmt.Errorf("%w after %s: %s", ErrTimeout, timeout, argv[0])
 	}
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
-		if cmd.ProcessState != nil {
-			res.ExitCode = cmd.ProcessState.ExitCode()
-			res.Signaled = signaled(cmd.ProcessState)
-		}
 		return res, fmt.Errorf("%w: %s", ErrIOTimeout, argv[0])
 	}
 	if runErr == nil {

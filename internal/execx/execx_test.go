@@ -219,7 +219,7 @@ func TestMissingBinary(t *testing.T) {
 	if _, err := r.Run(bg, []string{"keepwatch-no-such-tool"}, Opts{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("bare: %v", err)
 	}
-	if _, err := r.Run(bg, []string{"/nonexistent/keepwatch-no-such-tool"}, Opts{}); !errors.Is(err, ErrNotFound) {
+	if _, err := r.Run(bg, []string{"/usr/bin/keepwatch-no-such-tool"}, Opts{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("abs: %v", err)
 	}
 }
@@ -320,7 +320,7 @@ func TestExtraPrograms(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	p := writeScript(t, dir, "probe", "touch "+marker)
 	other := writeScript(t, dir, "other", "touch "+marker)
-	r := NewReal(nil, WithExtraPrograms(p, "relative/ignored"))
+	r := NewReal(nil, WithExtraPrograms(p))
 	if _, err := r.Run(bg, []string{other}, Opts{}); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("unlisted: %v", err)
 	}
@@ -405,7 +405,7 @@ func waitGone(pid int) bool {
 	return false
 }
 
-// The child exits 0 while a background grandchild holds stdout: Run must
+// The child exits while a background grandchild holds stdout: Run must
 // return within the wait delay with ErrIOTimeout and kill the grandchild.
 func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
 	old := waitDelay
@@ -420,8 +420,36 @@ func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
 	if el := time.Since(start); el > 3*time.Second {
 		t.Fatalf("Run took %s", el)
 	}
-	if res.ExitCode != 0 {
-		t.Errorf("exit code = %d, want 0", res.ExitCode)
+	if res.ExitCode != 0 || res.Signaled {
+		t.Errorf("exit code = %d signaled = %v, want 0 and false", res.ExitCode, res.Signaled)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
+	if perr != nil {
+		t.Fatalf("stdout %q: %v", res.Stdout, perr)
+	}
+	if !waitGone(pid) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatal("grandchild outlived Run")
+	}
+}
+
+// Non-zero exit with a pipe-holding grandchild: the exit status is reported,
+// the call is bounded and the grandchild is killed.
+func TestGrandchildHoldingPipeNonZeroExit(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+
+	start := time.Now()
+	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "sleep 30 & echo $!; exit 4"}, Opts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("Run took %s", el)
+	}
+	if res.ExitCode != 4 || res.Signaled {
+		t.Errorf("exit code = %d signaled = %v, want 4 and false", res.ExitCode, res.Signaled)
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
 	if perr != nil {
@@ -472,5 +500,145 @@ func TestParentDeadlineIsNotErrTimeout(t *testing.T) {
 	_, err := realRunner(t, "sleep").Run(ctx, []string{"sleep", "30"}, Opts{Timeout: 30 * time.Second})
 	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func mustPanic(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	f()
+}
+
+func TestRelativeExtraRejected(t *testing.T) {
+	mustPanic(t, func() { NewReal(nil, WithExtraPrograms("relative/prog")) })
+	mustPanic(t, func() { NewReal(nil, WithExtraPrograms("prog")) })
+}
+
+// The directory part of an absolute argv[0] is never resolved: a symlink to a
+// trusted directory is not a trusted directory.
+func TestSymlinkedDirectoryComponentRefused(t *testing.T) {
+	sh, err := NewReal([]string{"sh"}).lookup("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Dir(sh), link); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewReal([]string{"sh"}).Run(bg, []string{filepath.Join(link, "sh"), "-c", "exit 0"}, Opts{})
+	if !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+}
+
+// Both the literal and the resolved form of a trusted directory are accepted
+// as the directory part of an absolute argv[0].
+func TestTrustedDirLiteralAndResolvedForms(t *testing.T) {
+	real := t.TempDir()
+	writeScript(t, real, "tool", "exit 0")
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReal([]string{"tool"}, WithSearchDirs(alias))
+	resolved, _ := filepath.EvalSymlinks(alias)
+	for _, p := range []string{filepath.Join(alias, "tool"), filepath.Join(resolved, "tool")} {
+		if _, err := r.Run(bg, []string{p}, Opts{}); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); err != nil {
+		t.Errorf("bare: %v", err)
+	}
+}
+
+// An extra program's target is pinned at construction.
+func TestExtraProgramPinned(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	good := writeScript(t, dir, "good", "exit 0")
+	evil := writeScript(t, dir, "evil", "touch "+marker)
+	link := filepath.Join(dir, "prog")
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReal(nil, WithExtraPrograms(link))
+	if _, err := r.Run(bg, []string{link}, Opts{}); err != nil {
+		t.Fatalf("before swap: %v", err)
+	}
+	os.Remove(link)
+	if err := os.Symlink(evil, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(bg, []string{link}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("after swap: err = %v, want ErrNotAllowed", err)
+	}
+	notExecuted(t, marker)
+	os.Remove(link)
+	if _, err := r.Run(bg, []string{link}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("after removal: err = %v, want ErrNotAllowed", err)
+	}
+}
+
+func TestExtraProgramMissingAtConstruction(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "later")
+	r := NewReal(nil, WithExtraPrograms(p))
+	writeScript(t, filepath.Dir(p), "later", "exit 0")
+	if _, err := r.Run(bg, []string{p}, Opts{}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("err = %v, want ErrNotAllowed", err)
+	}
+}
+
+// A non-executable file in the first trusted dir is skipped; the executable
+// in the second is found.
+func TestLookupSkipsNonExecutable(t *testing.T) {
+	d1, d2 := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(d1, "tool"), []byte("#!/bin/sh\nexit 9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, d2, "tool", "exit 5")
+	r := NewReal([]string{"tool"}, WithSearchDirs(d1, d2))
+	got, err := r.lookup("tool")
+	if err != nil || got != filepath.Join(d2, "tool") {
+		t.Fatalf("lookup = %q, %v", got, err)
+	}
+	res, err := r.Run(bg, []string{"tool"}, Opts{})
+	if err != nil || res.ExitCode != 5 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	// only a non-executable file: not found.
+	r = NewReal([]string{"tool"}, WithSearchDirs(d1))
+	if _, err := r.Run(bg, []string{"tool"}, Opts{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// A directory with the program's name is not a program.
+func TestLookupSkipsDirectories(t *testing.T) {
+	d1, d2 := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(d1, "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, d2, "tool", "exit 5")
+	got, err := NewReal([]string{"tool"}, WithSearchDirs(d1, d2)).lookup("tool")
+	if err != nil || got != filepath.Join(d2, "tool") {
+		t.Fatalf("lookup = %q, %v", got, err)
+	}
+}
+
+// Only regular files are programs: a named pipe with exec bits is skipped.
+func TestLookupSkipsNonRegularFiles(t *testing.T) {
+	d1, d2 := t.TempDir(), t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(d1, "tool"), 0o755); err != nil {
+		t.Skip(err)
+	}
+	writeScript(t, d2, "tool", "exit 5")
+	got, err := NewReal([]string{"tool"}, WithSearchDirs(d1, d2)).lookup("tool")
+	if err != nil || got != filepath.Join(d2, "tool") {
+		t.Fatalf("lookup = %q, %v", got, err)
 	}
 }
