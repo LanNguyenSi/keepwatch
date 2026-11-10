@@ -1,0 +1,45 @@
+# keepwatch-managed-unit: written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.
+[Unit]
+Description=keepwatch posture check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/keepwatch check --config /etc/keepwatch/keepwatch.yaml
+# 0 and 1 are normal: 1 means the host has findings, and the notification (not
+# a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
+SuccessExitStatus=1
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/keepwatch
+# read-only, not yes: the authorized_keys check reads /home and /root.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+# AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Sized by the most memory the listeners check can use (two 64 MiB buffers of
+# "ss" output and their copies), measured as the peak of the unit's cgroup under
+# the GOMEMLIMIT below, with at least 1.5 times headroom. GOMEMLIMIT is not
+# needed to stay under MemoryMax, but it lowers the usual worst case
+# considerably; keep it unless the sizing is measured again. MemoryMax is the
+# backstop for a runaway check.
+MemoryMax=1536M
+Environment=GOMEMLIMIT=384MiB
+CPUQuota=50%
+TimeoutStartSec=10min

@@ -1,0 +1,11 @@
+# keepwatch-managed-unit: written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.
+[Unit]
+Description=keepwatch weekly report
+
+[Timer]
+OnCalendar=Mon *-*-* 08:00:00
+Persistent=true
+Unit=keepwatch-report.service
+
+[Install]
+WantedBy=timers.target

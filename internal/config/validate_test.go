@@ -142,7 +142,7 @@ func TestSchemaNegative(t *testing.T) {
 		{
 			name: "ntfy other scheme",
 			yaml: "notify:\n  ntfy:\n    url: ftp://localhost/t\n    topic: t\n",
-			want: "scheme \"ftp\" is not http or https",
+			want: "the scheme must be https",
 		},
 		{
 			name: "ntfy missing topic",
@@ -152,7 +152,7 @@ func TestSchemaNegative(t *testing.T) {
 		{
 			name: "ntfy empty topic",
 			yaml: "notify:\n  ntfy:\n    url: https://example.com/t\n    topic: \"\"\n",
-			want: "topic: must not be empty",
+			want: "topic must be 1 to 64 characters",
 		},
 		{
 			name: "token_file must be absolute",

@@ -91,24 +91,13 @@ func WithTransport(rt http.RoundTripper) Option { return func(n *Ntfy) { n.trans
 
 // NewNtfy checks cfg and returns the notifier. It makes no request.
 func NewNtfy(cfg NtfyConfig, opts ...Option) (*Ntfy, error) {
-	u, err := url.Parse(cfg.URL)
-	switch {
-	case err != nil || u.Hostname() == "" || strings.HasSuffix(u.Host, ":"):
-		return nil, errors.New("notify.ntfy.url is not a valid absolute URL")
-	case u.User != nil:
-		return nil, errors.New("notify.ntfy.url must not hold credentials: the token goes in token_file")
-	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(cfg.URL, "#"):
-		return nil, errors.New("notify.ntfy.url must not hold a query or a fragment")
-	case u.Scheme == "https":
-	case u.Scheme == "http" && isLoopback(u.Hostname()):
-	case u.Scheme == "http":
-		return nil, errors.New("notify.ntfy.url: http is only allowed for loopback hosts")
-	default:
-		return nil, errors.New("notify.ntfy.url: the scheme must be https")
+	if err := ValidateURL(cfg.URL); err != nil {
+		return nil, err
 	}
-	if !topicRe.MatchString(cfg.Topic) {
-		return nil, errors.New("notify.ntfy.topic must be 1 to 64 characters of A-Z a-z 0-9 _ -")
+	if err := ValidateTopic(cfg.Topic); err != nil {
+		return nil, err
 	}
+	u, _ := url.Parse(cfg.URL) // ValidateURL parsed it
 	u.Path = strings.TrimRight(u.Path, "/") + "/" + cfg.Topic
 	u.RawPath = ""
 	n := &Ntfy{

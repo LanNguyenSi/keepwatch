@@ -40,6 +40,10 @@ import (
 // FileName is the name of the history file inside the state directory.
 const FileName = "history.json"
 
+// TempPrefix starts the name of the temporary file a save writes before it
+// renames it over FileName; one left behind by a crash is never read.
+const TempPrefix = ".history.json.tmp-"
+
 // SchemaVersion is the version of the file format.
 const SchemaVersion = 1
 
@@ -390,11 +394,10 @@ func (s *Store) write(b []byte) (err error) {
 		return err
 	}
 	defer root.Close()
-	var rnd [8]byte
-	if _, err = rand.Read(rnd[:]); err != nil {
+	tmp, err := tempName()
+	if err != nil {
 		return err
 	}
-	tmp := ".history.json.tmp-" + hex.EncodeToString(rnd[:])
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
@@ -425,4 +428,14 @@ func (s *Store) write(b []byte) (err error) {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// tempName returns the name of the temporary file of a save: TempPrefix and
+// 16 random hex digits.
+func tempName() (string, error) {
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return "", err
+	}
+	return TempPrefix + hex.EncodeToString(rnd[:]), nil
 }

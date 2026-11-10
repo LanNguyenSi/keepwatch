@@ -387,3 +387,16 @@ func TestARunThatAloneIsTooLargeIsAnError(t *testing.T) {
 		t.Errorf("error %v", err)
 	}
 }
+
+// The temporary file of a save starts with TempPrefix, which `uninstall
+// --purge` uses to remove what a crash left behind.
+func TestTempNameStartsWithThePrefix(t *testing.T) {
+	a, err := tempName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := tempName()
+	if !strings.HasPrefix(a, TempPrefix) || len(a) != len(TempPrefix)+16 || a == b {
+		t.Errorf("tempName = %q, %q", a, b)
+	}
+}

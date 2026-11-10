@@ -1,0 +1,12 @@
+# keepwatch-managed-unit: written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.
+[Unit]
+Description=keepwatch periodic check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Unit=keepwatch-check.service
+
+[Install]
+WantedBy=timers.target

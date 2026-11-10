@@ -1,5 +1,5 @@
 // Package cli implements the keepwatch command line: a small dispatcher on
-// top of the standard library flag package. Subcommands are stubs for now.
+// top of the standard library flag package.
 package cli
 
 import (
@@ -32,10 +32,10 @@ var commands = []command{
 	{"check", "run the checks and report findings"},
 	{"report", "the weekly report (report --weekly)"},
 	{"config", "configuration tools (config check)"},
-	{"doctor", "diagnose the local environment"},
+	{"doctor", "check that keepwatch will work on this host"},
 	{"init", "write an example configuration"},
-	{"install", "install the scheduled run"},
-	{"uninstall", "remove the scheduled run"},
+	{"install", "install the systemd units for the scheduled run"},
+	{"uninstall", "remove the systemd units (and with --purge the data)"},
 	{"version", "print version, commit and build date"},
 	{"help", "show this help"},
 }
@@ -68,8 +68,12 @@ func dispatch(e env, args []string, stdout, stderr io.Writer) int {
 		return runCheck(e, rest, stdout, stderr)
 	case "report":
 		return runReport(e, rest, stdout, stderr)
-	case "doctor", "install", "uninstall":
-		return runStub(name, rest, stdout, stderr)
+	case "doctor":
+		return runDoctor(e, rest, stdout, stderr)
+	case "install":
+		return runInstall(e, rest, stdout, stderr)
+	case "uninstall":
+		return runUninstall(e, rest, stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "keepwatch: unknown command %q\n", name)
 	usage(stderr)
@@ -117,14 +121,6 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "version: %s\ncommit: %s\nbuilt: %s\n", version.Version, version.Commit, version.Date)
 	return ExitOK
-}
-
-func runStub(name string, args []string, stdout, stderr io.Writer) int {
-	if code, done := parse(name, args, stdout, stderr, nil); done {
-		return code
-	}
-	fmt.Fprintf(stderr, "keepwatch %s: not implemented\n", name)
-	return ExitNotImplemented
 }
 
 // runConfigCheck loads the configuration and reports every problem it
