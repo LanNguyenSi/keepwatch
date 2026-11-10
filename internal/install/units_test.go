@@ -301,3 +301,17 @@ func TestValidateRefusesWhatTheSandboxHides(t *testing.T) {
 		t.Errorf("a configuration file below /run: %v", err)
 	}
 }
+
+// A path of 1024 bytes is the longest that goes into a unit; one more is not.
+func TestSpecValidateBoundsThePathLength(t *testing.T) {
+	long := func(n int) string { return "/" + strings.Repeat("a", n-1) }
+	s := defaultSpec()
+	s.ConfigPath = long(1024)
+	if err := s.Validate(); err != nil {
+		t.Errorf("a 1024-byte path: %v", err)
+	}
+	s.ConfigPath = long(1025)
+	if err := s.Validate(); err == nil {
+		t.Error("a 1025-byte path was accepted")
+	}
+}

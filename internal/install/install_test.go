@@ -347,6 +347,27 @@ func TestInstallRefusesAnUntrustedUnitDirectory(t *testing.T) {
 	}
 }
 
+// A directory install has just created is opened and checked again before
+// anything depends on it.
+func TestInstallChecksTheDirectoriesItCreated(t *testing.T) {
+	for _, dir := range []string{"/etc/keepwatch", stateDir} {
+		r := newRig()
+		r.fs.FailOpenDir[dir] = errors.New(dir + ": cannot be trusted after it was created")
+		err := r.install(t, install.InstallOptions{ConfigFound: true})
+		if !errors.Is(err, install.ErrFailed) || !strings.Contains(err.Error(), "cannot be trusted after it was created") {
+			t.Errorf("%s: err = %v, want ErrFailed", dir, err)
+		}
+		if len(r.sd.Mutations()) != 0 {
+			t.Errorf("%s: systemctl ran after the failure: %v", dir, r.sd.Mutations())
+		}
+		for _, n := range install.UnitNames {
+			if r.fs.Exists(unitPath(n)) {
+				t.Errorf("%s: %s was written although a directory it needs cannot be trusted", dir, n)
+			}
+		}
+	}
+}
+
 func TestInstallChecksTheDirectoriesItDoesNotCreate(t *testing.T) {
 	cases := map[string]func(r *rig){
 		"config dir is a symlink": func(r *rig) { r.fs.AddSymlink("/etc/keepwatch", "/tmp/x") },
@@ -784,6 +805,24 @@ func TestPurgeLeavesAConfigurationThatIsNotProvablyKeepwatchs(t *testing.T) {
 		untouched(t, r)
 		if !r.fs.Exists(unitPath(install.CheckService)) {
 			t.Error("the foreign unit file was removed")
+		}
+	})
+	t.Run("conf.d that is a regular file is left alone", func(t *testing.T) {
+		r := newRig()
+		r.fs.AddDir("/etc/keepwatch", 0o750, 0)
+		r.fs.AddFile(cfgPath, 0o644, 0, "{}\n")
+		r.fs.AddFile("/etc/keepwatch/conf.d", 0o644, 0, "not a directory")
+		if err := r.uninstall(install.UninstallOptions{Purge: true}); err != nil {
+			t.Fatalf("%v\n%s", err, r.out)
+		}
+		if got, ok := r.fs.Content("/etc/keepwatch/conf.d"); !ok || got != "not a directory" {
+			t.Error("the file named conf.d was removed or changed")
+		}
+		if !strings.Contains(r.out.String(), "left /etc/keepwatch/conf.d: not a directory") || r.fs.Exists(cfgPath) {
+			t.Errorf("\n%s", r.out)
+		}
+		if !r.fs.Exists("/etc/keepwatch") {
+			t.Error("the configuration directory was removed with a foreign entry in it")
 		}
 	})
 	t.Run("an empty configuration path is never trusted", func(t *testing.T) {

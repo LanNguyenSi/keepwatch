@@ -877,6 +877,9 @@ service whose `ReadWritePaths` names a missing directory does not start).
 What `install` does to the files it writes:
 
 - Every unit file starts with a marker comment (`# keepwatch-managed-unit: ...`).
+  The marker alone decides whether a file is keepwatch's: `install` replaces and
+  `uninstall` removes any file in the unit directory whose first line starts with it,
+  whoever wrote it (acceptable because only root can write to that directory).
   A file that is already there without it is never overwritten (exit 2, the
   message names the file), and nothing is written at all in that case: the
   conflicts are found before the first write. A symbolic link at the target

@@ -263,3 +263,83 @@ func TestOSFSReadFileDetectsASwap(t *testing.T) {
 		t.Errorf("ReadFile = %q, %v, want the swap to be detected", b, err)
 	}
 }
+
+// A directory replaced by another one between OpenDir's look and its open is
+// not used: the opened directory must be the one that was checked.
+func TestOSFSOpenDirDetectsASwappedDirectory(t *testing.T) {
+	base := tempDir(t)
+	dir := filepath.Join(base, "state")
+	other := filepath.Join(base, "other")
+	for _, d := range []string{dir, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o := OSFS{afterLstat: func(p string) {
+		if err := os.Rename(p, p+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(other, p); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if d, err := o.OpenDir(dir); err == nil || !strings.Contains(err.Error(), "changed while it was being opened") {
+		if d != nil {
+			d.Close()
+		}
+		t.Errorf("err = %v, want the swap to be detected", err)
+	}
+}
+
+// The directory that was opened is checked again, not only the one that was
+// looked at: a mode change between the two (same inode) is caught.
+func TestOSFSOpenDirChecksTheOpenedDirectoryAgain(t *testing.T) {
+	base := tempDir(t)
+	dir := filepath.Join(base, "state")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := OSFS{afterLstat: func(p string) {
+		if err := os.Chmod(p, 0o777); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if d, err := o.OpenDir(dir); err == nil || !strings.Contains(err.Error(), "allow group or other writes") {
+		if d != nil {
+			d.Close()
+		}
+		t.Errorf("err = %v, want the second check to refuse the directory", err)
+	}
+}
+
+// The temporary file is created exclusively: a name that is already there,
+// a link included, is not written through and not removed.
+func TestOSFSWriteFileDoesNotReuseAnExistingTemporaryName(t *testing.T) {
+	base := tempDir(t)
+	victim := filepath.Join(base, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const tmp = ".keepwatch-tmp-fixed"
+	// A relative link target stays inside the directory, where os.Root follows it.
+	if err := os.Symlink("victim", filepath.Join(base, tmp)); err != nil {
+		t.Fatal(err)
+	}
+	d, err := (OSFS{tempName: func() string { return tmp }}).OpenDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := d.WriteFile("unit", []byte("new"), 0o644); err == nil {
+		t.Error("WriteFile used a temporary name that already existed")
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Errorf("the file behind the link was written: %q", b)
+	}
+	if _, err := os.Lstat(filepath.Join(base, tmp)); err != nil {
+		t.Errorf("the entry that was in the way was removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "unit")); err == nil {
+		t.Error("the target was created")
+	}
+}

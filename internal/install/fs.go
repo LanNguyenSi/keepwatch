@@ -78,6 +78,8 @@ type OSFS struct {
 
 	afterMkdir  func(path string) // tests swap the new directory here
 	beforeChmod func(path string) // tests swap it between the look and the open
+	afterLstat  func(path string) // tests change the directory between OpenDir's look and its open
+	tempName    func() string     // tests fix the name of the temporary file
 }
 
 func infoOf(fi fs.FileInfo) Info {
@@ -188,6 +190,9 @@ func (o OSFS) OpenDir(path string) (Dir, error) {
 	if err := CheckDir(path, infoOf(fi), o.ownerOK); err != nil {
 		return nil, err
 	}
+	if o.afterLstat != nil {
+		o.afterLstat(path)
+	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, err
@@ -205,7 +210,7 @@ func (o OSFS) OpenDir(path string) (Dir, error) {
 		root.Close()
 		return nil, err
 	}
-	return &osDir{path: path, root: root}, nil
+	return &osDir{path: path, root: root, tempName: o.tempName}, nil
 }
 
 type osDir struct {
@@ -214,6 +219,7 @@ type osDir struct {
 	// beforeOpen runs after a file was looked at and before it is opened;
 	// tests swap the file there.
 	beforeOpen func()
+	tempName   func() string
 }
 
 func (d *osDir) Close() error { return d.root.Close() }
@@ -273,6 +279,9 @@ func (d *osDir) WriteFile(name string, data []byte, perm fs.FileMode) (err error
 		return err
 	}
 	tmp := tmpWritePrefix + hex.EncodeToString(rnd[:])
+	if d.tempName != nil {
+		tmp = d.tempName()
+	}
 	f, err := d.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
