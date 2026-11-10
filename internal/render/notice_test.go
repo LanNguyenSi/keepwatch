@@ -647,7 +647,8 @@ func TestNoticeListsTheHighestSeverityFirstAndNeverLosesTheCriticalAlert(t *test
 
 func TestNoticeCutsEveryUntrustedStringAndStillShowsALine(t *testing.T) {
 	long := strings.Repeat("\u4e16", 2000) // 3 bytes each
-	in := changeInput(diff.Change{Kind: diff.SubjectNew, CheckID: "a.b", CheckKind: "k", Severity: result.High, Subject: long, Alert: true})
+	in := changeInput(diff.Change{Kind: diff.SubjectNew, CheckID: "a.b", CheckKind: "k", Severity: result.High, Subject: long, Alert: true},
+		diff.Change{Kind: diff.NewFailure, CheckID: long, CheckKind: "k", Severity: result.Low, Alert: true})
 	in.Diff.StillFailing = []diff.Ref{{CheckID: long}}
 	n, ok := BuildNotice(in, &DeliveryNote{At: genTime, Failures: 1, Kind: "check", Reason: long}, nil)
 	if !ok {
@@ -657,8 +658,8 @@ func TestNoticeCutsEveryUntrustedStringAndStillShowsALine(t *testing.T) {
 		t.Errorf("the alert line is missing:\n%s", n.Body)
 	}
 	want := strings.Repeat("\u4e16", maxNoticeRunes) + "..."
-	if got := strings.Count(n.Body, want); got != 3 { // subject, reason, still failing
-		t.Errorf("%d cut strings, want 3:\n%s", got, n.Body)
+	if got := strings.Count(n.Body, want); got != 4 { // subject, check id, reason, still failing
+		t.Errorf("%d cut strings, want 4:\n%s", got, n.Body)
 	}
 	if strings.Contains(n.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || len(n.Body) > MaxNoticeBytes {
 		t.Errorf("a string is longer than the cut, or the body is %d bytes", len(n.Body))
@@ -675,7 +676,8 @@ func TestNoticeCutsEveryUntrustedStringAndStillShowsALine(t *testing.T) {
 	base.Results[0].Evidence[0].Subject = long
 	base.State.Reason = long
 	nb, _ := BuildNotice(base, nil, nil)
-	if strings.Contains(nb.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || !strings.Contains(nb.Body, want) || len(nb.Body) > MaxNoticeBytes {
+	if strings.Contains(nb.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || !strings.Contains(nb.Body, want) || len(nb.Body) > MaxNoticeBytes ||
+		!strings.HasPrefix(nb.Body, "**First run:** there is no previous run to compare with, so no changes are reported. ` "+want) {
 		t.Errorf("baseline body of %d bytes", len(nb.Body))
 	}
 	d := digestInput()

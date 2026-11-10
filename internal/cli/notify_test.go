@@ -206,7 +206,7 @@ func TestNotifySendsAnAlertForANewFailure(t *testing.T) {
 	f.check("--notify")
 	f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
 	code, _, errb := f.check("--notify")
-	if code != 1 || n.count() != 2 {
+	if code != 1 || n.count() != 2 || strings.Contains(errb, "alert-worthy") {
 		t.Fatalf("exit %d, %d requests, stderr %q", code, n.count(), errb)
 	}
 	r := n.last()
@@ -397,7 +397,7 @@ func TestNotifyFailedBaselineIsStoredAsItsOwnKindAndTheOpenFindingsAreResent(t *
 	// are resent from the results of the run that delivers) and keeps the
 	// record.
 	f.next(badHost().AddResult(svcArgv, res("active\n", 0)))
-	if code, _, errb := f.check(); code != 1 || strings.Contains(errb, "not moved forward") {
+	if code, _, errb := f.check(); code != 1 || strings.Contains(errb, "not moved forward") || !strings.Contains(errb, "the notification of the first run could not be delivered") {
 		t.Fatalf("exit %d stderr %q", code, errb)
 	}
 	if d := f.delivery(); d == nil || d.Kind != state.DeliveryBaseline {
@@ -717,7 +717,7 @@ func TestNotifyASignalDuringTheDeliveryIsAnInterruptedRun(t *testing.T) {
 			f.env.notifier = cancelNotifier{cancel, sendErr}
 			f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
 			code, _, errb := f.check("--notify")
-			if code != ExitInternal || !strings.Contains(errb, "interrupted") {
+			if code != ExitInternal || !strings.Contains(errb, "interrupted") || strings.Contains(errb, "was not delivered") {
 				t.Fatalf("exit %d stderr %q", code, errb)
 			}
 			if after, _ := os.ReadFile(f.statePath()); string(after) != string(stateBefore) {

@@ -143,9 +143,9 @@ func runReport(e env, args []string, stdout, stderr io.Writer) int {
 			e.afterSend()
 		}
 		if lr.State != nil && lr.State.Delivery == nil {
-			lr2, lerr := store.Load()
+			lr2, _ := store.Load() // an error leaves State nil
 			switch {
-			case lerr != nil || lr2.State == nil || lr2.State.Delivery != nil || !lr2.State.RunAt.Equal(lr.State.RunAt):
+			case lr2.State == nil || lr2.State.Delivery != nil || !lr2.State.RunAt.Equal(lr.State.RunAt):
 				fmt.Fprintln(stderr, "keepwatch report: warning: the state changed while the report was being sent, the failure is not recorded in it")
 			default:
 				if serr := store.Save(failedState(lr2.State, lr2.State, state.DeliveryWeekly, e.now(), derr, red)); serr != nil {

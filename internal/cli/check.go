@@ -250,15 +250,16 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	}
 	var deliveryErr error
 	if send {
-		if deliveryErr = ntf.Send(e.ctx, toMessage(notice)); deliveryErr != nil {
-			fmt.Fprintf(stderr, "keepwatch check: the notification was not delivered: %s\n", red.Clean(deliveryErr.Error()))
-		}
+		deliveryErr = ntf.Send(e.ctx, toMessage(notice))
 		if e.ctx.Err() != nil {
 			// A signal during the delivery: the run is interrupted like
 			// one that was interrupted during the checks. Nothing is
 			// stored, so the next run reports (and, if it was not
 			// delivered, sends) the same changes again.
 			return fail("interrupted: %v", e.ctx.Err())
+		}
+		if deliveryErr != nil {
+			fmt.Fprintf(stderr, "keepwatch check: the notification was not delivered: %s\n", red.Clean(deliveryErr.Error()))
 		}
 	}
 	if saveState {
@@ -296,7 +297,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		if committed {
-			if n := len(in.Diff.Alerts(result.Info)); n > 0 && !doNotify && !in.State.Baseline && cfg.Notify.Ntfy != nil {
+			if n := len(in.Diff.Alerts(result.Info)); n > 0 && !doNotify && cfg.Notify.Ntfy != nil { // a baseline run has no changes, hence no alerts
 				fmt.Fprintf(stderr, "keepwatch check: warning: this run did not use --notify and moved the state forward past %d alert-worthy %s that no notification will tell\n", n, plural(n, "change", "changes"))
 			}
 			recordHistory(cfg.StateDir, now, in, red, stderr)
