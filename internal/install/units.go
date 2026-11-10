@@ -192,9 +192,6 @@ func safePath(p string) error {
 	return nil
 }
 
-// volatileDirs hold files that a service with PrivateTmp=yes does not see.
-var volatileDirs = []string{"/tmp", "/var/tmp", "/dev/shm"}
-
 // Spec is everything the units depend on.
 type Spec struct {
 	// Binary is the absolute path of the keepwatch executable.
@@ -221,9 +218,12 @@ func (s Spec) Validate() error {
 	if s.StateDir == "/" {
 		errs = append(errs, "state_dir must not be /")
 	}
-	for _, d := range volatileDirs {
-		if s.Binary == d || strings.HasPrefix(s.Binary, d+"/") {
-			errs = append(errs, fmt.Sprintf("keepwatch binary \"%s\" is under %s, which the service does not see (PrivateTmp=yes); install it elsewhere, for example /usr/local/bin", quote(s.Binary), d))
+	for _, u := range []struct {
+		what, p string
+		role    Role
+	}{{"keepwatch binary", s.Binary, RoleBinary}, {"configuration file", s.ConfigPath, RoleConfig}, {"state_dir", s.StateDir, RoleState}} {
+		if h, ok := HiddenBy(u.p, u.role); ok {
+			errs = append(errs, fmt.Sprintf("%s \"%s\" is under %s: %s; put it elsewhere", u.what, quote(u.p), h.Path, h.Why))
 		}
 	}
 	if s.Interval.N == 0 {
@@ -236,6 +236,60 @@ func (s Spec) Validate() error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// Role says what a path is used for by the service.
+type Role int
+
+// The roles of a path in a unit.
+const (
+	RoleBinary Role = iota // the program in ExecStart
+	RoleConfig             // the configuration file given with --config
+	RoleState              // state_dir, in ReadWritePaths
+)
+
+// sandboxPaths lists, next to the hardening constants below that cause them,
+// the paths a service does not see (or cannot rely on) and the roles for
+// which that is refused. option is the option that hides the path, or says why
+// it cannot be used; a test checks that every option of the form NAME=yes is
+// still in the hardening, so removing one forces this table to be revisited.
+var sandboxPaths = []struct {
+	option string
+	why    string
+	paths  []string
+	roles  []Role
+}{
+	{"PrivateTmp=yes", "the service has its own empty /tmp and /var/tmp (PrivateTmp=yes), so the path does not exist for it",
+		[]string{"/tmp", "/var/tmp"}, []Role{RoleBinary, RoleConfig, RoleState}},
+	{"PrivateDevices=yes", "the service has its own /dev (PrivateDevices=yes), so the path does not exist for it",
+		[]string{"/dev"}, []Role{RoleBinary, RoleConfig, RoleState}},
+	{"volatile", "it lives on a tmpfs that is empty after a reboot, and ReadWritePaths needs the directory to exist when the service starts",
+		[]string{"/run", "/var/run", "/dev/shm"}, []Role{RoleState}},
+}
+
+// Hidden is a sandbox path a value lies under.
+type Hidden struct {
+	Path, Option, Why string
+}
+
+// HiddenBy reports whether p lies under a path that the sandbox of the
+// services hides or that is volatile, for the role.
+func HiddenBy(p string, role Role) (Hidden, bool) {
+	for _, e := range sandboxPaths {
+		applies := false
+		for _, r := range e.roles {
+			applies = applies || r == role
+		}
+		if !applies {
+			continue
+		}
+		for _, d := range e.paths {
+			if p == d || strings.HasPrefix(p, d+"/") {
+				return Hidden{Path: d, Option: e.option, Why: e.why}, true
+			}
+		}
+	}
+	return Hidden{}, false
 }
 
 // File is one unit file to be written.

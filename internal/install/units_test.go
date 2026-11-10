@@ -226,3 +226,78 @@ func TestInspect(t *testing.T) {
 		t.Errorf("Inspect(garbage) should be empty")
 	}
 }
+
+func TestHiddenBy(t *testing.T) {
+	type c struct {
+		path string
+		role Role
+		want string // the hiding path; empty means allowed
+	}
+	cases := []c{
+		{"/tmp/x", RoleBinary, "/tmp"}, {"/tmp/x", RoleConfig, "/tmp"}, {"/tmp/x", RoleState, "/tmp"},
+		{"/tmp", RoleState, "/tmp"}, {"/var/tmp/a/b", RoleConfig, "/var/tmp"}, {"/var/tmp", RoleBinary, "/var/tmp"},
+		{"/dev/kw", RoleState, "/dev"}, {"/dev/shm/kw", RoleBinary, "/dev"},
+		{"/run/kw", RoleState, "/run"}, {"/var/run/kw", RoleState, "/var/run"}, {"/dev/shm/kw", RoleState, "/dev"},
+		// /run holds a binary or a configuration file without trouble.
+		{"/run/kw/keepwatch", RoleBinary, ""}, {"/run/kw/kw.yaml", RoleConfig, ""},
+		// Names that only start like a hidden path.
+		{"/tmpfiles/x", RoleState, ""}, {"/var/tmpx", RoleState, ""}, {"/runner/x", RoleState, ""}, {"/devices", RoleBinary, ""},
+		{"/var/lib/keepwatch", RoleState, ""}, {"/etc/keepwatch/keepwatch.yaml", RoleConfig, ""}, {"/usr/local/bin/keepwatch", RoleBinary, ""},
+	}
+	for _, c := range cases {
+		h, ok := HiddenBy(c.path, c.role)
+		if ok != (c.want != "") || h.Path != c.want {
+			t.Errorf("HiddenBy(%q, %v) = %+v, %v; want %q", c.path, c.role, h, ok, c.want)
+		}
+		if ok && (h.Option == "" || h.Why == "") {
+			t.Errorf("HiddenBy(%q) names no option or reason: %+v", c.path, h)
+		}
+	}
+}
+
+// The table of hidden paths is keyed by the option that causes each entry. If
+// an option goes out of the hardening its entry is stale, and the other way
+// round: this ties the two.
+func TestSandboxPathsFollowTheHardening(t *testing.T) {
+	for _, e := range sandboxPaths {
+		if !strings.HasSuffix(e.option, "=yes") {
+			continue
+		}
+		if !strings.Contains(serviceHardening, "\n"+e.option+"\n") {
+			t.Errorf("sandboxPaths names %s, which the hardening does not set", e.option)
+		}
+	}
+	for _, opt := range []string{"PrivateTmp=yes", "PrivateDevices=yes"} {
+		found := false
+		for _, e := range sandboxPaths {
+			found = found || e.option == opt
+		}
+		if !found {
+			t.Errorf("the hardening sets %s but sandboxPaths has no entry for it", opt)
+		}
+	}
+}
+
+func TestValidateRefusesWhatTheSandboxHides(t *testing.T) {
+	for name, mutate := range map[string]func(*Spec){
+		"binary in /tmp":        func(s *Spec) { s.Binary = "/tmp/keepwatch" },
+		"binary in /dev":        func(s *Spec) { s.Binary = "/dev/shm/keepwatch" },
+		"config in /tmp":        func(s *Spec) { s.ConfigPath = "/tmp/kwc/keepwatch.yaml" },
+		"config in /var/tmp":    func(s *Spec) { s.ConfigPath = "/var/tmp/kw.yaml" },
+		"state_dir in /tmp":     func(s *Spec) { s.StateDir = "/tmp/kwstate" },
+		"state_dir in /run":     func(s *Spec) { s.StateDir = "/run/keepwatch" },
+		"state_dir in /dev/shm": func(s *Spec) { s.StateDir = "/dev/shm/keepwatch" },
+	} {
+		s := defaultSpec()
+		mutate(&s)
+		err := s.Validate()
+		if err == nil || !strings.Contains(err.Error(), "put it elsewhere") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	s := defaultSpec()
+	s.ConfigPath = "/run/kw/kw.yaml"
+	if err := s.Validate(); err != nil {
+		t.Errorf("a configuration file below /run: %v", err)
+	}
+}

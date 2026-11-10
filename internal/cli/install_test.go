@@ -191,6 +191,25 @@ func TestInstallExitCodes(t *testing.T) {
 			t.Errorf("wrote %v", h.fs.Log)
 		}
 	})
+	t.Run("a configuration file or state_dir the sandbox hides is 2 and nothing is written", func(t *testing.T) {
+		h := newHost(t)
+		h.fs.AddDir("/tmp", 0o1777, 0)
+		h.fs.AddDir("/tmp/kwc", 0o755, 0)
+		h.fs.AddFile("/tmp/kwc/keepwatch.yaml", 0o644, 0, "{}\n")
+		code, _, stderr := runCmd("install", "--config", "/tmp/kwc/keepwatch.yaml")
+		if code != ExitUsage || !strings.Contains(stderr, "under /tmp") || !strings.Contains(stderr, "put it elsewhere") {
+			t.Errorf("config under /tmp: exit = %d stderr = %q", code, stderr)
+		}
+		h.cfg.StateDir = "/tmp/kwstate"
+		h.withConfigFile()
+		code, _, stderr = runCmd("install")
+		if code != ExitUsage || !strings.Contains(stderr, "state_dir") || !strings.Contains(stderr, "under /tmp") {
+			t.Errorf("state_dir under /tmp: exit = %d stderr = %q", code, stderr)
+		}
+		if len(h.fs.Log) != 0 || len(h.sd.Runner.Calls) != 0 {
+			t.Errorf("a refused install did something: %v %v", h.fs.Log, h.sd.Runner.Calls)
+		}
+	})
 	t.Run("a failing systemctl is 1", func(t *testing.T) {
 		h := newHost(t)
 		h.sd.Fail["enable"] = execx.Result{ExitCode: 1, Stderr: []byte("denied")}

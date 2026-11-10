@@ -370,6 +370,8 @@ func (s *Systemd) prop(unit, prop string) string {
 		return "success"
 	case "ExecMainStatus":
 		return "0"
+	case "ExecMainStartTimestamp":
+		return "Mon 2026-01-05 08:00:00 UTC"
 	}
 	return ""
 }

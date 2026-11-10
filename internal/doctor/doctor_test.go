@@ -63,6 +63,7 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r.sd.Loaded[install.CheckService], r.sd.Loaded[install.ReportService] = true, true
+	r.fs.AddFile(cfgPath, 0o644, 0, "{}\n")
 	return r
 }
 
@@ -285,16 +286,140 @@ func TestStateDirectory(t *testing.T) {
 	}{
 		{"untrusted", doctor.StateStatus{Exists: true, Err: errors.New("is a symlink")}, doctor.Problem, []string{"not usable", "exit 3", "is a symlink"}},
 		{"not writable", doctor.StateStatus{Exists: true, Err: errors.New("not writable: permission denied")}, doctor.Problem, []string{"not writable"}},
-		{"missing", doctor.StateStatus{}, doctor.Warn, []string{"does not exist yet"}},
+		{"missing, the units are not installed", doctor.StateStatus{}, doctor.Warn, []string{"does not exist yet", "keepwatch install\" creates it", "keepwatch check"}},
 		{"bad state file", doctor.StateStatus{Exists: true, FileProblem: "state.json is a symlink, it is not followed"}, doctor.Warn, []string{"new baseline", "symlink"}},
 		{"fine", doctor.StateStatus{Exists: true}, doctor.OK, []string{"is writable"}},
 	}
 	for _, c := range cases {
 		r := newRig(t)
+		if c.name == "missing, the units are not installed" {
+			for _, n := range install.UnitNames {
+				r.fs.Remove(install.DefaultUnitDir + "/" + n)
+			}
+		}
 		r.state = c.st
 		if rep := r.run(); !has(rep, c.level, "state", c.parts...) {
 			t.Errorf("%s:\n%s", c.name, dump(rep))
 		}
+	}
+}
+
+// The state directory is gone while the units are installed: the services fail
+// with 226/NAMESPACE, whatever the first run would do.
+func TestStateDirectoryMissingWithInstalledUnitsIsAProblem(t *testing.T) {
+	r := newRig(t)
+	r.state = doctor.StateStatus{}
+	rep := r.run()
+	if !has(rep, doctor.Problem, "state", "does not exist, but the units are installed", "226/NAMESPACE", "keepwatch install\" again") {
+		t.Errorf("\n%s", dump(rep))
+	}
+	if strings.Contains(dump(rep), "first run creates it") {
+		t.Errorf("the false remedy is still there:\n%s", dump(rep))
+	}
+	if rep.Problems() != 1 {
+		t.Errorf("want exactly the one problem:\n%s", dump(rep))
+	}
+}
+
+// Files of the unit names that keepwatch did not write do not make the units
+// "installed" for this finding.
+func TestStateDirectoryMissingWithForeignUnitFilesIsOnlyAWarning(t *testing.T) {
+	r := newRig(t)
+	for _, n := range install.UnitNames {
+		r.fs.AddFile(install.DefaultUnitDir+"/"+n, 0o644, 0, "[Unit]\n")
+	}
+	r.state = doctor.StateStatus{}
+	if rep := r.run(); !has(rep, doctor.Warn, "state", "does not exist yet") || has(rep, doctor.Problem, "state") {
+		t.Errorf("\n%s", dump(rep))
+	}
+}
+
+// state_dir in a place the sandbox hides or that is empty after a reboot.
+func TestStateDirectoryTheSandboxHides(t *testing.T) {
+	for _, dir := range []string{"/tmp/kwstate", "/var/tmp/kw", "/dev/shm/kw", "/dev/kw", "/run/kw", "/var/run/kw", "/tmp"} {
+		r := newRig(t)
+		r.cfg.StateDir = dir
+		rep := r.run()
+		if !has(rep, doctor.Problem, "state", dir, "scheduled run fails to start", "keepwatch install") {
+			t.Errorf("%s:\n%s", dir, dump(rep))
+		}
+	}
+	// Close names that must stay allowed.
+	for _, dir := range []string{"/var/lib/keepwatch", "/srv/tmpfiles", "/var/tmpx/kw", "/home/x/runner", "/runner"} {
+		r := newRig(t)
+		r.cfg.StateDir = dir
+		for _, f := range r.run().Findings {
+			if f.Area == "state" && f.Level == doctor.Problem && strings.Contains(f.Message, "under") {
+				t.Errorf("%s refused: %+v", dir, f)
+			}
+		}
+	}
+}
+
+// The configuration file the installed unit passes.
+func TestUnitConfigurationFile(t *testing.T) {
+	setConfig := func(r *rig, path string) {
+		for _, n := range []string{install.CheckService, install.ReportService} {
+			p := install.DefaultUnitDir + "/" + n
+			c, _ := r.fs.Content(p)
+			r.fs.AddFile(p, 0o644, 0, strings.ReplaceAll(c, "--config "+cfgPath, "--config "+path))
+		}
+	}
+	t.Run("under /tmp: the service does not see it", func(t *testing.T) {
+		r := newRig(t)
+		setConfig(r, "/tmp/kwc/keepwatch.yaml")
+		for _, svc := range []string{install.CheckService, install.ReportService} {
+			if rep := r.run(); !has(rep, doctor.Problem, "units", svc, "/tmp/kwc/keepwatch.yaml", "under /tmp", "exits 3") {
+				t.Errorf("%s:\n%s", svc, dump(rep))
+			}
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		r := newRig(t)
+		setConfig(r, "/srv/gone.yaml")
+		if rep := r.run(); !has(rep, doctor.Problem, "units", "/srv/gone.yaml", "cannot be read", "exits 3") {
+			t.Errorf("\n%s", dump(rep))
+		}
+	})
+	t.Run("the file of the unit is deleted", func(t *testing.T) {
+		r := newRig(t)
+		r.fs.Remove(cfgPath)
+		if rep := r.run(); !has(rep, doctor.Problem, "units", cfgPath, "cannot be read") {
+			t.Errorf("\n%s", dump(rep))
+		}
+	})
+	t.Run("no --config in the unit", func(t *testing.T) {
+		r := newRig(t)
+		p := install.DefaultUnitDir + "/" + install.CheckService
+		c, _ := r.fs.Content(p)
+		r.fs.AddFile(p, 0o644, 0, strings.ReplaceAll(c, " --config "+cfgPath, ""))
+		if rep := r.run(); !has(rep, doctor.Problem, "units", install.CheckService, "no --config") {
+			t.Errorf("\n%s", dump(rep))
+		}
+	})
+}
+
+// The sandbox only shows when the service runs: a check service that never ran
+// proves nothing, and the warning says how to try it.
+func TestCheckServiceNeverRan(t *testing.T) {
+	r := newRig(t)
+	r.sd.Props[install.CheckService] = map[string]string{"ExecMainStartTimestamp": ""}
+	rep := r.run()
+	if !has(rep, doctor.Warn, "last run", install.CheckService, "has not run since the host booted", "systemctl start keepwatch-check.service") || rep.Problems() != 0 {
+		t.Errorf("\n%s", dump(rep))
+	}
+	// The weekly report is not expected to have run.
+	r = newRig(t)
+	r.sd.Props[install.ReportService] = map[string]string{"ExecMainStartTimestamp": ""}
+	if rep := r.run(); rep.Warnings() != 0 || rep.Problems() != 0 {
+		t.Errorf("the report service not having run is reported:\n%s", dump(rep))
+	}
+	// A failed run is the problem, not a warning about a missing run.
+	r = newRig(t)
+	r.sd.Props[install.CheckService] = map[string]string{"ExecMainStartTimestamp": "", "Result": "exit-code", "ExecMainStatus": "226", "ActiveState": "failed"}
+	rep = r.run()
+	if !has(rep, doctor.Problem, "last run", "226") || has(rep, doctor.Warn, "last run", "has not run") {
+		t.Errorf("\n%s", dump(rep))
 	}
 }
 

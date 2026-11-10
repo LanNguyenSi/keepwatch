@@ -833,9 +833,7 @@ directory of the configuration file (`/etc/keepwatch`, mode 0750) and `state_dir
 (mode 0700) if they are missing, runs `systemctl daemon-reload` and
 `systemctl enable --now` for both timers, and restarts a timer whose schedule
 changed. The units run the binary that ran `install` (its path is written into
-them), so install it where it stays, for example `/usr/local/bin`. A binary below
-`/tmp`, `/var/tmp` or `/dev/shm` is refused: the services have a private `/tmp`
-and would not find it.
+them), so install it where it stays, for example `/usr/local/bin`.
 
 The services run that binary as root, so `install` refuses (exit 2) a binary that
 anybody but root could change: every component of its path, from `/`, must be
@@ -870,7 +868,11 @@ Anything else is a usage error (exit 2): a second unit, a fraction, a space or
 newline in a value, `%`, a quote. The same goes for every path that is written
 into a unit (the binary, the configuration file, `state_dir`): they must be
 clean absolute paths of the characters `A-Z a-z 0-9 . _ - + @ /`, so no value can
-add a line, an option or a systemd specifier.
+add a line, an option or a systemd specifier. None of the three may lie
+under `/tmp`, `/var/tmp` or `/dev` (the services have their own empty `/tmp` and
+`/dev`, so a service would not find the file or the directory), and `state_dir` not
+under `/run`, `/var/run` or `/dev/shm` either (they are empty after a reboot, and a
+service whose `ReadWritePaths` names a missing directory does not start).
 
 What `install` does to the files it writes:
 
@@ -974,10 +976,10 @@ probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
 | programs | for every enabled check, the programs it needs are found the way the checks will find them (the fixed directories `/usr/sbin:/usr/bin:/sbin:/bin`, the same trust rules). A check that is switched off needs nothing | not installed: warn, naming the checks that will be `skipped` (`reboot_required` still reads its marker file, `firewall_default` is skipped only without `nft`, `iptables` and `ip6tables`, `docker_exposure` is an error if a daemon is configured); refused by the execution layer, or `nft` missing with only one of `iptables` and `ip6tables`: problem (the check would be an `error`) |
 | ssh | `/run/sshd` exists when an `sshd` check is enabled. Ubuntu 24.04 starts `ssh.service` (which creates it) only at the first login when `ssh.socket` is used, and until then `sshd -T` fails and the five ssh checks are `error` | missing: problem, with the cause and `systemctl start ssh` as the remedy (keepwatch does not create it) |
 | notify | a notification channel is configured | none: warn |
-| state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet, or a state file that will not be used: warn |
-| units | the four unit files are installed with the marker; the `ExecStart` program exists and only root can change it or anything above it; `ReadWritePaths` equals `state_dir`; `--config` matches | missing, foreign, a program anybody else can change (or that is missing), or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
+| state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed, or under a path the sandbox hides: problem (the services do not start, status 226/NAMESPACE) |
+| units | the four unit files are installed with the marker; the `ExecStart` program exists and only root can change it or anything above it; `ReadWritePaths` equals `state_dir`; the unit's `--config` exists and is not under a hidden path; `--config` matches | missing, foreign, a program anybody else can change (or that is missing), or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
-| last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output) | failed: problem |
+| last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
 
 `--send-test` is for delivering a test notification through the configured
 channel. The notifier is not part of this version: the flag exists and

@@ -208,7 +208,7 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	if cfg != nil {
 		d.notify(out, cfg)
-		d.state(out, cfg)
+		d.state(out, cfg, d.anyUnitInstalled())
 	}
 	var stateDir string
 	if cfg != nil {
@@ -362,22 +362,51 @@ func (d Deps) notify(out reporter, cfg *config.Config) {
 	out.add(OK, "notify", "ntfy is configured (%s); \"keepwatch doctor --send-test\" delivers a test message", cfg.Notify.Ntfy.URL)
 }
 
-func (d Deps) state(out reporter, cfg *config.Config) {
+func (d Deps) state(out reporter, cfg *config.Config, unitsInstalled bool) {
 	if d.State == nil {
 		out.add(Problem, "state", "internal error: no state prober")
+		return
+	}
+	if h, ok := install.HiddenBy(cfg.StateDir, install.RoleState); ok {
+		out.add(Problem, "state", "state_dir %s is under %s: %s; the scheduled run fails to start. Set state_dir elsewhere (for example /var/lib/keepwatch) and run \"keepwatch install\" again", cfg.StateDir, h.Path, h.Why)
 		return
 	}
 	st := d.State(cfg.StateDir)
 	switch {
 	case st.Err != nil:
 		out.add(Problem, "state", "state_dir %s is not usable, checks would exit 3: %v", cfg.StateDir, st.Err)
+	case !st.Exists && unitsInstalled:
+		out.add(Problem, "state", "state_dir %s does not exist, but the units are installed: the services have ReadWritePaths=%s and fail to start (status 226/NAMESPACE) while it is missing; run \"keepwatch install\" again, which creates it", cfg.StateDir, cfg.StateDir)
 	case !st.Exists:
-		out.add(Warn, "state", "state_dir %s does not exist yet; \"keepwatch install\" or the first run creates it", cfg.StateDir)
+		out.add(Warn, "state", "state_dir %s does not exist yet; \"keepwatch install\" creates it, and so does the first \"keepwatch check\" run", cfg.StateDir)
 	case st.FileProblem != "":
 		out.add(Warn, "state", "state_dir %s is writable, but the previous state will not be used and the next run is a new baseline: %s", cfg.StateDir, st.FileProblem)
 	default:
 		out.add(OK, "state", "state_dir %s is writable", cfg.StateDir)
 	}
+}
+
+// anyUnitInstalled reports whether a unit file with the keepwatch marker is
+// installed.
+func (d Deps) anyUnitInstalled() bool {
+	if d.FS == nil {
+		return false
+	}
+	unitDir := d.UnitDir
+	if unitDir == "" {
+		unitDir = install.DefaultUnitDir
+	}
+	ud, err := d.FS.OpenDir(unitDir)
+	if err != nil {
+		return false
+	}
+	defer ud.Close()
+	for _, name := range install.UnitNames {
+		if content, err := ud.ReadFile(name, 64<<10); err == nil && install.HasMarker(content) {
+			return true
+		}
+	}
+	return false
 }
 
 // units checks the installed units and the timers. stateDir is empty when the
@@ -435,6 +464,7 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 		if stateDir != "" && in.ReadWritePaths != stateDir {
 			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", p, in.ReadWritePaths, stateDir)
 		}
+		d.unitConfig(out, p, in.ConfigPath)
 		if in.ConfigPath != configPath {
 			out.add(Warn, "units", "%s runs with --config %s, this doctor run used %s", p, in.ConfigPath, configPath)
 		}
@@ -463,13 +493,17 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 		}
 	}
 	for _, s := range []string{install.CheckService, install.ReportService} {
-		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState")
+		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp")
 		if err != nil || v["LoadState"] != "loaded" {
 			continue // not installed, said above
 		}
 		// SuccessExitStatus=1 makes a run with findings a success.
-		if v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success") {
+		switch {
+		case v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success"):
 			out.add(Problem, "last run", "%s did not succeed (result %s, exit status %s); see \"journalctl -u %s\"", s, v["Result"], v["ExecMainStatus"], s)
+		case s == install.CheckService && v["ExecMainStartTimestamp"] == "":
+			// The sandbox only shows when the service runs: nothing above proves it can.
+			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
 		}
 	}
 }
@@ -488,5 +522,21 @@ func (d Deps) binary(out reporter, unit, bin string) {
 		out.add(Problem, "units", "%s runs %s, which does not exist (%v): the scheduled run fails; install the binary there or run \"keepwatch install\" from the new location", unit, bin, err)
 	default:
 		out.add(Problem, "units", "%s runs %s as root, but it cannot be trusted: %v. Anybody who can change it or a directory above it gets root; install it for example with \"install -o root -g root -m 0755 keepwatch /usr/local/bin/\" and run \"keepwatch install\" again", unit, bin, err)
+	}
+}
+
+// unitConfig checks the configuration file an installed service is given: the
+// service must be able to see it.
+func (d Deps) unitConfig(out reporter, unit, cfgPath string) {
+	if cfgPath == "" {
+		out.add(Problem, "units", "%s has no --config that doctor can read; run \"keepwatch install\" again", unit)
+		return
+	}
+	if h, ok := install.HiddenBy(cfgPath, install.RoleConfig); ok {
+		out.add(Problem, "units", "%s runs with --config %s, which is under %s: %s; the scheduled run exits 3. Move the configuration (for example to /etc/keepwatch) and run \"keepwatch install --config ...\" again", unit, cfgPath, h.Path, h.Why)
+		return
+	}
+	if _, err := d.FS.Lstat(cfgPath); err != nil {
+		out.add(Problem, "units", "%s runs with --config %s, which cannot be read (%v): the scheduled run exits 3", unit, cfgPath, err)
 	}
 }
