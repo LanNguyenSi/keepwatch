@@ -828,7 +828,13 @@ keepwatch doctor [--config FILE] [--send-test]
 `install` (run as root) writes four systemd units to `/etc/systemd/system`:
 `keepwatch-check.service` and `.timer`, which run `keepwatch check --config FILE`
 every `--interval`, and `keepwatch-report.service` and `.timer`, which run
-`keepwatch report --weekly --config FILE` at the weekly time. It creates the
+`keepwatch report --weekly --config FILE` at the weekly time. When `notify.ntfy` is
+configured in the configuration file that `install` reads, both commands get
+`--notify`; without it they do not. The reason is the rule of
+[Notifications](#notifications): a run without `--notify` consumes the alerts it
+finds and nobody is told, and a run with `--notify` and no `notify.ntfy` exits 3.
+So after adding `notify.ntfy` run `install` again (it updates the two services;
+`doctor` warns while they lack `--notify`). It creates the
 directory of the configuration file (`/etc/keepwatch`, mode 0750) and `state_dir`
 (mode 0700) if they are missing, runs `systemctl daemon-reload` and
 `systemctl enable --now` for both timers, and restarts a timer whose schedule
@@ -992,14 +998,19 @@ probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
 | programs | for every enabled check, the programs it needs are found the way the checks will find them (the fixed directories `/usr/sbin:/usr/bin:/sbin:/bin`, the same trust rules). A check that is switched off needs nothing | not installed: warn, naming the checks that will be `skipped` (`reboot_required` still reads its marker file, `firewall_default` is skipped only without `nft`, `iptables` and `ip6tables`, `docker_exposure` is an error if a daemon is configured); refused by the execution layer, or `nft` missing with only one of `iptables` and `ip6tables`: problem (the check would be an `error`) |
 | ssh | `/run/sshd` exists when an `sshd` check is enabled. Ubuntu 24.04 starts `ssh.service` (which creates it) only at the first login when `ssh.socket` is used, and until then `sshd -T` fails and the five ssh checks are `error` | missing: problem, with the cause and `systemctl start ssh` as the remedy (keepwatch does not create it) |
 | notify | a notification channel is configured | none: warn |
+| units, notify | the installed services carry `--notify` exactly when `notify.ntfy` is configured | configured but a service lacks `--notify`: warn (its runs consume the alerts); `--notify` but not configured: problem (every run exits 3) |
 | state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed, or under a path the sandbox hides: problem (the services do not start, status 226/NAMESPACE) |
 | units | the four unit files are installed with the marker; the `ExecStart` program exists and only root can change it or anything above it; `ReadWritePaths` equals `state_dir`; the unit's `--config` exists and is not under a hidden path; `--config` matches | missing, foreign, a program anybody else can change (or that is missing), or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
-| last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
+| last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output; exit 3, 4 and 226 are named); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
 
-`--send-test` is for delivering a test notification through the configured
-channel. The notifier is not part of this version: the flag exists and
-answers `--send-test is not available yet` with exit 2, before anything is checked.
+`--send-test` runs all the checks above and then sends one short test message
+through `notify.ntfy` (the same notifier `check --notify` uses, with its timeout and
+one retry). The finding `send-test` is `ok` when the message was delivered, and a
+problem (exit 1) with the delivery error when it was not, when `notify.ntfy` is not
+configured or when the configuration is not valid. The error never holds the server
+address, the topic or the token. The message passes the redactor. Nothing is written to
+`state_dir`: a test message touches neither the state nor the history.
 
 ## Status
 

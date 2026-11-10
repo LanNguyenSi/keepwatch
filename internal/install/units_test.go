@@ -19,7 +19,7 @@ func defaultSpec() Spec {
 func customSpec() Spec {
 	iv, _ := ParseInterval("30m")
 	wk, _ := ParseWeekly("Sun 23:59")
-	return Spec{Binary: "/opt/kw-1.2/bin/keepwatch", ConfigPath: "/srv/kw/main.yaml", StateDir: "/srv/kw/state", Interval: iv, Weekly: wk}
+	return Spec{Binary: "/opt/kw-1.2/bin/keepwatch", ConfigPath: "/srv/kw/main.yaml", StateDir: "/srv/kw/state", Notify: true, Interval: iv, Weekly: wk}
 }
 
 func TestRenderGolden(t *testing.T) {
@@ -313,5 +313,54 @@ func TestSpecValidateBoundsThePathLength(t *testing.T) {
 	s.ConfigPath = long(1025)
 	if err := s.Validate(); err == nil {
 		t.Error("a 1025-byte path was accepted")
+	}
+}
+
+// --notify is in both services exactly when the spec notifies, and Inspect
+// reads it back.
+func TestRenderNotifyFlag(t *testing.T) {
+	for _, notify := range []bool{false, true} {
+		s := defaultSpec()
+		s.Notify = notify
+		files, err := Render(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			body := string(f.Content)
+			if !strings.HasSuffix(f.Name, ".service") {
+				if strings.Contains(body, "--notify") {
+					t.Errorf("%s (notify=%v): a timer mentions --notify", f.Name, notify)
+				}
+				continue
+			}
+			want := "--notify"
+			line := ""
+			for _, l := range strings.Split(body, "\n") {
+				if strings.HasPrefix(l, "ExecStart=") {
+					line = l
+				}
+			}
+			if strings.Contains(line, want) != notify {
+				t.Errorf("%s (notify=%v): %s", f.Name, notify, line)
+			}
+			if Inspect(f.Content).Notify != notify {
+				t.Errorf("%s (notify=%v): Inspect says %v", f.Name, notify, Inspect(f.Content).Notify)
+			}
+			if got := Inspect(f.Content).ConfigPath; got != s.ConfigPath {
+				t.Errorf("%s: --config read back as %q", f.Name, got)
+			}
+		}
+	}
+	s := defaultSpec()
+	s.Notify = true
+	files, _ := Render(s)
+	for want, i := range map[string]int{
+		"ExecStart=/usr/local/bin/keepwatch check --notify --config /etc/keepwatch/keepwatch.yaml\n":           0,
+		"ExecStart=/usr/local/bin/keepwatch report --weekly --notify --config /etc/keepwatch/keepwatch.yaml\n": 1,
+	} {
+		if !strings.Contains(string(files[i].Content), want) {
+			t.Errorf("%s lacks %q", files[i].Name, want)
+		}
 	}
 }

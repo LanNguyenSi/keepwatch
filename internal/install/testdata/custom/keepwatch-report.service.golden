@@ -6,7 +6,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/kw-1.2/bin/keepwatch report --weekly --config /srv/kw/main.yaml
+ExecStart=/opt/kw-1.2/bin/keepwatch report --weekly --notify --config /srv/kw/main.yaml
 # 0 and 1 are normal: 1 means the host has findings, and the notification (not
 # a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
 SuccessExitStatus=1

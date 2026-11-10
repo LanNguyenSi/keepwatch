@@ -200,6 +200,11 @@ type Spec struct {
 	ConfigPath string
 	// StateDir is state_dir of the configuration.
 	StateDir string
+	// Notify makes the services notify (check --notify, report --weekly
+	// --notify). It is set when notify.ntfy is configured in the configuration
+	// that install validated: a run with --notify and no notify.ntfy exits 3,
+	// and a run without --notify consumes the alerts nobody is told of.
+	Notify   bool
 	Interval Interval
 	Weekly   Weekly
 }
@@ -344,11 +349,14 @@ TimeoutStartSec=` + timeoutStartSec + `
 `
 )
 
-// checkArgs and reportArgs are what the services run after the binary.
+// checkArgs and reportArgs are what the services run after the binary;
+// notifyFlag is added when the spec notifies.
 var (
 	checkArgs  = []string{"check"}
 	reportArgs = []string{"report", "--weekly"}
 )
+
+const notifyFlag = "--notify"
 
 // Render returns the four unit files for spec, in write order. It fails if
 // the spec does not validate.
@@ -358,6 +366,9 @@ func Render(s Spec) ([]File, error) {
 	}
 	hard := strings.ReplaceAll(serviceHardening, "{{state}}", s.StateDir)
 	exec := func(args []string) string {
+		if s.Notify {
+			args = append(append([]string(nil), args...), notifyFlag)
+		}
 		return s.Binary + " " + strings.Join(args, " ") + " --config " + s.ConfigPath
 	}
 	service := func(desc string, args []string) string {
@@ -399,6 +410,7 @@ WantedBy=timers.target
 // with the configuration.
 type Installed struct {
 	Binary         string
+	Notify         bool // ExecStart carries --notify
 	ReadWritePaths string
 	ConfigPath     string
 }
@@ -415,6 +427,11 @@ func Inspect(content []byte) Installed {
 			f := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
 			if len(f) > 0 {
 				in.Binary = f[0]
+			}
+			for i := range f {
+				if f[i] == notifyFlag {
+					in.Notify = true
+				}
 			}
 			for i := 0; i+1 < len(f); i++ {
 				if f[i] == "--config" {

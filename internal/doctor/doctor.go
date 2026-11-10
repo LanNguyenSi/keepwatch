@@ -214,7 +214,7 @@ func Run(ctx context.Context, d Deps) Report {
 	if cfg != nil {
 		stateDir = cfg.StateDir
 	}
-	d.units(ctx, out, path, stateDir)
+	d.units(ctx, out, path, stateDir, cfg)
 	return rep
 }
 
@@ -409,9 +409,9 @@ func (d Deps) anyUnitInstalled() bool {
 	return false
 }
 
-// units checks the installed units and the timers. stateDir is empty when the
-// configuration did not load.
-func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir string) {
+// units checks the installed units and the timers. stateDir is empty and cfg
+// nil when the configuration did not load.
+func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir string, cfg *config.Config) {
 	if d.FS == nil || d.Runner == nil {
 		out.add(Problem, "units", "internal error: no file system or runner")
 		return
@@ -465,6 +465,7 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", p, in.ReadWritePaths, stateDir)
 		}
 		d.unitConfig(out, p, in.ConfigPath)
+		d.unitNotify(out, p, in.Notify, cfg)
 		if in.ConfigPath != configPath {
 			out.add(Warn, "units", "%s runs with --config %s, this doctor run used %s", p, in.ConfigPath, configPath)
 		}
@@ -500,7 +501,7 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 		// SuccessExitStatus=1 makes a run with findings a success.
 		switch {
 		case v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success"):
-			out.add(Problem, "last run", "%s did not succeed (result %s, exit status %s); see \"journalctl -u %s\"", s, v["Result"], v["ExecMainStatus"], s)
+			out.add(Problem, "last run", "%s did not succeed (result %s, exit status %s%s); see \"journalctl -u %s\"", s, v["Result"], v["ExecMainStatus"], exitMeaning(v["ExecMainStatus"]), s)
 		case s == install.CheckService && v["ExecMainStartTimestamp"] == "":
 			// The sandbox only shows when the service runs: nothing above proves it can.
 			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
@@ -539,4 +540,34 @@ func (d Deps) unitConfig(out reporter, unit, cfgPath string) {
 	if _, err := d.FS.Lstat(cfgPath); err != nil {
 		out.add(Problem, "units", "%s runs with --config %s, which cannot be read (%v): the scheduled run exits 3", unit, cfgPath, err)
 	}
+}
+
+// unitNotify checks that an installed service notifies exactly when
+// notify.ntfy is configured. A service with --notify and no notify.ntfy exits
+// 3 on every run. One without --notify while notify.ntfy is configured moves
+// the state forward past the alerts, so nobody is told of them.
+func (d Deps) unitNotify(out reporter, unit string, unitNotifies bool, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	configured := cfg.Notify.Ntfy != nil
+	switch {
+	case unitNotifies && !configured:
+		out.add(Problem, "units", "%s runs with --notify, but notify.ntfy is not configured: every scheduled run exits 3. Configure notify.ntfy, or run \"keepwatch install\" again to drop --notify", unit)
+	case !unitNotifies && configured:
+		out.add(Warn, "units", "notify.ntfy is configured, but %s runs without --notify: a scheduled run consumes the alerts it finds and nobody is told. Run \"keepwatch install\" again", unit)
+	}
+}
+
+// exitMeaning names the exit statuses of keepwatch that fail a service.
+func exitMeaning(status string) string {
+	switch status {
+	case "3":
+		return ": keepwatch could not do its job"
+	case "4":
+		return ": the notification could not be delivered"
+	case "226":
+		return ": the sandbox could not be set up, for example ReadWritePaths names a missing directory"
+	}
+	return ""
 }

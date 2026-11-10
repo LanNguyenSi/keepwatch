@@ -7,12 +7,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/config"
 	"github.com/LanNguyenSi/keepwatch/internal/doctor"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/install"
 	"github.com/LanNguyenSi/keepwatch/internal/install/installtest"
+	"github.com/LanNguyenSi/keepwatch/internal/notify"
 )
 
 // hostRig is a fake host for the commands that act on it. Tests never touch
@@ -392,34 +394,215 @@ func TestDoctorCommand(t *testing.T) {
 	})
 }
 
+// withNtfy configures notify.ntfy on the fake host and returns the fake server.
+func withNtfy(t *testing.T, h *hostRig) *fakeNtfy {
+	t.Helper()
+	n := newFakeNtfy(t)
+	h.cfg.Notify.Ntfy = &config.Ntfy{URL: n.srv.URL, Topic: "kw-test"}
+	return n
+}
+
+// installedNtfyHost is a host with notify.ntfy configured and the units
+// installed, so that doctor has nothing else to say.
+func installedNtfyHost(t *testing.T) (*hostRig, *fakeNtfy) {
+	t.Helper()
+	h := newHost(t)
+	n := withNtfy(t, h)
+	h.withConfigFile()
+	if code, _, stderr := runCmd("install"); code != ExitOK {
+		t.Fatalf("install: %d %q", code, stderr)
+	}
+	return h, n
+}
+
+func runDoctorEnv(h *hostRig, e env, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	if e.ctx == nil {
+		e.ctx = context.Background()
+	}
+	return dispatch(e, append([]string{"doctor"}, args...), &out, &errb), out.String(), errb.String()
+}
+
+type failingNotifier struct{ err error }
+
+func (f failingNotifier) Send(context.Context, notify.Message) error { return f.err }
+
 func TestDoctorSendTest(t *testing.T) {
-	t.Run("is not available yet: exit 2, clear message, no diagnosis", func(t *testing.T) {
+	quick := []notify.Option{notify.WithBackoff(0)}
+	t.Run("delivers one short test message and exits 0", func(t *testing.T) {
+		h, n := installedNtfyHost(t)
+		logs := len(h.fs.Log)
+		code, stdout, stderr := runDoctorEnv(h, env{notifyOpts: quick}, "--send-test")
+		if code != ExitOK || !strings.Contains(stdout, "send-test: the test message was delivered") {
+			t.Fatalf("exit = %d stderr = %q\n%s", code, stderr, stdout)
+		}
+		if n.count() != 1 {
+			t.Fatalf("%d requests, want 1", n.count())
+		}
+		r := n.last()
+		if r.Method != "POST" || r.Path != "/kw-test" || !strings.Contains(r.Body, "doctor --send-test") || len(r.Body) > 300 {
+			t.Errorf("request = %+v", r)
+		}
+		if got := r.Header.Get("Title"); got != "keepwatch test message" {
+			t.Errorf("title = %q", got)
+		}
+		if p := r.Header.Get("Priority"); p != "2" || r.Header.Get("Tags") != "keepwatch" {
+			t.Errorf("priority %q tags %q", p, r.Header.Get("Tags"))
+		}
+		if len(h.fs.Log) != logs {
+			t.Errorf("--send-test wrote: %v", h.fs.Log[logs:])
+		}
+	})
+	t.Run("without --send-test nothing is sent", func(t *testing.T) {
+		h, n := installedNtfyHost(t)
+		runDoctorEnv(h, env{notifyOpts: quick})
+		if n.count() != 0 {
+			t.Errorf("%d requests without --send-test", n.count())
+		}
+	})
+	t.Run("a refused delivery is a problem with the reason, exit 1, no secret", func(t *testing.T) {
+		h, n := installedNtfyHost(t)
+		n.answer(401)
+		code, stdout, _ := runDoctorEnv(h, env{notifyOpts: quick}, "--send-test")
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM send-test: the test message was not delivered: ntfy:") || strings.Count(stdout, "PROBLEM") != 1 {
+			t.Fatalf("exit = %d\n%s", code, stdout)
+		}
+		line := stdout[strings.Index(stdout, "PROBLEM send-test"):]
+		if strings.Contains(line, n.srv.URL) || strings.Contains(line, "kw-test") {
+			t.Errorf("the server address or the topic is in the finding:\n%s", line)
+		}
+	})
+	t.Run("a server that is down is a problem", func(t *testing.T) {
+		h, n := installedNtfyHost(t)
+		n.srv.Close()
+		code, stdout, _ := runDoctorEnv(h, env{notifyOpts: append(quick, notify.WithTimeout(time.Second))}, "--send-test")
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM send-test: the test message was not delivered") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("without notify.ntfy there is nothing to send to", func(t *testing.T) {
 		h := newHost(t)
-		code, stdout, stderr := runCmd("doctor", "--send-test")
-		if code != ExitUsage || !strings.Contains(stderr, "--send-test is not available yet") {
-			t.Errorf("exit = %d stderr = %q", code, stderr)
-		}
-		if stdout != "" || len(h.sd.Runner.Calls) != 0 {
-			t.Errorf("the diagnosis ran: %q %v", stdout, h.sd.Runner.Calls)
+		code, stdout, _ := runDoctorEnv(h, env{}, "--send-test")
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM send-test: no test message sent: notify.ntfy is not configured") {
+			t.Errorf("exit = %d\n%s", code, stdout)
 		}
 	})
-	t.Run("the seam can be filled", func(t *testing.T) {
-		newHost(t)
-		old := sendTest
-		defer func() { sendTest = old }()
-		called := false
-		sendTest = func(env, *config.Config) error { called = true; return nil }
-		runCmd("doctor", "--send-test")
-		if !called {
-			t.Error("the seam was not called")
+	t.Run("an invalid configuration sends nothing", func(t *testing.T) {
+		h := newHost(t)
+		n := withNtfy(t, h)
+		h.cfgErr = config.Errors{{File: "/etc/keepwatch/keepwatch.yaml", Line: 2, Msg: "bad"}}
+		code, stdout, _ := runDoctorEnv(h, env{notifyOpts: quick}, "--send-test")
+		if code != ExitError || n.count() != 0 || !strings.Contains(stdout, "PROBLEM send-test: no test message sent: the configuration is not valid") {
+			t.Errorf("exit = %d requests = %d\n%s", code, n.count(), stdout)
 		}
 	})
-	t.Run("without the flag the seam is not used", func(t *testing.T) {
-		newHost(t)
-		old := sendTest
-		defer func() { sendTest = old }()
-		sendTest = func(env, *config.Config) error { t.Error("called"); return errors.New("x") }
-		runCmd("doctor")
+	t.Run("the redactor runs over the error", func(t *testing.T) {
+		h, _ := installedNtfyHost(t)
+		h.cfg.Redact.Patterns = []string{"secret-[0-9]+"}
+		code, stdout, _ := runDoctorEnv(h, env{notifier: failingNotifier{errors.New("boom secret-12345")}}, "--send-test")
+		if code != ExitError || strings.Contains(stdout, "secret-12345") || !strings.Contains(stdout, "not delivered: boom [REDACTED]") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("the redactor runs over the message", func(t *testing.T) {
+		h := newHost(t)
+		n := withNtfy(t, h)
+		h.cfg.Redact.Patterns = []string{"doctor"}
+		runDoctorEnv(h, env{notifyOpts: quick}, "--send-test")
+		if strings.Contains(n.last().Body, "doctor") {
+			t.Errorf("body = %q", n.last().Body)
+		}
+	})
+}
+
+// The scheduled runs notify exactly when notify.ntfy is configured in the
+// configuration install validated.
+func TestInstallAddsNotifyOnlyWhenConfigured(t *testing.T) {
+	unitText := func(h *hostRig, name string) string {
+		s, _ := h.fs.Content("/etc/systemd/system/" + name)
+		return s
+	}
+	t.Run("configured", func(t *testing.T) {
+		h := newHost(t)
+		withNtfy(t, h)
+		h.withConfigFile()
+		code, stdout, stderr := runCmd("install")
+		if code != ExitOK {
+			t.Fatalf("exit = %d %q", code, stderr)
+		}
+		if !strings.Contains(unitText(h, install.CheckService), " check --notify --config ") || !strings.Contains(unitText(h, install.ReportService), " report --weekly --notify --config ") {
+			t.Errorf("the services do not notify:\n%s", unitText(h, install.CheckService))
+		}
+		if !strings.Contains(stdout, "the scheduled runs notify") {
+			t.Errorf("no word about notifying:\n%s", stdout)
+		}
+		if code, stdout, _ := runCmd("doctor"); code != ExitOK || strings.Contains(stdout, "warn    units") {
+			t.Errorf("doctor after install: exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("not configured", func(t *testing.T) {
+		h := newHost(t)
+		h.withConfigFile()
+		code, stdout, _ := runCmd("install")
+		if code != ExitOK {
+			t.Fatalf("exit = %d", code)
+		}
+		for _, n := range []string{install.CheckService, install.ReportService} {
+			if strings.Contains(unitText(h, n), "--notify") {
+				t.Errorf("%s notifies although notify.ntfy is not configured", n)
+			}
+		}
+		if !strings.Contains(stdout, "the scheduled runs do not notify: notify.ntfy is not configured") {
+			t.Errorf("no word about not notifying:\n%s", stdout)
+		}
+	})
+	t.Run("no configuration file: no --notify", func(t *testing.T) {
+		h := newHost(t)
+		withNtfy(t, h) // not read: there is no file
+		if code, _, _ := runCmd("install"); code != ExitOK {
+			t.Fatal("install failed")
+		}
+		if strings.Contains(unitText(h, install.CheckService), "--notify") {
+			t.Error("--notify without a configuration file")
+		}
+	})
+	t.Run("ntfy added later: install again updates the services, and doctor warned before", func(t *testing.T) {
+		h := newHost(t)
+		h.withConfigFile()
+		if code, _, _ := runCmd("install"); code != ExitOK {
+			t.Fatal("install failed")
+		}
+		withNtfy(t, h)
+		code, stdout, _ := runCmd("doctor")
+		if code != ExitOK || !strings.Contains(stdout, "warn    units: notify.ntfy is configured, but /etc/systemd/system/keepwatch-check.service runs without --notify") {
+			t.Fatalf("doctor: exit = %d\n%s", code, stdout)
+		}
+		h.sd.Runner.Calls = nil
+		code, stdout, _ = runCmd("install")
+		if code != ExitOK || !strings.Contains(stdout, "update /etc/systemd/system/"+install.CheckService) || !strings.Contains(unitText(h, install.CheckService), "--notify") {
+			t.Fatalf("install: exit = %d\n%s", code, stdout)
+		}
+		for _, l := range h.sd.Mutations() {
+			if strings.Contains(l, "restart") {
+				t.Errorf("a timer was restarted for a service change: %s", l)
+			}
+		}
+		if code, stdout, _ := runCmd("doctor"); code != ExitOK || strings.Contains(stdout, "warn    units") {
+			t.Errorf("doctor after: exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("ntfy removed later: doctor says every run exits 3", func(t *testing.T) {
+		h := newHost(t)
+		withNtfy(t, h)
+		h.withConfigFile()
+		if code, _, _ := runCmd("install"); code != ExitOK {
+			t.Fatal("install failed")
+		}
+		h.cfg.Notify.Ntfy = nil
+		code, stdout, _ := runCmd("doctor")
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM units") || !strings.Contains(stdout, "runs with --notify, but notify.ntfy is not configured") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
 	})
 }
 

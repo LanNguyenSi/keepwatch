@@ -58,7 +58,7 @@ func newRig(t *testing.T) *rig {
 	wk, _ := install.ParseWeekly("Mon 08:00")
 	deps := install.Deps{FS: r.fs, Runner: r.sd.Runner, Geteuid: func() int { return 0 }, Out: &bytes.Buffer{}}
 	err := install.Install(context.Background(), deps, install.InstallOptions{
-		Spec: install.Spec{Binary: "/usr/local/bin/keepwatch", ConfigPath: cfgPath, StateDir: stateDir, Interval: iv, Weekly: wk}, ConfigFound: true})
+		Spec: install.Spec{Binary: "/usr/local/bin/keepwatch", ConfigPath: cfgPath, StateDir: stateDir, Notify: true, Interval: iv, Weekly: wk}, ConfigFound: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +426,11 @@ func TestCheckServiceNeverRan(t *testing.T) {
 func TestNotifyNotConfigured(t *testing.T) {
 	r := newRig(t)
 	r.cfg.Notify.Ntfy = nil
+	for _, n := range []string{install.CheckService, install.ReportService} { // installed without --notify
+		p := install.DefaultUnitDir + "/" + n
+		c, _ := r.fs.Content(p)
+		r.fs.AddFile(p, 0o644, 0, strings.ReplaceAll(c, " --notify", ""))
+	}
 	if rep := r.run(); !has(rep, doctor.Warn, "notify", "no notification channel") || rep.Problems() != 0 {
 		t.Errorf("\n%s", dump(rep))
 	}
@@ -677,4 +682,87 @@ func TestOSStateProber(t *testing.T) {
 		}
 	})
 	_ = syscall.Getuid
+}
+
+// The services notify exactly when notify.ntfy is configured.
+func TestUnitsNotifyMatchTheConfiguration(t *testing.T) {
+	reinstall := func(r *rig, notify bool) {
+		for _, n := range install.UnitNames {
+			r.fs.Remove(install.DefaultUnitDir + "/" + n)
+		}
+		iv, _ := install.ParseInterval("6h")
+		wk, _ := install.ParseWeekly("Mon 08:00")
+		deps := install.Deps{FS: r.fs, Runner: r.sd.Runner, Geteuid: func() int { return 0 }, Out: &bytes.Buffer{}}
+		if err := install.Install(context.Background(), deps, install.InstallOptions{
+			Spec: install.Spec{Binary: "/usr/local/bin/keepwatch", ConfigPath: cfgPath, StateDir: stateDir, Notify: notify, Interval: iv, Weekly: wk}, ConfigFound: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("configured and notifying: nothing to say", func(t *testing.T) {
+		r := newRig(t)
+		if rep := r.run(); rep.Warnings() != 0 || rep.Problems() != 0 {
+			t.Errorf("\n%s", dump(rep))
+		}
+	})
+	t.Run("not configured and not notifying: nothing to say about it", func(t *testing.T) {
+		r := newRig(t)
+		reinstall(r, false)
+		r.cfg.Notify.Ntfy = nil
+		for _, f := range r.run().Findings {
+			if f.Area == "units" && f.Level != doctor.OK {
+				t.Errorf("%+v", f)
+			}
+		}
+	})
+	t.Run("configured, unit without --notify: warn for each service", func(t *testing.T) {
+		r := newRig(t)
+		reinstall(r, false)
+		rep := r.run()
+		for _, svc := range []string{install.CheckService, install.ReportService} {
+			if !has(rep, doctor.Warn, "units", "notify.ntfy is configured", svc, "without --notify", "consumes the alerts", "keepwatch install\" again") {
+				t.Errorf("%s:\n%s", svc, dump(rep))
+			}
+		}
+		if rep.Problems() != 0 {
+			t.Errorf("a missing --notify is a warning, not a problem:\n%s", dump(rep))
+		}
+	})
+	t.Run("not configured, unit with --notify: every run exits 3, a problem", func(t *testing.T) {
+		r := newRig(t)
+		r.cfg.Notify.Ntfy = nil
+		rep := r.run()
+		for _, svc := range []string{install.CheckService, install.ReportService} {
+			if !has(rep, doctor.Problem, "units", svc, "runs with --notify", "notify.ntfy is not configured", "exits 3") {
+				t.Errorf("%s:\n%s", svc, dump(rep))
+			}
+		}
+	})
+	t.Run("the configuration did not load: no claim about --notify", func(t *testing.T) {
+		r := newRig(t)
+		r.cfgErr = errors.New("broken")
+		for _, f := range r.run().Findings {
+			if f.Area == "units" && strings.Contains(f.Message, "--notify") {
+				t.Errorf("%+v", f)
+			}
+		}
+	})
+}
+
+func TestLastRunFailureNamesTheExitStatus(t *testing.T) {
+	for status, want := range map[string]string{
+		"4": "the notification could not be delivered", "3": "keepwatch could not do its job", "226": "ReadWritePaths names a missing directory",
+	} {
+		for _, svc := range []string{install.CheckService, install.ReportService} {
+			r := newRig(t)
+			r.sd.Props[svc] = map[string]string{"Result": "exit-code", "ExecMainStatus": status, "ActiveState": "failed"}
+			if rep := r.run(); !has(rep, doctor.Problem, "last run", svc, "exit status "+status, want) {
+				t.Errorf("%s %s:\n%s", svc, status, dump(rep))
+			}
+		}
+	}
+	r := newRig(t)
+	r.sd.Props[install.ReportService] = map[string]string{"Result": "exit-code", "ExecMainStatus": "77", "ActiveState": "failed"}
+	if rep := r.run(); !has(rep, doctor.Problem, "last run", "exit status 77)") {
+		t.Errorf("an unknown status:\n%s", dump(rep))
+	}
 }

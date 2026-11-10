@@ -14,6 +14,9 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/engine"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/install"
+	"github.com/LanNguyenSi/keepwatch/internal/notify"
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
+	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
 // hostOps is what install, uninstall and doctor take from the host. The zero
@@ -85,20 +88,29 @@ func absConfig(path string) (string, error) {
 	return filepath.Abs(filepath.Clean(path))
 }
 
-// stateDirOf reads state_dir from the configuration. found is false when the
-// file does not exist (the default state directory is returned then).
-func stateDirOf(h hostOps, path string) (dir string, found bool, err error) {
+// confInfo is what install needs from the configuration file.
+type confInfo struct {
+	stateDir string
+	// found is false when the file does not exist (the default state
+	// directory is returned then).
+	found bool
+	// notify: notify.ntfy is configured.
+	notify bool
+}
+
+// readConfig reads state_dir and whether notify.ntfy is configured.
+func readConfig(h hostOps, path string) (confInfo, error) {
 	if _, serr := h.fs.Lstat(path); serr != nil {
 		if errors.Is(serr, os.ErrNotExist) {
-			return filepath.Clean(config.DefaultStateDir), false, nil
+			return confInfo{stateDir: filepath.Clean(config.DefaultStateDir)}, nil
 		}
-		return "", false, serr
+		return confInfo{}, serr
 	}
 	cfg, err := h.loadConfig(path)
 	if err != nil {
-		return "", true, err
+		return confInfo{found: true}, err
 	}
-	return filepath.Clean(cfg.StateDir), true, nil
+	return confInfo{stateDir: filepath.Clean(cfg.StateDir), found: true, notify: cfg.Notify.Ntfy != nil}, nil
 }
 
 func printConfigErr(stderr io.Writer, name string, err error) {
@@ -147,12 +159,12 @@ func runInstall(e env, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "keepwatch install: cannot tell where the keepwatch binary is: %v\n", err)
 		return ExitInternal
 	}
-	stateDir, found, err := stateDirOf(h, path)
+	ci, err := readConfig(h, path)
 	if err != nil {
 		printConfigErr(stderr, "install", err)
 		return ExitUsage
 	}
-	spec := install.Spec{Binary: exe, ConfigPath: path, StateDir: stateDir, Interval: interval, Weekly: weekly}
+	spec := install.Spec{Binary: exe, ConfigPath: path, StateDir: ci.stateDir, Notify: ci.notify, Interval: interval, Weekly: weekly}
 
 	if printOnly {
 		files, err := install.Render(spec)
@@ -169,7 +181,7 @@ func runInstall(e env, args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 	deps := install.Deps{FS: h.fs, Runner: h.runner, Geteuid: h.geteuid, UnitDir: h.unitDir, SystemdRunDir: h.systemdRunDir, Out: stdout}
-	err = install.Install(e.ctx, deps, install.InstallOptions{Spec: spec, DryRun: dryRun, ConfigFound: found})
+	err = install.Install(e.ctx, deps, install.InstallOptions{Spec: spec, DryRun: dryRun, ConfigFound: ci.found})
 	return installExit("install", err, stderr)
 }
 
@@ -194,35 +206,59 @@ func runUninstall(e env, args []string, stdout, stderr io.Writer) int {
 	err = install.Uninstall(e.ctx, deps, install.UninstallOptions{
 		DryRun: dryRun, Purge: purge, ConfigPath: path, ConfigExplicit: cfgPath != "",
 		DefaultConfigPath: config.DefaultPath, DefaultStateDir: filepath.Clean(config.DefaultStateDir),
-		StateDirOf: func(p string) (string, bool, error) { return stateDirOf(h, p) },
+		StateDirOf: func(p string) (string, bool, error) {
+			ci, err := readConfig(h, p)
+			return ci.stateDir, ci.found, err
+		},
 	})
 	return installExit("uninstall", err, stderr)
 }
 
-// sendTest is the seam for `doctor --send-test`: it delivers a test
-// notification through the configured channel. Until the notifier exists it
-// reports errSendTestUnavailable.
-var sendTest = func(env, *config.Config) error { return errSendTestUnavailable }
-
-var errSendTestUnavailable = errors.New("--send-test is not available yet: the notifier is not implemented in this version")
+// sendTestFinding delivers one short test message through the configured
+// channel and says what happened as a finding of doctor. It writes no state:
+// nothing here touches state_dir.
+func sendTestFinding(e env, h hostOps, path string) doctor.Finding {
+	fail := func(format string, a ...any) doctor.Finding {
+		return doctor.Finding{Level: doctor.Problem, Area: "send-test", Message: fmt.Sprintf(format, a...)}
+	}
+	cfg, err := h.loadConfig(path)
+	if err != nil {
+		return fail("no test message sent: the configuration is not valid (see config above)")
+	}
+	ntf, err := e.newNotifier(cfg)
+	if err != nil {
+		return fail("no test message sent: %v", err)
+	}
+	red, err := redact.New(cfg.Redact.Patterns)
+	if err != nil {
+		return fail("no test message sent: %v", err)
+	}
+	host, herr := e.hostname()
+	if herr != nil {
+		host = "unknown"
+	}
+	msg := notify.Message{
+		Title:    "keepwatch test message",
+		Body:     red.Clean("This is a test from \"keepwatch doctor --send-test\" on " + host + ". Nothing is wrong; if you read this, delivery works."),
+		Priority: notify.PriorityOf(result.Low),
+		Tags:     []string{"keepwatch"},
+	}
+	if err := ntf.Send(e.ctx, msg); err != nil {
+		return fail("the test message was not delivered: %s", red.Clean(err.Error()))
+	}
+	return doctor.Finding{Level: doctor.OK, Area: "send-test", Message: "the test message was delivered"}
+}
 
 // runDoctor implements `keepwatch doctor`.
 func runDoctor(e env, args []string, stdout, stderr io.Writer) int {
+	e = e.withDefaults()
 	var cfgPath string
 	var send bool
 	if code, done := parse("doctor", args, stdout, stderr, func(fs *flag.FlagSet) {
 		fs.StringVar(&cfgPath, "config", "", "main configuration file (default "+config.DefaultPath+")")
-		fs.BoolVar(&send, "send-test", false, "deliver a test notification through the configured channel")
+		fs.BoolVar(&send, "send-test", false, "deliver one test message through the configured ntfy channel (writes no state)")
 	}); done {
 		return code
-	}
-	if send {
-		// The seam decides before anything is checked: until it exists, the
-		// flag is a usage error, not a half-done diagnosis.
-		if err := sendTest(e, nil); errors.Is(err, errSendTestUnavailable) {
-			fmt.Fprintf(stderr, "keepwatch doctor: %v\n", err)
-			return ExitUsage
-		}
 	}
 	cat := e.catalog
 	if cat == nil {
@@ -247,6 +283,9 @@ func runDoctor(e env, args []string, stdout, stderr io.Writer) int {
 		ConfigPath: path, LoadConfig: h.loadConfig, Catalog: cat, Resolver: res, Runner: h.runner,
 		FS: h.fs, Geteuid: h.geteuid, State: h.state, UnitDir: h.unitDir, SystemdRunDir: h.systemdRunDir, SSHRunDir: h.sshRunDir,
 	})
+	if send {
+		rep.Findings = append(rep.Findings, sendTestFinding(e, h, path))
+	}
 	rep.Write(stdout)
 	if rep.Problems() > 0 {
 		return ExitError

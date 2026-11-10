@@ -244,6 +244,11 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 			say("dry run: nothing was written or run")
 		} else {
 			say("installed: the check runs every %s, the weekly report on %s", o.Spec.Interval, o.Spec.Weekly.OnCalendar())
+			if o.Spec.Notify {
+				say("the scheduled runs notify (%s): notify.ntfy is configured", notifyFlag)
+			} else {
+				say("the scheduled runs do not notify: notify.ntfy is not configured; after adding it run \"keepwatch install\" again, or alerts are consumed and nobody is told")
+			}
 		}
 		return nil
 	}
