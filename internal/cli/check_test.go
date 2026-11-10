@@ -407,7 +407,9 @@ func TestCheckStateThatCannotBeSavedExits3(t *testing.T) {
 	if code != 3 {
 		t.Errorf("exit = %d, want 3", code)
 	}
-	if !strings.Contains(errb, "the state could not be saved") || !strings.Contains(out, "the state could not be saved") {
+	// The report is written before the state is saved, so the failure is
+	// told on stderr only.
+	if !strings.Contains(errb, "the state could not be saved") || strings.Contains(out, "the state could not be saved") {
 		t.Errorf("stderr = %q\nstdout:\n%s", errb, out)
 	}
 	if !strings.Contains(out, "[FAIL] t.sshd") {
@@ -731,4 +733,98 @@ func TestCheckMessagesAreCleaned(t *testing.T) {
 			t.Errorf("exit %d stderr %q", code, errb.String())
 		}
 	})
+}
+
+// The state moves forward only when the report was written: a report that did
+// not get out must be produced again by the next run.
+func TestCheckDoesNotAdvanceTheStateWhenTheReportCannotBeWritten(t *testing.T) {
+	f := newFixture(t, goodHost(), "")
+	if code, _, _ := f.check(); code != 0 {
+		t.Fatalf("first run: exit %d", code)
+	}
+	before, err := os.ReadFile(f.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.env.runner = goodHost().AddResult(svcArgv, res("inactive\n", 3))
+	f.clock = f.clock.Add(time.Hour)
+	var errb bytes.Buffer
+	code := dispatch(f.env, []string{"check", "--config", f.cfgPath}, failingWriter{}, &errb)
+	if code != 3 || !strings.Contains(errb.String(), "cannot write the report") {
+		t.Fatalf("exit %d stderr %q", code, errb.String())
+	}
+	after, err := os.ReadFile(f.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the state moved forward although the report was not written:\n%s", after)
+	}
+	entries, _ := os.ReadDir(f.stateDir)
+	if len(entries) != 1 {
+		t.Errorf("state directory holds %d entries, want only state.json", len(entries))
+	}
+
+	// The next run, with a working stdout, reports the change.
+	f.env.runner = goodHost().AddResult(svcArgv, res("inactive\n", 3))
+	f.clock = f.clock.Add(time.Hour)
+	code, out, _ := f.check()
+	if code != 1 || !strings.Contains(out, "! t.service (medium): now failing (was pass)") {
+		t.Errorf("the change was lost: exit %d\n%s", code, out)
+	}
+}
+
+// A report that is built is written before the state is saved, and a failed
+// save is told on stderr with exit 3 (the report's own exit code is the one
+// of the checks).
+func TestCheckStateThatCannotBeSavedIsToldAfterTheReport(t *testing.T) {
+	f := newFixture(t, badHost(), "")
+	if err := os.MkdirAll(filepath.Join(f.statePath(), "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := f.check("--format", "json")
+	if code != 3 {
+		t.Fatalf("exit = %d, want 3", code)
+	}
+	var v struct {
+		ExitCode int      `json:"exit_code"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("report: %v\n%s", err, out)
+	}
+	if v.ExitCode != 1 || strings.Contains(strings.Join(v.Warnings, "\n"), "could not be saved") {
+		t.Errorf("report says exit %d with warnings %v, want the exit code of the checks (1) and no word about the save", v.ExitCode, v.Warnings)
+	}
+	if !strings.Contains(errb, "the state could not be saved") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// A state file written by the previous schema version is read, not treated as
+// a broken file.
+func TestCheckReadsAStateFileOfTheOlderSchemaVersion(t *testing.T) {
+	f := newFixture(t, goodHost(), "")
+	f.check()
+	b, err := os.ReadFile(f.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := strings.Replace(string(b), `"schema_version": 2`, `"schema_version": 1`, 1)
+	if v1 == string(b) {
+		t.Fatalf("no schema_version in the state file:\n%s", b)
+	}
+	if err := os.WriteFile(f.statePath(), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env.runner = goodHost().AddResult(svcArgv, res("inactive\n", 3))
+	f.clock = f.clock.Add(time.Hour)
+	code, out, errb := f.check()
+	if code != 1 || errb != "" || strings.Contains(out, "baseline run") || !strings.Contains(out, "! t.service (medium): now failing (was pass)") {
+		t.Errorf("exit %d stderr %q\n%s", code, errb, out)
+	}
+	if st := f.loadState(); st.SchemaVersion != state.SchemaVersion {
+		t.Errorf("the state was rewritten with schema version %d, want %d", st.SchemaVersion, state.SchemaVersion)
+	}
 }

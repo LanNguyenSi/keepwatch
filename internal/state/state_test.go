@@ -291,6 +291,9 @@ func TestLoadRefusesAForeignOwnedFile(t *testing.T) {
 	if err != nil || lr.State != nil || !strings.Contains(lr.Problem, "owned by uid") {
 		t.Fatalf("Load = %+v, %v", lr, err)
 	}
+	if want := "want " + wantOwner(os.Getuid()); !strings.HasSuffix(lr.Problem, want) {
+		t.Errorf("Problem = %q, want it to end in %q", lr.Problem, want)
+	}
 	// An owner lookup that fails is a problem too.
 	failing := func(fi fs.FileInfo) (int, error) {
 		if !fi.IsDir() {
@@ -385,7 +388,7 @@ func TestDirectoryRules(t *testing.T) {
 		s, _ := newStore(t, WithOwnerOf(foreign))
 		// The directory does not exist yet: Save creates it, and then
 		// refuses it because it is not owned by root or the running user.
-		if err := s.Save(sample()); err == nil || !strings.Contains(err.Error(), "owned by uid") {
+		if err := s.Save(sample()); err == nil || !strings.HasSuffix(err.Error(), "want "+wantOwner(os.Getuid())) {
 			t.Errorf("Save error = %v", err)
 		}
 		if _, err := s.Load(); err == nil || !strings.Contains(err.Error(), "owned by uid") {
@@ -849,5 +852,13 @@ func TestFileThatGrowsAfterTheSizeCheckIsStillCapped(t *testing.T) {
 	lr, err := s.Load()
 	if err != nil || lr.State != nil || !strings.Contains(lr.Problem, "cannot read") {
 		t.Fatalf("Load = %+v, %v", lr, err)
+	}
+}
+
+func TestWantOwnerNamesTheAcceptedUIDs(t *testing.T) {
+	for running, want := range map[int]string{0: "uid 0", 1000: "uid 0 or 1000", 501: "uid 0 or 501"} {
+		if got := wantOwner(running); got != want {
+			t.Errorf("wantOwner(%d) = %q, want %q", running, got, want)
+		}
 	}
 }

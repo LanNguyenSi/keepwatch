@@ -137,7 +137,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 
 	var store *state.Store
 	var cur *state.State
-	stateFailed := false
+	stateFailed, saveState := false, false
 	if !noState {
 		in.State.Used = true
 		cur = state.FromResults(results, now, red.Clean)
@@ -166,12 +166,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 				in.Warnings = append(in.Warnings, "previous state not used, this run is a new baseline: "+lr.Problem)
 			}
 		}
-		if store != nil && !stateFailed {
-			if serr = store.Save(cur); serr != nil {
-				stateFailed = true
-				in.Warnings = append(in.Warnings, fmt.Sprintf("the state could not be saved, the next run compares with an older one: %v", serr))
-			}
-		}
+		saveState = store != nil && !stateFailed
 	}
 	if stateFailed {
 		code = ExitInternal
@@ -186,8 +181,20 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 		return fail("render: %v", err)
 	}
 	if _, err := stdout.Write(buf.Bytes()); err != nil {
+		// The report did not get out, so the changes in it were not told to
+		// anyone: leave the state as it is, the next run reports them again.
 		fmt.Fprintf(stderr, "keepwatch check: cannot write the report: %s\n", red.Clean(err.Error()))
 		return ExitInternal
+	}
+	if saveState {
+		// The state moves forward only after the report was written. A
+		// failure here cannot be part of the report any more: it is told on
+		// stderr and the exit code is 3 (the exit code printed in the report
+		// is the one of the checks).
+		if err := store.Save(cur); err != nil {
+			fmt.Fprintf(stderr, "keepwatch check: warning: the state could not be saved, the next run compares with an older one: %s\n", red.Clean(err.Error()))
+			return ExitInternal
+		}
 	}
 	return code
 }
