@@ -35,6 +35,10 @@ type env struct {
 	now      func() time.Time
 	hostname func() (string, error)
 	ownerOf  state.OwnerOf
+	// buildState turns the results into the state of the run; nil means
+	// state.FromResults. Tests replace it to hand the command a state that is
+	// inconsistent, which FromResults never produces.
+	buildState func([]result.Result, time.Time, func(string) string) *state.State
 }
 
 func (e env) withDefaults() env {
@@ -140,7 +144,11 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	stateFailed, saveState := false, false
 	if !noState {
 		in.State.Used = true
-		cur = state.FromResults(results, now, red.Clean)
+		build := e.buildState
+		if build == nil {
+			build = state.FromResults
+		}
+		cur = build(results, now, red.Clean)
 		var opts []state.Option
 		if e.ownerOf != nil {
 			opts = append(opts, state.WithOwnerOf(e.ownerOf))
@@ -150,6 +158,14 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 			stateFailed = true
 			in.State.Baseline, in.State.Reason = true, "the state directory is not usable (see warnings)"
 			in.Warnings = append(in.Warnings, fmt.Sprintf("state is neither read nor written: %v", serr))
+		} else if cerr := state.CheckConsistency(cur); cerr != nil {
+			// The state this run built contradicts itself: a diff over it
+			// would be silently wrong, and saving it would hand the same
+			// contradiction to the next run. This is a keepwatch defect, not
+			// a property of the host.
+			stateFailed = true
+			in.State.Baseline, in.State.Reason = true, "the state of this run is inconsistent (see warnings)"
+			in.Warnings = append(in.Warnings, fmt.Sprintf("internal inconsistency in the state of this run, it is neither compared nor saved: %v", cerr))
 		} else if lr, lerr := store.Load(); lerr != nil {
 			stateFailed = true
 			in.State.Baseline, in.State.Reason = true, "the state directory is not usable (see warnings)"
