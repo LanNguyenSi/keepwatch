@@ -1,0 +1,20 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following packages were automatically installed and are no longer required:
+  libtirpc-common libtirpc3t64
+Use 'apt autoremove' to remove them.
+The following packages will be upgraded:
+  e2fsprogs libcom-err2 libext2fs2t64 libss2 logsave
+5 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Inst logsave [1.47.0-2.4~exp1ubuntu4] (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Inst libext2fs2t64 [1.47.0-2.4~exp1ubuntu4] (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64]) [e2fsprogs:arm64 on libext2fs2t64:arm64] [e2fsprogs:arm64 ]
+Conf libext2fs2t64 (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64]) [e2fsprogs:arm64 ]
+Inst e2fsprogs [1.47.0-2.4~exp1ubuntu4] (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Inst libcom-err2 [1.47.0-2.4~exp1ubuntu4] (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Inst libss2 [1.47.0-2.4~exp1ubuntu4] (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Conf logsave (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Conf e2fsprogs (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Conf libcom-err2 (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])
+Conf libss2 (1.47.0-2.4~exp1ubuntu4.1 Ubuntu:24.04/noble-updates [arm64])

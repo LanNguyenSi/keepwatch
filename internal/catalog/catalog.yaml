@@ -114,3 +114,53 @@ checks:
     severity: medium
     rationale: A pending reboot means a kernel or core library update is installed but not running, so the fix is not in effect yet.
     fix_hint: Schedule a reboot at a convenient time.
+
+  - id: network.firewall_default
+    title: Incoming traffic is dropped by default
+    kind: firewall_default
+    severity: high
+    rationale: A firewall that accepts incoming packets by default protects only the ports somebody remembered to close. With a default of drop, a new service stays unreachable until it is opened on purpose.
+    fix_hint: Enable ufw with "ufw default deny incoming" and allow the ports you need first (for example "ufw allow OpenSSH"), or set the policy of your nftables input chain or of iptables and ip6tables INPUT to drop.
+
+  - id: updates.security_pending
+    title: No security updates are pending
+    kind: security_updates
+    params:
+      max_list_age_hours: 48
+    severity: high
+    rationale: A pending security update is a known hole with a published fix. The check simulates an upgrade against the package lists the host has and names the packages from a security pocket; it warns when the lists are old, because then it cannot see newer updates.
+    fix_hint: Run "apt update && apt upgrade" (or "apt dist-upgrade") and make sure unattended-upgrades is enabled so the lists are refreshed and security updates are applied.
+
+  - id: docker.exposure
+    title: Docker is not exposed over TCP and no container is overly privileged
+    kind: docker_exposure
+    severity: high
+    rationale: A Docker daemon on a TCP port gives root on the host to anyone who can reach it. A privileged container, one in the host's PID or network namespace, or one with the Docker socket mounted can take over the host as well.
+    fix_hint: Remove tcp:// entries from "hosts" in /etc/docker/daemon.json and -H tcp:// from the dockerd command line, and rerun the flagged containers without --privileged, --pid=host, --network=host and the socket mount. Cover intended exceptions with an exception for the container name.
+
+  - id: ssh.authorized_keys
+    title: Only expected SSH keys are authorized
+    kind: authorized_keys
+    severity: high
+    rationale: Any key in a user's authorized_keys file logs in as that user. A key nobody expects is how an intruder keeps access.
+    fix_hint: Remove the unexpected key from the file named in the evidence, or add its fingerprint to authorized_keys.expected in the keepwatch configuration if it is intended. "ssh-keygen -lf <file>" prints the fingerprints.
+
+  - id: disk.usage
+    title: File systems have free space
+    kind: disk_usage
+    params:
+      warn_percent: 80
+      fail_percent: 90
+    severity: medium
+    rationale: A full disk stops logging, databases and package upgrades, and an unexpectedly filling one often means a runaway log or an attacker's data.
+    fix_hint: Find what grows ("du -xh --max-depth=1 /"), rotate or delete it, or extend the file system. Inodes run out separately from blocks.
+
+  - id: certs.expiry
+    title: Certificates are not about to expire
+    kind: cert_expiry
+    params:
+      warn_days: 30
+      fail_days: 14
+    severity: medium
+    rationale: An expired certificate breaks TLS for every client at once. Renewal jobs fail silently more often than they are noticed.
+    fix_hint: Renew the certificate (for Let's Encrypt, "certbot renew") and check why the scheduled renewal did not.

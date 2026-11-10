@@ -1,0 +1,7 @@
+-P INPUT DROP
+-A INPUT -j ufw-before-logging-input
+-A INPUT -j ufw-before-input
+-A INPUT -j ufw-after-input
+-A INPUT -j ufw-after-logging-input
+-A INPUT -j ufw-reject-input
+-A INPUT -j ufw-track-input

@@ -88,6 +88,11 @@ const trustedMaxOutput = int64(64 << 20)
 // after the address, for example "udp/[fe80::1]%eth0:546") and the owning
 // process names in the detail, shown quoted and sanitised, never
 // interpreted.
+//
+// At most 100 evidence items are returned, sorted by subject: the first 99
+// and a marker item "(N more not shown)"; the summary says "and N more". The
+// status is not affected, and the marker keeps an exception for the listed
+// items from hiding the rest.
 type listeners struct{}
 
 func (listeners) Name() string       { return "listeners" }
@@ -209,17 +214,22 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()], note)})
 		}
 	}
+	// A local user can open tens of thousands of sockets, so the evidence is
+	// limited; the summary and the marker item say how many are not shown.
+	shown, hidden := limitEvidence(ev)
 
 	switch {
 	case len(failures) > 0:
-		return partialError(failures, ev)
+		o := partialError(failures, ev)
+		o.Evidence = shown
+		return o
 	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
 	}
 	return Outcome{
 		Status:   result.Fail,
-		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)),
-		Evidence: ev,
+		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden),
+		Evidence: shown,
 	}
 }
 

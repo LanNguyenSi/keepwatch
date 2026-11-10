@@ -2,6 +2,7 @@ package probes_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -718,4 +719,60 @@ func TestListenersOutputLimits(t *testing.T) {
 			t.Errorf("%s: MaxOutput = %d, want the default (0)", a, v)
 		}
 	}
+}
+
+// A local user can open tens of thousands of sockets. At most 100 evidence
+// items come back, sorted by subject: 99 sockets and a marker that says how
+// many are not shown. The status does not change.
+func TestListenersEvidenceIsLimited(t *testing.T) {
+	flood := func(n int) *fake.FakeRunner {
+		var sb strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&sb, "LISTEN 0 5 0.0.0.0:%d 0.0.0.0:*\n", 10000+i)
+		}
+		return newRunner().AddResult(ssTCP, inline(sb.String(), 0)).AddResult(ssUDP, inline("", 0)).
+			AddResult(ssTCPp, inline("", 0)).AddResult(ssUDPp, inline("", 0))
+	}
+	t.Run("exactly 100 are all shown", func(t *testing.T) {
+		o := exec(listenersProbe(t, nil), flood(100), nil)
+		wantStatus(t, o, result.Fail)
+		if len(o.Evidence) != 100 || strings.Contains(o.Evidence[99].Subject, "more not shown") || strings.Contains(o.Summary, "and") {
+			t.Fatalf("%d items, last %+v, summary %q", len(o.Evidence), o.Evidence[99], o.Summary)
+		}
+	})
+	t.Run("101 are cut", func(t *testing.T) {
+		o := exec(listenersProbe(t, nil), flood(101), nil)
+		wantStatus(t, o, result.Fail)
+		if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(2 more not shown)" {
+			t.Fatalf("%d items, last %+v", len(o.Evidence), o.Evidence[len(o.Evidence)-1])
+		}
+		wantSummary(t, o, "and 2 more")
+	})
+	t.Run("sorted by subject, the first 99 shown", func(t *testing.T) {
+		o := exec(listenersProbe(t, nil), flood(500), nil)
+		wantStatus(t, o, result.Fail)
+		if len(o.Evidence) != 100 {
+			t.Fatalf("%d items", len(o.Evidence))
+		}
+		for i := 1; i < 99; i++ {
+			if o.Evidence[i-1].Subject >= o.Evidence[i].Subject {
+				t.Fatalf("not sorted at %d: %q %q", i, o.Evidence[i-1].Subject, o.Evidence[i].Subject)
+			}
+		}
+		if o.Evidence[0].Subject != "tcp/0.0.0.0:10000" || o.Evidence[98].Subject != "tcp/0.0.0.0:10098" || o.Evidence[99].Subject != "(401 more not shown)" {
+			t.Fatalf("first %q, 99th %q, marker %q", o.Evidence[0].Subject, o.Evidence[98].Subject, o.Evidence[99].Subject)
+		}
+		wantSummary(t, o, "500 listening sockets")
+		wantSummary(t, o, "and 401 more")
+	})
+	t.Run("a partial error is limited the same way", func(t *testing.T) {
+		r := flood(300).AddError(ssUDP, execx.ErrTimeout)
+		o := exec(listenersProbe(t, nil), r, nil)
+		wantStatus(t, o, result.Error)
+		if len(o.Evidence) != 100 {
+			t.Fatalf("%d items", len(o.Evidence))
+		}
+		wantSummary(t, o, "also found")
+		wantSummary(t, o, "and 295 more")
+	})
 }

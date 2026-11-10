@@ -1,0 +1,221 @@
+coreutils:
+  Installed: 8.32-4.1ubuntu1.4
+  Candidate: 8.32-4.1ubuntu1.4
+  Version table:
+ *** 8.32-4.1ubuntu1.4 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     8.32-4.1ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+dmsetup:
+  Installed: 2:1.02.175-2.1ubuntu5
+  Candidate: 2:1.02.175-2.1ubuntu5
+  Version table:
+ *** 2:1.02.175-2.1ubuntu5 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2:1.02.175-2.1ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+gzip:
+  Installed: 1.10-4ubuntu4.2
+  Candidate: 1.10-4ubuntu4.2
+  Version table:
+ *** 1.10-4ubuntu4.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.10-4ubuntu4 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libargon2-1:
+  Installed: 0~20171227-0.3
+  Candidate: 0~20171227-0.3
+  Version table:
+ *** 0~20171227-0.3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libbsd0:
+  Installed: 0.11.5-1
+  Candidate: 0.11.5-1
+  Version table:
+ *** 0.11.5-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libcom-err2:
+  Installed: 1.46.5-2ubuntu1.2
+  Candidate: 1.46.5-2ubuntu1.2
+  Version table:
+ *** 1.46.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.46.5-2ubuntu1.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+     1.46.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libedit2:
+  Installed: 3.1-20210910-1build1
+  Candidate: 3.1-20210910-1build1
+  Version table:
+ *** 3.1-20210910-1build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libgdbm-compat4:
+  Installed: 1.23-1
+  Candidate: 1.23-1
+  Version table:
+ *** 1.23-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libgssapi-krb5-2:
+  Installed: 1.19.2-2ubuntu0.10
+  Candidate: 1.19.2-2ubuntu0.10
+  Version table:
+ *** 1.19.2-2ubuntu0.10 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.19.2-2ubuntu0.8 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+     1.19.2-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libk5crypto3:
+  Installed: 1.19.2-2ubuntu0.10
+  Candidate: 1.19.2-2ubuntu0.10
+  Version table:
+ *** 1.19.2-2ubuntu0.10 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1.19.2-2ubuntu0.8 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+     1.19.2-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+liblzma5:
+  Installed: 5.2.5-2ubuntu1.2
+  Candidate: 5.2.5-2ubuntu1.2
+  Version table:
+ *** 5.2.5-2ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     5.2.5-2ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libnettle8:
+  Installed: 3.7.3-1build2
+  Candidate: 3.7.3-1build2
+  Version table:
+ *** 3.7.3-1build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libpam-cap:
+  Installed: 1:2.44-1ubuntu0.22.04.3
+  Candidate: 1:2.44-1ubuntu0.22.04.3
+  Version table:
+ *** 1:2.44-1ubuntu0.22.04.3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1:2.44-1build3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libperl5.34:
+  Installed: 5.34.0-3ubuntu1.9
+  Candidate: 5.34.0-3ubuntu1.9
+  Version table:
+ *** 5.34.0-3ubuntu1.9 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     5.34.0-3ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libsasl2-2:
+  Installed: 2.1.27+dfsg2-3ubuntu1.2
+  Candidate: 2.1.27+dfsg2-3ubuntu1.2
+  Version table:
+ *** 2.1.27+dfsg2-3ubuntu1.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2.1.27+dfsg2-3ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libsmartcols1:
+  Installed: 2.37.2-4ubuntu3.6
+  Candidate: 2.37.2-4ubuntu3.6
+  Version table:
+ *** 2.37.2-4ubuntu3.6 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2.37.2-4ubuntu3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libtinfo6:
+  Installed: 6.3-2ubuntu0.3
+  Candidate: 6.3-2ubuntu0.3
+  Version table:
+ *** 6.3-2ubuntu0.3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     6.3-2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libx11-data:
+  Installed: 2:1.7.5-1ubuntu0.4
+  Candidate: 2:1.7.5-1ubuntu0.4
+  Version table:
+ *** 2:1.7.5-1ubuntu0.4 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2:1.7.5-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+libxxhash0:
+  Installed: 0.8.1-1
+  Candidate: 0.8.1-1
+  Version table:
+ *** 0.8.1-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+mount:
+  Installed: 2.37.2-4ubuntu3.6
+  Candidate: 2.37.2-4ubuntu3.6
+  Version table:
+ *** 2.37.2-4ubuntu3.6 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     2.37.2-4ubuntu3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+openssh-server:
+  Installed: 1:8.9p1-3ubuntu0.18
+  Candidate: 1:8.9p1-3ubuntu0.18
+  Version table:
+ *** 1:8.9p1-3ubuntu0.18 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+        100 /var/lib/dpkg/status
+     1:8.9p1-3 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+publicsuffix:
+  Installed: 20211207.1025-1
+  Candidate: 20211207.1025-1
+  Version table:
+ *** 20211207.1025-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+readline-common:
+  Installed: 8.1.2-1
+  Candidate: 8.1.2-1
+  Version table:
+ *** 8.1.2-1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+sysvinit-utils:
+  Installed: 3.01-1ubuntu1
+  Candidate: 3.01-1ubuntu1
+  Version table:
+ *** 3.01-1ubuntu1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+xauth:
+  Installed: 1:1.1-1build2
+  Candidate: 1:1.1-1build2
+  Version table:
+ *** 1:1.1-1build2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status

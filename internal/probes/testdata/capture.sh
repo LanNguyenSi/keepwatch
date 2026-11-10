@@ -9,6 +9,14 @@
 # and binds sockets to devices.
 # Systemd containers: the same packages plus systemd, systemd-sysv, started
 # with /sbin/init as PID 1 (privileged).
+#
+# KW_SECTIONS selects what to capture: a comma separated list of base,
+# firewall, apt, aptrepo, aptphased, keys, keycases, certs, disk, docker (default: all). The last six
+# sections run in the plain containers, which need the extra packages ufw,
+# nftables, iptables, apt, openssh-client, openssl, e2fsprogs, util-linux
+# (setpriv), docker.io and curl; the docker section starts its own dockerd
+# there (storage driver vfs, so it works inside a container) and leaves the
+# firewall in the state the docker section describes.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 
@@ -41,7 +49,16 @@ capss() {
   cap "$1" "$2" "ssp_udp_$3" ss -Hlunp
 }
 
+# want <section>: whether KW_SECTIONS selects the section.
+want() {
+  case ",${KW_SECTIONS:-all}," in
+    *,all,* | *,"$1",*) return 0 ;;
+  esac
+  return 1
+}
+
 for v in 2204 2404; do
+  want base || continue
   eval "plain=\$KW_PLAIN_$v sd=\$KW_SYSTEMD_$v"
   d=ubuntu$v
 
@@ -120,4 +137,317 @@ for v in 2204 2404; do
   # ---- needrestart ---------------------------------------------------
   cap "$plain" $d needrestart_kernel needrestart -b -k -r l
   cap "$sd" $d needrestart_kernel_in_container needrestart -b -k -r l
+done
+
+# ---- sections added for the second group of kinds ---------------------------
+# They run in the plain containers only.
+
+# The state the firewall scenarios start from: no ufw, no nft rules, iptables
+# and ip6tables accept everything, ufw manages IPv6 too.
+fwreset() {
+  ex "$1" 'ufw --force disable >/dev/null 2>&1 || true
+    nft flush ruleset; iptables -F; iptables -X; ip6tables -F; ip6tables -X
+    for t in iptables ip6tables; do $t -P INPUT ACCEPT; $t -P FORWARD ACCEPT; $t -P OUTPUT ACCEPT; done
+    sed -i "s/^IPV6=.*/IPV6=yes/" /etc/default/ufw'
+}
+
+# fwcap <container> <dest-dir> <scenario>: the four commands of firewall_default.
+fwcap() {
+  cap "$1" "$2" "fw_$3_ufw" ufw status verbose
+  cap "$1" "$2" "fw_$3_nft" nft -j list ruleset
+  cap "$1" "$2" "fw_$3_iptables" iptables -S INPUT
+  cap "$1" "$2" "fw_$3_ip6tables" ip6tables -S INPUT
+  # the variant ("(nf_tables)" or "(legacy)") decides what a DROP of iptables means
+  cap "$1" "$2" "fw_$3_iptablesV" iptables -V
+  cap "$1" "$2" "fw_$3_ip6tablesV" ip6tables -V
+}
+
+for v in 2204 2404; do
+  eval "plain=\$KW_PLAIN_$v"
+  d=ubuntu$v
+  [ -n "$plain" ] || continue
+
+  # ---- firewall_default: ufw status verbose, nft -j list ruleset, iptables -S INPUT, ip6tables -S INPUT
+  if want firewall; then
+    fwreset "$plain"; fwcap "$plain" $d none
+    fwreset "$plain"
+    ex "$plain" 'ufw default deny incoming >/dev/null; ufw --force enable >/dev/null'
+    fwcap "$plain" $d ufw_deny
+    ex "$plain" 'ufw default reject incoming >/dev/null'
+    fwcap "$plain" $d ufw_reject
+    ex "$plain" 'ufw default allow incoming >/dev/null'
+    fwcap "$plain" $d ufw_allow
+    # ufw still says deny, but somebody reset the policies behind its back
+    ex "$plain" 'ufw default deny incoming >/dev/null; iptables -P INPUT ACCEPT; ip6tables -P INPUT ACCEPT'
+    fwcap "$plain" $d ufw_stale
+    fwreset "$plain"
+    nftdrop() { ex "$plain" "nft add table $1 kw; nft add chain $1 kw input '{ type filter hook input priority 0; policy $2; }'"; }
+    nftdrop inet drop; fwcap "$plain" $d nft_drop_inet
+    fwreset "$plain"; nftdrop ip drop; fwcap "$plain" $d nft_drop_ip4
+    fwreset "$plain"; nftdrop ip6 drop; fwcap "$plain" $d nft_drop_ip6
+    fwreset "$plain"; nftdrop inet accept; fwcap "$plain" $d nft_accept_inet
+    # a forward chain with policy drop (what Docker sets up) is not a default policy for incoming packets
+    fwreset "$plain"
+    ex "$plain" "nft add table inet kw; nft add chain inet kw forward '{ type filter hook forward priority 0; policy drop; }'; nft add chain inet kw input '{ type filter hook input priority 0; policy accept; }'"
+    fwcap "$plain" $d nft_forward_drop
+    # a table that is not hooked
+    fwreset "$plain"
+    ex "$plain" "nft add table inet kw '{ flags dormant; }'; nft add chain inet kw input '{ type filter hook input priority 0; policy drop; }'"
+    fwcap "$plain" $d nft_dormant
+    fwreset "$plain"
+    ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP'
+    fwcap "$plain" $d ipt_drop
+    fwreset "$plain"; ex "$plain" 'iptables -P INPUT DROP'; fwcap "$plain" $d ipt_drop4
+    # iptables-nft prints the policy of a table that nft has made dormant
+    # (not hooked: packets are accepted), for both families and for IPv6 only
+    fwreset "$plain"
+    ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP; nft add table ip filter "{ flags dormant; }"; nft add table ip6 filter "{ flags dormant; }"'
+    fwcap "$plain" $d ipt_drop_dormant
+    fwreset "$plain"
+    ex "$plain" 'iptables -P INPUT DROP; ip6tables -P INPUT DROP; nft add table ip6 filter "{ flags dormant; }"'
+    fwcap "$plain" $d ipt_drop_dormant6
+    # the same four commands as an unprivileged user
+    nb="setpriv --reuid=65534 --regid=65534 --clear-groups"
+    cap "$plain" $d fw_notroot_ufw $nb ufw status verbose
+    cap "$plain" $d fw_notroot_nft $nb nft -j list ruleset
+    cap "$plain" $d fw_notroot_iptables $nb iptables -S INPUT
+    cap "$plain" $d fw_notroot_ip6tables $nb ip6tables -S INPUT
+    cap "$plain" $d fw_notroot_iptablesV $nb iptables -V
+    cap "$plain" $d fw_notroot_ip6tablesV $nb ip6tables -V
+    # The legacy variant of iptables programs xtables, not nftables. It comes
+    # last: once a legacy table exists in the container's network namespace,
+    # iptables-nft prints "iptables-legacy tables present" on stderr.
+    fwreset "$plain"
+    ex "$plain" 'update-alternatives --set iptables /usr/sbin/iptables-legacy >/dev/null; update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >/dev/null
+      iptables -P INPUT DROP; ip6tables -P INPUT DROP'
+    fwcap "$plain" $d ipt_legacy_drop
+    ex "$plain" 'iptables -P INPUT ACCEPT; ip6tables -P INPUT ACCEPT
+      update-alternatives --set iptables /usr/sbin/iptables-nft >/dev/null; update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >/dev/null'
+  fi
+
+  # ---- security_updates: apt-get -s -o Debug::NoLocking=true dist-upgrade -------
+  if want apt; then
+    # the options keep apt from writing its cache files (/var/cache/apt/*.bin)
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    apt="apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade"
+    # polcap <name>: apt-cache policy for the packages the simulation upgrades,
+    # in the order the probe asks for them (sorted, one batch)
+    polcap() {
+      cap "$plain" $d "$1" bash -c "export LC_ALL=C; sim=\$($apt); names=\$({ echo \"\$sim\" | sed -n 's/^Inst \\([^ ]*\\) \\[.*/\\1/p' | sort; echo \"\$sim\" | awk '/^The following packages have been kept back:/{k=1;next} k&&/^ /{for(i=1;i<=NF;i++)print \$i;next} {k=0}' | sort; } | tr '\\n' ' '); apt-cache $nocache policy -- \$names"
+    }
+    # start from a host with pending updates: put apt, libpcre2 and the apt
+    # library back to the versions of the release pocket
+    ex "$plain" '. /etc/os-release; pk=""
+      for p in apt libpcre2-8-0 $(dpkg-query -W -f="\${Package}\n" "libapt-pkg*" | grep -E "^libapt-pkg[0-9]"); do
+        ver=$(apt-cache madison "$p" | awk -v s="$VERSION_CODENAME/" "index(\$0, s) && !/-updates|-security/ {print \$3; exit}")
+        [ -n "$ver" ] && pk="$pk $p=$ver"
+      done
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk >/dev/null 2>&1'
+    cap "$plain" $d apt_pending $apt
+    polcap apt_policy_pending
+    # a slice of the corpus the apt parsers are tested against: the simulation
+    # and apt-cache policy for the packages it upgrades, for every 8th installed
+    # package and for 40 package names out of the whole archive (testdata/aptcorpus.sh
+    # writes the full corpus with KW_CORPUS_INSTALLED_EVERY=1 and KW_CORPUS_SAMPLE=3000)
+    docker cp "$here/aptcorpus.sh" "$plain:/tmp/aptcorpus.sh"
+    ex "$plain" 'KW_CORPUS_INSTALLED_EVERY=8 KW_CORPUS_SAMPLE=40 bash /tmp/aptcorpus.sh /tmp/kwcorpus >/dev/null'
+    rm -rf "$here/$d/aptcorpus"
+    docker cp "$plain:/tmp/kwcorpus" "$here/$d/aptcorpus"
+    ex "$plain" 'rm -rf /tmp/kwcorpus /tmp/aptcorpus.sh'
+    # the same simulation against a source list without the security suite: the
+    # packages are then available from -updates only
+    ex "$plain" '. /etc/os-release
+      f=$(ls /var/lib/apt/lists | grep -- "-updates_InRelease$" | head -1); base=${f%%_dists_*}; uri="http://${base//_//}"
+      printf "deb %s %s main restricted universe multiverse\ndeb %s %s-updates main restricted universe multiverse\n" "$uri" "$VERSION_CODENAME" "$uri" "$VERSION_CODENAME" > /tmp/kw-nosecurity.list'
+    cap "$plain" $d apt_updates_only apt-get -s -o Debug::NoLocking=true $nocache -o Dir::Etc::sourcelist=/tmp/kw-nosecurity.list -o Dir::Etc::sourceparts=/nonexistent dist-upgrade
+    cap "$plain" $d apt_policy_updates_only bash -c "export LC_ALL=C; so='-o Dir::Etc::sourcelist=/tmp/kw-nosecurity.list -o Dir::Etc::sourceparts=/nonexistent'; names=\$(apt-get -s -o Debug::NoLocking=true $nocache \$so dist-upgrade | sed -n 's/^Inst \\([^ ]*\\) .*/\\1/p' | sort | tr '\\n' ' '); apt-cache $nocache \$so policy -- \$names"
+    ex "$plain" 'rm -f /tmp/kw-nosecurity.list'
+    cap "$plain" $d apt_notroot setpriv --reuid=65534 --regid=65534 --clear-groups $apt
+    # a failing run: the dpkg status file is replaced by one that does not parse
+    ex "$plain" 'printf "Package: foo\nthis is not\n a valid control stanza\n\n\0garbage" > /tmp/kw-badstatus'
+    cap "$plain" $d apt_error apt-get -s -o Debug::NoLocking=true $nocache -o Dir::State::status=/tmp/kw-badstatus dist-upgrade
+    ex "$plain" 'rm -f /tmp/kw-badstatus'
+    ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
+    cap "$plain" $d apt_current $apt
+    # a security fix that a newer -updates version has superseded: one package
+    # goes back to the release pocket's version, while the security pocket
+    # carries a version in between and the updates pocket one above it
+    case $v in 2204) sup=libapparmor1 ;; 2404) sup=krb5-locales ;; esac
+    ex "$plain" '. /etc/os-release
+      ver=$(apt-cache madison '$sup' | awk -v s="$VERSION_CODENAME/" "index(\$0, s) && !/-updates|-security/ {print \$3; exit}")
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades '$sup'="$ver" >/dev/null 2>&1'
+    cap "$plain" $d apt_superseded $apt
+    polcap apt_policy_superseded
+    cap "$plain" $d apt_policy_superseded_one apt-cache $nocache policy -- $sup
+    ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
+    # Inst lines that end in annotation groups: the e2fsprogs family back to the
+    # release pocket's versions
+    ex "$plain" '. /etc/os-release; pk=""
+      for p in e2fsprogs libext2fs2 libext2fs2t64 libcom-err2 libss2 logsave; do
+        dpkg-query -W -f="\${Status}" $p 2>/dev/null | grep -q "install ok installed" || continue
+        ver=$(apt-cache madison "$p" | awk -v s="$VERSION_CODENAME/" "index(\$0, s) && !/-updates|-security/ {print \$3; exit}")
+        pk="$pk $p=$ver"
+      done
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk >/dev/null 2>&1'
+    cap "$plain" $d apt_annotations $apt
+    polcap apt_policy_annotations
+    ex "$plain" 'DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq >/dev/null 2>&1'
+  fi
+
+  # ---- security_updates against a local repository: held back, blocked, phased ----
+  # kwtest 1.0 is installed; the security and updates suites hold newer versions
+  # (see aptrepo.sh for the scenarios). The simulation and apt-cache policy, as
+  # the probe asks for them (the package kwtest is named by the simulation or
+  # by the list of kept back packages).
+  if want aptrepo; then
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    docker cp "$here/aptrepo.sh" "$plain:/tmp/aptrepo.sh"
+    for sc in plain superseded phased phasedonly secphased hold holdupdate newdep; do
+      ex "$plain" "bash /tmp/aptrepo.sh $sc"
+      cap "$plain" $d "aptlr_$sc" apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade
+      cap "$plain" $d "aptlr_${sc}_policy" apt-cache $nocache policy -- kwtest
+    done
+    ex "$plain" 'bash /tmp/aptrepo.sh restore; rm -f /tmp/aptrepo.sh'
+  fi
+
+  # ---- security_updates: a phased update in the real archive (22.04 has some) ----
+  if want aptphased; then
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    pk=libnvidia-common-535-server
+    if docker exec "$plain" bash -c "apt-cache dumpavail | awk '/^Package: $pk\$/{p=1} p&&/^Phased-Update-Percentage:/{f=1} /^\$/{p=0} END{exit !f}'"; then
+      ex "$plain" "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk=535.288.01-0ubuntu0.22.04.1 >/dev/null 2>&1"
+      cap "$plain" $d apt_real_phased apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade
+      cap "$plain" $d apt_policy_real_phased apt-cache $nocache policy -- $pk
+      ex "$plain" "DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq $pk >/dev/null 2>&1; apt-get dist-upgrade -y -qq >/dev/null 2>&1"
+    else
+      echo "capture.sh: no package with a Phased-Update-Percentage on $d, no apt_real_phased fixture" >&2
+    fi
+  fi
+
+  # ---- authorized_keys: key files and the sshd -T lines that name them -----------
+  if want keys; then
+    ex "$plain" 'rm -rf /tmp/kwkeys; mkdir /tmp/kwkeys; cd /tmp/kwkeys
+      ssh-keygen -q -t ed25519 -N "" -C kw-ed25519 -f ed25519
+      ssh-keygen -q -t rsa -b 2048 -N "" -C kw-rsa -f rsa
+      ssh-keygen -q -t ecdsa -b 256 -N "" -C kw-ecdsa -f ecdsa
+      ssh-keygen -q -t ed25519 -N "" -C kw-ca -f ca
+      ssh-keygen -q -s ca -I kw-cert -n kwuser -V +52w ed25519.pub'
+    mkdir -p "$here/$d"
+    for k in ed25519 rsa ecdsa; do
+      docker cp "$plain:/tmp/kwkeys/$k.pub" "$here/$d/sshkey_$k.pub"
+      cap "$plain" $d "sshkey_${k}_fp" ssh-keygen -lf "/tmp/kwkeys/$k.pub"
+    done
+    docker cp "$plain:/tmp/kwkeys/ed25519-cert.pub" "$here/$d/sshkey_cert.pub"
+    cap "$plain" $d sshkey_cert_fp ssh-keygen -lf /tmp/kwkeys/ed25519-cert.pub
+    ex "$plain" 'rm -rf /tmp/kwkeys'
+    # accounts: a login user, a user without a login shell, one with the default shell
+    ex "$plain" 'id alice >/dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash alice
+      id svc >/dev/null 2>&1 || useradd -m -u 1002 -s /usr/sbin/nologin svc
+      id bob >/dev/null 2>&1 || useradd -m -u 1003 bob'
+    cap "$plain" $d etc_passwd cat /etc/passwd
+    ex "$plain" 'mkdir -p /run/sshd /etc/ssh/sshd_config.d
+      printf "AuthorizedKeysFile %%h/.ssh/authorized_keys /etc/ssh/keys/%%u .ssh/ak_%%U\nAuthorizedKeysCommand /usr/local/bin/kwkeys %%u\nAuthorizedKeysCommandUser nobody\n" > /etc/ssh/sshd_config.d/10-keys.conf'
+    cap "$plain" $d sshd_T_authkeys_custom sshd -T
+    ex "$plain" 'printf "AuthorizedKeysFile none\n" > /etc/ssh/sshd_config.d/10-keys.conf'
+    cap "$plain" $d sshd_T_authkeys_none sshd -T
+    ex "$plain" 'rm -f /etc/ssh/sshd_config.d/10-keys.conf'
+  fi
+
+  # ---- authorized_keys line parser: hard lines and what ssh-keygen -lf makes of each
+  if want keycases; then
+    docker cp "$here/keycases.sh" "$plain:/tmp/keycases.sh"
+    ex "$plain" 'bash /tmp/keycases.sh /tmp/kwkc'
+    rm -rf "$here/$d/keycases"
+    docker cp "$plain:/tmp/kwkc" "$here/$d/keycases"
+    ex "$plain" 'rm -rf /tmp/kwkc /tmp/keycases.sh'
+  fi
+
+  # ---- cert_expiry: certificates and what openssl says about them ----------------
+  if want certs; then
+    ex "$plain" 'rm -rf /tmp/kwcert; mkdir /tmp/kwcert; cd /tmp/kwcert
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout leaf.key -out leaf.pem -days 90 -subj "/CN=kw-leaf.example.test" 2>/dev/null
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout ca.key -out ca.pem -days 365 -subj "/CN=kw-ca.example.test" 2>/dev/null
+      cat leaf.pem ca.pem > chain.pem'
+    docker cp "$plain:/tmp/kwcert/leaf.pem" "$here/$d/cert_leaf.pem"
+    docker cp "$plain:/tmp/kwcert/chain.pem" "$here/$d/cert_chain.pem"
+    cap "$plain" $d cert_leaf_info openssl x509 -noout -subject -enddate -in /tmp/kwcert/leaf.pem
+    cap "$plain" $d cert_ca_info openssl x509 -noout -subject -enddate -in /tmp/kwcert/ca.pem
+    ex "$plain" 'rm -rf /tmp/kwcert'
+  fi
+
+  # ---- docker_exposure: docker ps / inspect, daemon.json, the dockerd command line
+  if want docker; then
+    stopdockerd() {
+      # a dead dockerd stays in the process table as a zombie (nothing reaps it
+      # in a container whose PID 1 is sleep), so only live ones count
+      ex "$plain" 'alive() { local p; for p in $(pgrep -x dockerd); do [ "$(cut -d" " -f3 /proc/$p/stat)" = Z ] || return 0; done; return 1; }
+        pkill -x dockerd || true
+        for i in $(seq 1 40); do alive || break; sleep 1; done; ! alive; rm -f /run/docker.pid'
+    }
+    startdockerd() { # [dockerd arguments]
+      docker exec -d "$plain" bash -c "dockerd $* >/tmp/dockerd.log 2>&1"
+      ex "$plain" 'for i in $(seq 1 40); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+    }
+    stopdockerd
+    # vfs: overlay does not work for a dockerd that runs inside a container
+    ex "$plain" 'mkdir -p /etc/docker; printf "{\n  \"storage-driver\": \"vfs\",\n  \"features\": {\"containerd-snapshotter\": false}\n}\n" > /etc/docker/daemon.json'
+    cap "$plain" $d daemon_json_plain cat /etc/docker/daemon.json
+    startdockerd
+    cap "$plain" $d docker_pid cat /run/docker.pid
+    cap "$plain" $d dockerd_cmdline_plain bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    cap "$plain" $d dockerd_comm bash -c 'cat /proc/$(cat /run/docker.pid)/comm'
+    cap "$plain" $d dockerd_proc_owner bash -c 'stat -c %u /proc/$(cat /run/docker.pid)'
+    cap "$plain" $d docker_ps_none docker ps -q --no-trunc
+    fwcap "$plain" $d docker
+    ex "$plain" 'docker image inspect alpine:3 >/dev/null 2>&1 || docker pull -q alpine:3 >/dev/null
+      for n in kwplain kwpriv kwhostpid kwhostnet kwsock kwall; do docker rm -f $n >/dev/null 2>&1 || true; done
+      docker run -d --name kwplain alpine:3 sleep 3000 >/dev/null
+      docker run -d --name kwpriv --privileged alpine:3 sleep 3000 >/dev/null
+      docker run -d --name kwhostpid --pid=host alpine:3 sleep 3000 >/dev/null
+      docker run -d --name kwhostnet --network=host alpine:3 sleep 3000 >/dev/null
+      docker run -d --name kwsock -v /var/run/docker.sock:/var/run/docker.sock:ro alpine:3 sleep 3000 >/dev/null
+      docker run -d --name kwall --privileged --pid=host --network=host -v /run/docker.sock:/tmp/d.sock alpine:3 sleep 3000 >/dev/null'
+    cap "$plain" $d docker_ps_mixed docker ps -q --no-trunc
+    cap "$plain" $d docker_inspect_mixed bash -c 'docker inspect --type container -- $(docker ps -q --no-trunc)'
+    cap "$plain" $d docker_inspect_gone bash -c 'docker inspect --type container -- $(docker ps -q --no-trunc | head -1) 0000000000000000000000000000000000000000000000000000000000000000'
+    # the container network is Docker's own bridge; its addresses and the random
+    # MAC addresses are replaced by documentation values (192.0.2.0/24, 02:..)
+    for f in docker_inspect_mixed docker_inspect_gone fw_docker_nft; do
+      sed -E -i.bak 's/172\.[0-9]+\.0\.([0-9]+)/192.0.2.\1/g; s/([0-9a-f]{2}:){5}[0-9a-f]{2}/02:00:00:00:00:01/g' "$here/$d/$f.stdout" && rm -f "$here/$d/$f.stdout.bak"
+    done
+    # a daemon that listens on TCP: once by the configuration file, once by flags
+    stopdockerd
+    ex "$plain" 'printf "{\n  \"storage-driver\": \"vfs\",\n  \"features\": {\"containerd-snapshotter\": false},\n  \"hosts\": [\"unix:///var/run/docker.sock\", \"tcp://127.0.0.1:2375\"]\n}\n" > /etc/docker/daemon.json'
+    cap "$plain" $d daemon_json_tcp cat /etc/docker/daemon.json
+    startdockerd
+    ex "$plain" 'docker -H tcp://127.0.0.1:2375 version >/dev/null'
+    cap "$plain" $d dockerd_cmdline_hostsfile bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    stopdockerd
+    ex "$plain" 'printf "{\n  \"storage-driver\": \"vfs\",\n  \"features\": {\"containerd-snapshotter\": false}\n}\n" > /etc/docker/daemon.json'
+    startdockerd -H unix:///var/run/docker.sock -H tcp://127.0.0.1:2375
+    ex "$plain" 'docker -H tcp://127.0.0.1:2375 version >/dev/null'
+    cap "$plain" $d dockerd_cmdline_tcp bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    stopdockerd
+    # single-dash letters combined: pflag reads -DH as -D and -H, and this
+    # daemon listens on TCP only
+    docker exec -d "$plain" bash -c "dockerd -DH tcp://127.0.0.1:2375 >/tmp/dockerd.log 2>&1"
+    ex "$plain" 'for i in $(seq 1 40); do docker -H tcp://127.0.0.1:2375 info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+    cap "$plain" $d dockerd_cmdline_group bash -c 'cat /proc/$(cat /run/docker.pid)/cmdline'
+    stopdockerd
+    cap "$plain" $d docker_ps_nodaemon docker ps -q --no-trunc
+    ex "$plain" 'rm -f /etc/docker/daemon.json'
+  fi
+
+  # ---- disk_usage: /proc/self/mountinfo with escaped mount points --------------
+  if want disk; then
+    ex "$plain" 'umount "/mnt/kw ext4" 2>/dev/null || true; rm -rf /mnt/kw*; mkdir -p "/mnt/kw ext4" "/mnt/kw tmp" /mnt/kw-tab /mnt/kw-nl
+      mkdir -p "$(printf "/mnt/kw\\\\back")"
+      truncate -s 24M /tmp/kw.img; mkfs.ext4 -q -F /tmp/kw.img
+      mount -o loop /tmp/kw.img "/mnt/kw ext4"
+      mount -t tmpfs tmpfs "/mnt/kw tmp"
+      mount -t tmpfs tmpfs "$(printf "/mnt/kw\\\\back")"
+      nl="$(printf "/mnt/kw-nl\\nline")"; mkdir -p "$nl"; mount -t tmpfs tmpfs "$nl"'
+    cap "$plain" $d mountinfo cat /proc/self/mountinfo
+    ex "$plain" 'umount "$(printf "/mnt/kw-nl\\nline")" "$(printf "/mnt/kw\\\\back")" "/mnt/kw tmp" "/mnt/kw ext4"; rm -rf /mnt/kw* /tmp/kw.img'
+  fi
 done

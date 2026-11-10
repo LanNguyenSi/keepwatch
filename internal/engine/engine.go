@@ -44,8 +44,11 @@ type Deps struct {
 	Runner execx.Runner
 	// FS reads files for probes.
 	FS probes.FS
-	// Now returns the current time; exception expiry is decided with it.
+	// Now returns the current time; exception expiry and the probes that
+	// compare dates are decided with it.
 	Now func() time.Time
+	// Statfs reads file system usage for disk_usage; nil means the host's.
+	Statfs probes.StatfsFunc
 }
 
 // Programs returns the sorted union of the program base names the catalog's
@@ -174,14 +177,18 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 	expired := p.cfg.ExpiredExceptions(now)
 
 	env := &probes.Env{
-		Runner:        newCachingRunner(p.deps.Runner),
-		FS:            p.deps.FS,
-		ListenerAllow: listenerRules(p.cfg),
+		Runner:         newCachingRunner(p.deps.Runner),
+		FS:             p.deps.FS,
+		ListenerAllow:  listenerRules(p.cfg),
+		AuthorizedKeys: p.cfg.AuthorizedKeys.Expected,
+		Statfs:         p.deps.Statfs,
+		Now:            p.deps.Now,
 	}
 
 	out := make([]result.Result, 0, len(p.checks)+len(expired))
 	for _, pc := range p.checks {
 		r := result.Result{CheckID: pc.entry.ID, Kind: pc.entry.Kind, Severity: pc.severity, Evidence: []result.Evidence{}}
+		var warnings []result.Evidence
 		switch {
 		case !pc.enabled:
 			r.Status, r.Summary = result.Skipped, "disabled in the configuration"
@@ -193,8 +200,9 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 			if o.Evidence != nil {
 				r.Evidence = o.Evidence
 			}
+			warnings = o.Warnings
 		}
-		applyExceptions(&r, active)
+		applyExceptions(&r, active, warnings)
 		out = append(out, r)
 	}
 	for _, e := range expired {
@@ -211,7 +219,7 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 			Summary:  fmt.Sprintf("the exception for %s expired on %s", subject, on),
 			Evidence: []result.Evidence{{Subject: subject, Detail: fmt.Sprintf("expired on %s; reason was: %s", on, e.Reason)}},
 		}
-		applyExceptions(&r, active)
+		applyExceptions(&r, active, nil)
 		out = append(out, r)
 	}
 	return out
@@ -230,11 +238,18 @@ func listenerRules(cfg *config.Config) []probes.ListenerRule {
 // An exception with an empty match covers the whole check. One with a match
 // covers the evidence items whose subject equals it exactly. If the whole
 // check is covered, or the result has evidence and every item is covered,
-// the status becomes excepted; otherwise it stays fail and the covered items
+// the failure is excepted; otherwise it stays fail and the covered items
 // carry excepted and their reason. Results that did not fail (pass, error,
 // skipped) are never touched: an exception cannot turn an error into
 // anything else.
-func applyExceptions(r *result.Result, active []config.Exception) {
+//
+// An excepted failure becomes the status excepted, unless the probe found
+// warnings next to it: an exception removes failures only, so a check whose
+// failures are all excepted but whose warnings remain is a warn, its
+// evidence the warnings, and its summary says that the failing items are
+// excepted. When only some of the failing items are covered the status stays
+// fail and the warnings stay out of the evidence, as without any exception.
+func applyExceptions(r *result.Result, active []config.Exception, warnings []result.Evidence) {
 	if r.Status != result.Fail {
 		return
 	}
@@ -271,10 +286,17 @@ func applyExceptions(r *result.Result, active []config.Exception) {
 		return
 	}
 	r.ExceptionReasons = reasons
-	if all {
-		r.Status = result.Excepted
-		r.Summary += " (excepted: " + strings.Join(reasons, "; ") + ")"
+	if !all {
+		return
 	}
+	if len(warnings) > 0 {
+		r.Status = result.Warn
+		r.Evidence = append([]result.Evidence(nil), warnings...)
+		r.Summary += fmt.Sprintf(" (failing items excepted: %s); %d warning(s) remain", strings.Join(reasons, "; "), len(warnings))
+		return
+	}
+	r.Status = result.Excepted
+	r.Summary += " (excepted: " + strings.Join(reasons, "; ") + ")"
 }
 
 func appendUnique(list []string, s string) []string {

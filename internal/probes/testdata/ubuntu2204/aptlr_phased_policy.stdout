@@ -1,0 +1,11 @@
+kwtest:
+  Installed: 1.0
+  Candidate: 1.2
+  Version table:
+     1.2 500 (phased 0%)
+        500 file:/srv/kwrepo jammy-updates/main arm64 Packages
+     1.1 500
+        500 file:/srv/kwrepo jammy-security/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo jammy/main arm64 Packages
+        100 /var/lib/dpkg/status

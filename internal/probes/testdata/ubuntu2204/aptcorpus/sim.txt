@@ -1,0 +1,13 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following packages will be upgraded:
+  apt libapt-pkg6.0 libpcre2-8-0
+3 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Inst libapt-pkg6.0 [2.4.5] (2.4.15ubuntu0.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Conf libapt-pkg6.0 (2.4.15ubuntu0.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Inst apt [2.4.5] (2.4.15ubuntu0.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Conf apt (2.4.15ubuntu0.1 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Inst libpcre2-8-0 [10.39-3build1] (10.39-3ubuntu0.2 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])
+Conf libpcre2-8-0 (10.39-3ubuntu0.2 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [arm64])

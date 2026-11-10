@@ -13,13 +13,17 @@ import (
 )
 
 func TestRegistry(t *testing.T) {
-	want := []string{"fail2ban_jail", "listeners", "package_installed", "reboot_required", "service_active", "sshd_effective"}
+	want := []string{
+		"authorized_keys", "cert_expiry", "disk_usage", "docker_exposure", "fail2ban_jail", "firewall_default", "listeners",
+		"package_installed", "reboot_required", "security_updates", "service_active", "sshd_effective",
+	}
 	if got := probes.Names(); !eq(got, want) {
 		t.Fatalf("Names = %v, want %v", got, want)
 	}
+	noPrograms := map[string]bool{"cert_expiry": true, "disk_usage": true} // these read files and the kernel only
 	for _, n := range want {
 		k, ok := probes.Lookup(n)
-		if !ok || k.Name() != n || len(k.Programs()) == 0 {
+		if !ok || k.Name() != n || (len(k.Programs()) == 0) != noPrograms[n] {
 			t.Fatalf("kind %s: %v %v", n, k, ok)
 		}
 	}
@@ -34,6 +38,13 @@ func TestPrograms(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := []string{"dpkg-query", "fail2ban-client", "needrestart", "sshd", "ss", "systemctl"}; !eq(got, sorted(want)) {
+		t.Fatalf("Programs = %v", got)
+	}
+	got, err = probes.Programs("firewall_default", "security_updates", "docker_exposure", "authorized_keys", "disk_usage", "cert_expiry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"apt-cache", "apt-get", "docker", "ip6tables", "iptables", "nft", "sshd", "ufw"}; !eq(got, sorted(want)) {
 		t.Fatalf("Programs = %v", got)
 	}
 	if got, err := probes.Programs(); err != nil || len(got) != 0 {

@@ -1,0 +1,30 @@
+apt:
+  Installed: 2.4.5
+  Candidate: 2.4.15ubuntu0.1
+  Version table:
+     2.4.15ubuntu0.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 2.4.5 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libapt-pkg6.0:
+  Installed: 2.4.5
+  Candidate: 2.4.15ubuntu0.1
+  Version table:
+     2.4.15ubuntu0.1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 2.4.5 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
+libpcre2-8-0:
+  Installed: 10.39-3build1
+  Candidate: 10.39-3ubuntu0.2
+  Version table:
+     10.39-3ubuntu0.2 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages
+        500 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages
+ *** 10.39-3build1 500
+        500 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages
+        100 /var/lib/dpkg/status
