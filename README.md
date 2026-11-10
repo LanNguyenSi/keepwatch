@@ -665,8 +665,9 @@ runs, times out after 15 seconds per request and reads at most 64 KiB of an answ
 There is one retry after 2 seconds, and only for a network error, a timeout, a 5xx or
 a 429; a `Retry-After` of up to 30 seconds is waited for, a longer one means no retry
 in this run. Other 4xx answers (a refused token, an unknown topic) are not retried.
-Error messages name the status and ntfy's own error text, never the address, the topic
-or the token.
+Error messages name the status and ntfy's own error text, never the topic or the token
+(a network error names the address and port that could not be reached, as the system
+reports it, which is the server you configured).
 
 **When a delivery fails.** The exit code is 4, and the snapshot in `state.json` is not
 moved forward: it is stored again as it was, with a `delivery` record (time, number of
