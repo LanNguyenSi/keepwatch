@@ -346,7 +346,10 @@ The exit code depends on the current results only, never on the comparison with
 the last run: a timer that runs `check` every few hours sees exit 1 for as long
 as the host stays bad. The comparison decides what is worth a notification.
 Exit code 3 wins over 1: if the state could not be handled, the run is not
-reliable, even when the report (which is still printed) shows findings.
+reliable, even when the report (which is still printed) shows findings. The
+`exit_code` in a report is the one decided before the state is saved; a state
+that cannot be saved is found after the report was written (see "State"), so it
+is told on stderr and the process exits 3 although the report says 1 or 0.
 
 ### The comparison with the last run
 
@@ -357,6 +360,11 @@ Per check the report lists, in the order of the checks:
 - `fixed`: it failed and passes now;
 - `status_change`: every other change of status (`pass` to `error`, `fail` to
   `warn`, `excepted` to `pass`, ...);
+- `severity_change`: the check has the same status (`fail`, `warn` or `error`) in
+  both runs and another severity, for example because a configuration override
+  changed it; it is an alert when the severity went up and the status counts
+  toward the exit code (see above), since a failure that was below `--fail-on`
+  can have crossed it;
 - `check_added` and `check_removed`: the catalog gained or lost the check;
 - for a check that is `fail` (or `warn`) in both runs: `subject_new` and
   `subject_gone` for items that appeared or disappeared, and `count_change` when
@@ -366,8 +374,9 @@ Per check the report lists, in the order of the checks:
 
 A change is marked as an alert (worth a notification) when a check starts to
 fail or to be in `error`, when a new check is failing or in `error`, when a
-failing check has a new item or a larger item total, and when an
-`authorized_keys` check starts to warn, is new and warns, or has a new warn item.
+failing check has a new item or a larger item total, when a failing check or one
+in `error` gets a higher severity, and when an `authorized_keys` check starts to
+warn, is new and warns, or has a new warn item.
 Everything else (fixed, gone items, a status change to `skipped`, `excepted` or
 a `warn` of another check) is reported without the alert mark.
 
@@ -377,10 +386,21 @@ Two rules keep the comparison honest:
   evidence is never compared item by item; the change of status is reported once.
 - A check that has more than 100 items lists the first 99 sorted by subject and a
   marker "(N more not shown)". The marker is not an item: a change of N never
-  produces new or gone subjects. With a capped list, the direction that cannot
-  be told is not reported (an item that is listed now may have been hidden
-  before; one that is no longer listed may only be hidden now) and the totals
-  are compared instead.
+  produces new or gone subjects. The state keeps where the list was cut (the
+  subject of the last listed item, the "cutoff"), so a capped list is compared
+  as far as it can be: with a capped previous run, an item that is listed now
+  and sorts before the previous cutoff would have been listed before, so it is
+  `subject_new` (an alert) even when the total is the same; with a capped
+  current run, a previous item that is not listed now and sorts before the
+  current cutoff is `subject_gone`. Above the cutoff nothing is said about
+  single items, because an item that is listed now may have been hidden before
+  and one that is no longer listed may only be hidden now; there the totals are
+  compared instead (`count_change`, an alert when the total grew). The cutoff
+  is stored only when it is exactly the (cleaned) subject that the state holds
+  anyway; a subject that had to be escaped, redacted or cut for display has no
+  cutoff and no place in the order, and counts as "above the cutoff". A state
+  file of an older version has no cutoffs, so its capped lists are compared by
+  total only until the next run has written them.
 
 Items are compared by the SHA-256 of their raw subject, so two subjects that
 look the same after cleaning (they differ in a control character, say) are still
@@ -389,9 +409,12 @@ two items.
 ### State
 
 The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
-with `schema_version`, the time of the run and, per check, its id, kind, status,
-severity and failing items (hash and cleaned, redacted subject). It holds no
-evidence detail text and no summaries.
+with `schema_version` (2; a file of version 1 is still read), the time of the run
+and, per check, its id, kind, status, severity and failing items (hash and
+cleaned, redacted subject, and a mark if that subject is the raw one). For a
+check whose list was cut it also holds the cutoff described above. It holds no
+evidence detail text and no summaries, and nothing from a subject that is not
+already in it as displayed.
 
 keepwatch runs as root and the state decides what the operator is told, so it is
 checked:
@@ -419,6 +442,12 @@ state that cannot be saved) is different: the report is still printed, state is
 not read or written, and the exit code is 3, because the next run could not be
 compared reliably.
 
+The report is built first, written to stdout, and only then is the state
+saved. A report that could not be written (a closed pipe, a full disk) therefore
+leaves the state as it was: the next run reports the same changes again instead
+of losing them, and the exit code is 3. A failed save cannot be part of the
+report any more; it is a warning on stderr and exit code 3.
+
 The state is written after a successful run, never after an interrupted one. A
 manual `keepwatch check` counts as a run: it moves the "previous run" forward,
 so a scheduled run after it reports changes only since that manual run. Use
@@ -435,9 +464,13 @@ the format:
 2. control characters are escaped into visible sequences: C0 controls and DEL
    (`\n`, `\r`, `\t`, `\x1b`, ...), C1 controls (`\u0085`), Unicode format
    characters including the bidirectional overrides, zero-width characters and
-   the byte order mark, line and paragraph separators (`\u2028`), the right-to-left override (`\u202e`), and bytes that
-   are not valid UTF-8 (`\xff`), so an escape sequence cannot move the cursor,
-   set a window title, forge a line or reverse the text;
+   the byte order mark, line and paragraph separators (`\u2028`), the right-to-left override (`\u202e`), characters
+   that draw nothing and could make two names look alike (the Hangul and Khmer
+   fillers such as `\u3164`, the combining grapheme joiner `\u034f`, the braille
+   blank `\u2800`, the variation selectors `\ufe0f` and `\U000e0100`), private-use and
+   unassigned code points, and bytes that are not valid UTF-8 (`\xff`), so an
+   escape sequence cannot move the cursor, set a window title, forge a line,
+   reverse the text or hide a difference between two names;
 3. the result is cut at 2000 characters.
 
 JSON is produced by `encoding/json` only. In Markdown, untrusted text appears
@@ -453,11 +486,21 @@ one block when it is matched:
 - PEM private key blocks (also one cut off before its end line);
 - `name=value`, `name: value` and `"name": "value"` when the name ends in
   `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `access_key`,
-  `private_key`, `credential` or `credentials` (`token_file` and
-  `passwordauthentication` are left alone);
-- `--password value` style flags, `Authorization: ...` values, bearer tokens;
+  `private_key`, `secret_key` (also `auth_`, `signing_`, `encryption_` and
+  `master_` plus `key`), `credential` or `credentials`, when it is `pass` or
+  `pwd` or ends in them after a separator (`DB_PASS=`, `MYSQL_PWD=`), and
+  `NAME_KEY=value` environment style (`token_file`, `passwordauthentication`
+  and `bypass` are left alone). A quoted value may hold escaped quotes
+  (`"a\"b"`) and a quote that is never closed runs to the end of the text;
+- `--password value` style flags (also when a NUL byte, as in a command line
+  read from `/proc`, separates the flag from its value), `Authorization: ...`
+  values, `Cookie:` and `Set-Cookie:` values (the rest of the line), bearer
+  tokens;
 - URLs with credentials (`scheme://user:password@host`, `scheme://token@host`);
-- AWS access key ids, GitHub tokens (`ghp_`, `github_pat_`, ...), ntfy tokens
+  the credentials end at the last `@` before the host, so a password with an `@`
+  in it is covered;
+- AWS access key ids, GitHub tokens (`ghp_`, `github_pat_`, ...), GitLab tokens
+  (`glpat-`), API keys of the `sk-` family (`sk-...`, `sk-ant-...`), ntfy tokens
   (`tk_`), Slack tokens, Google API keys, Stripe keys and JSON web tokens.
 
 Redaction is best effort: it knows the shapes above and cannot know a secret that
@@ -475,8 +518,10 @@ redact:
 
 Patterns use RE2 syntax (no backtracking, no lookahead). They are compiled when
 the configuration is loaded: at most 32 patterns of at most 256 bytes, none may
-match the empty string, and a bad one is a configuration error with file and
-line. Lists in `conf.d` files are appended to the main file's list. The redaction
+match the empty string or compile to a program of more than 1000 instructions
+(a large repeat such as `(a|b|c|d|e){1000}` does; the text of a pattern is
+short, but its cost is paid on every byte of every field that is shown), and a
+bad one is a configuration error with file and line. Lists in `conf.d` files are appended to the main file's list. The redaction
 function (`redact.Redactor.Clean`) is what the notification code uses as well.
 
 ## Status

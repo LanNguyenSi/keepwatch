@@ -4,9 +4,10 @@
 // The state is one JSON file, state.json, in the state directory. It holds a
 // snapshot per check: id, kind, status, severity and the failing items, each
 // identified by the SHA-256 of its raw subject (what the diff compares) and a
-// cleaned, redacted subject for display. It deliberately holds no evidence
-// detail text and no summary: that text comes from host output and is only
-// needed for the report of the run that produced it.
+// cleaned, redacted subject for display. For a check whose list the probe cut
+// it also holds the sort cutoff (see Check.Cutoff). It deliberately holds no
+// evidence detail text and no summary: that text comes from host output and is
+// only needed for the report of the run that produced it.
 //
 // keepwatch runs as root and the state decides what an operator is told, so
 // the file and its directory are not trusted blindly:

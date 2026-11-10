@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -88,9 +89,9 @@ var positives = []struct {
 	{"env list", "A=1 DB_PASS=hunter2 B=2", "hunter2", "DB_PASS=[REDACTED] B=2"},
 
 	// Cookies: the whole header value.
-	{"cookie", "Cookie: session=abcdef; theme=dark", "abcdef", "Cookie: [REDACTED]"},
-	{"set-cookie", "Set-Cookie: sid=abcdef; HttpOnly; Secure", "abcdef", "Set-Cookie: [REDACTED]"},
-	{"cookie lower case, equals", "cookie=sid=abcdef", "abcdef", "cookie=[REDACTED]"},
+	{"cookie", "Cookie: theme=dark; session=abcdef", "abcdef", "Cookie: [REDACTED]"},
+	{"set-cookie", "Set-Cookie: theme=dark; sid=abcdef; HttpOnly", "abcdef", "Set-Cookie: [REDACTED]"},
+	{"cookie lower case, equals", "cookie=a=1;sid=abcdef", "abcdef", "cookie=[REDACTED]"},
 	{"cookie in a header block", "Host: x\ncookie: sid=abcdef\nAccept: */*", "abcdef", "cookie: [REDACTED]\nAccept: */*"},
 
 	// More token shapes.
@@ -283,7 +284,8 @@ func TestValidatePattern(t *testing.T) {
 		`(a|b|c|d|e){1000}x`:                       "3003 instructions, the limit is 1000",
 		`[^x]{1000}[^y]{1000}x`:                    "too complex",
 		`[a-z]{300}[0-9]{300}[A-Z]{300}[ -~]{300}`: "too complex",
-		`a{1000}`: "too complex",
+		`a{1000}`:                              "too complex",
+		fmt.Sprintf("a{%d}", MaxProgramSize-1): "1001 instructions", // one over the limit
 	}
 	for p, want := range bad {
 		err := ValidatePattern(p)
@@ -292,7 +294,8 @@ func TestValidatePattern(t *testing.T) {
 		}
 	}
 	for _, p := range []string{`a`, `corp-\d+`, `(?i)secret`, strings.Repeat("a", MaxPatternLen), `[A-Z]{3}-[0-9]{6}`,
-		`[a-f0-9]{64}`, `(?:[A-Za-z0-9]{8}-){4}[A-Za-z0-9]{12}`, `a{900}`, `(a|b|c|d|e){100}x`} {
+		`[a-f0-9]{64}`, `(?:[A-Za-z0-9]{8}-){4}[A-Za-z0-9]{12}`, `a{900}`, `(a|b|c|d|e){100}x`,
+		fmt.Sprintf("a{%d}", MaxProgramSize-2)} {
 		if err := ValidatePattern(p); err != nil {
 			t.Errorf("ValidatePattern(%q) = %v", p, err)
 		}
