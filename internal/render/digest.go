@@ -69,7 +69,7 @@ func (f digestFmt) codes(ss []string) string {
 // notification, plain text for the terminal.
 func BuildDigest(in DigestInput, markdown bool, red *redact.Redactor) Notice {
 	f := digestFmt{md: markdown}
-	c := func(s string) string { return red.Clean(s) }
+	c := func(s string) string { return cutRunes(red.Clean(s), maxNoticeRunes) }
 	host := c(in.Host)
 	var b bodyBuilder
 	days := in.Days
@@ -179,8 +179,11 @@ func BuildDigest(in DigestInput, markdown bool, red *redact.Redactor) Notice {
 
 func (f digestFmt) deliveryLine(p *DeliveryNote, c func(string) string) string {
 	what := "the notification of an earlier run"
-	if p.Kind == "weekly" {
+	switch p.Kind {
+	case "weekly":
 		what = "the last weekly report"
+	case "baseline":
+		what = "the first notification (the open findings)"
 	}
 	reason := c(p.Reason)
 	if reason == "" {

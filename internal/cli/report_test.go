@@ -249,3 +249,65 @@ func TestReportWeeklyShowsAPendingDeliveryFailure(t *testing.T) {
 		t.Errorf("digest:\n%s", out)
 	}
 }
+
+func TestReportWeeklyFailureDoesNotRollBackAStateThatChangedWhileSending(t *testing.T) {
+	// A `check` commits while the report is being sent: its snapshot stays,
+	// and no record is written over it.
+	n := newFakeNtfy(t)
+	f := weekFixture(t, n)
+	n.answer(503, 503)
+	f.env.afterSend = func() {
+		f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)).AddResult(svcArgv, res("inactive\n", 3)))
+		saved := f.env.afterSend
+		f.env.afterSend = nil
+		f.check()
+		f.env.afterSend = saved
+	}
+	code, _, errb := f.report("--weekly", "--notify")
+	if code != ExitDelivery || !strings.Contains(errb, "the state changed while the report was being sent") {
+		t.Fatalf("exit %d stderr %q", code, errb)
+	}
+	st := f.loadState()
+	if st.Delivery != nil {
+		t.Errorf("a record was written over the newer state: %+v", st.Delivery)
+	}
+	if c := st.Find("t.service"); c == nil || c.Status != "fail" || !st.RunAt.Equal(f.clock) {
+		t.Errorf("the snapshot of the concurrent check was rolled back: run_at %v, %+v", st.RunAt, c)
+	}
+}
+
+func TestReportWeeklyFailureDoesNotOverwriteARecordThatAppearedWhileSending(t *testing.T) {
+	n := newFakeNtfy(t)
+	f := weekFixture(t, n)
+	n.answer(503, 503)
+	f.env.afterSend = func() {
+		// Same snapshot, but a record of undelivered changes appears.
+		st := f.loadState()
+		st.Delivery = &state.Delivery{FailedAt: f.clock, Failures: 4, Kind: state.DeliveryCheck, Reason: "other"}
+		s, _ := state.Open(f.stateDir)
+		if err := s.Save(st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, _, errb := f.report("--weekly", "--notify")
+	if code != ExitDelivery || !strings.Contains(errb, "the state changed while the report was being sent") {
+		t.Fatalf("exit %d stderr %q", code, errb)
+	}
+	if d := f.delivery(); d == nil || d.Kind != state.DeliveryCheck || d.Failures != 4 {
+		t.Errorf("record %+v", d)
+	}
+}
+
+func TestReportWeeklyFailureIsRecordedWhenTheStateDidNotChange(t *testing.T) {
+	n := newFakeNtfy(t)
+	f := weekFixture(t, n)
+	n.answer(503, 503)
+	called := false
+	f.env.afterSend = func() { called = true }
+	if code, _, errb := f.report("--weekly", "--notify"); code != ExitDelivery || strings.Contains(errb, "state changed") {
+		t.Fatalf("exit %d stderr %q", code, errb)
+	}
+	if d := f.delivery(); !called || d == nil || d.Kind != state.DeliveryWeekly {
+		t.Errorf("called %v, record %+v", called, d)
+	}
+}

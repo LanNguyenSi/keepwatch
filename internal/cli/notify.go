@@ -51,8 +51,11 @@ func deliveryNote(d *state.Delivery) *render.DeliveryNote {
 // notification.
 func deliveryWarning(d *state.Delivery, notifying bool) string {
 	what := "the notification of the changes of an earlier run"
-	if d.Kind == state.DeliveryWeekly {
+	switch d.Kind {
+	case state.DeliveryWeekly:
 		what = "the weekly report"
+	case state.DeliveryBaseline:
+		what = "the notification of the first run"
 	}
 	s := fmt.Sprintf("last delivery failed: %s could not be delivered at %s (%d in a row): %s", what, d.FailedAt.UTC().Format(time.RFC3339), d.Failures, d.Reason)
 	switch {
@@ -115,4 +118,11 @@ func recordHistory(dir string, now time.Time, in render.Input, red *redact.Redac
 	if err != nil {
 		fmt.Fprintf(stderr, "keepwatch check: warning: the history for the weekly report could not be written: %s\n", red.Clean(err.Error()))
 	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

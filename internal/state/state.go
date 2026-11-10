@@ -110,6 +110,10 @@ const (
 	// DeliveryCheck: the notification of the changes of a `check --notify`
 	// run. The snapshot did not move forward because of it.
 	DeliveryCheck = "check"
+	// DeliveryBaseline: the notice of a first run (or of a run whose previous
+	// state was unusable). There was no change to hold the snapshot for: the
+	// next notification sends the open findings of that run.
+	DeliveryBaseline = "baseline"
 	// DeliveryWeekly: the weekly report. The snapshot is the one of the last
 	// run and is not held back.
 	DeliveryWeekly = "weekly"
@@ -127,7 +131,7 @@ type Delivery struct {
 	// of failed runs in a row.
 	FailedAt time.Time `json:"failed_at"`
 	Failures int       `json:"failures"`
-	// Kind is DeliveryCheck or DeliveryWeekly.
+	// Kind is DeliveryCheck, DeliveryWeekly or DeliveryBaseline.
 	Kind string `json:"kind"`
 	// Reason says why, in cleaned and redacted words; it never holds the
 	// message or the address of the server.
@@ -397,7 +401,7 @@ func validateDelivery(d *Delivery) error {
 	switch {
 	case d == nil:
 		return nil
-	case d.Kind != DeliveryCheck && d.Kind != DeliveryWeekly:
+	case d.Kind != DeliveryCheck && d.Kind != DeliveryWeekly && d.Kind != DeliveryBaseline:
 		return problemf("delivery: unknown kind %q", d.Kind)
 	case d.Failures < 1 || d.Failures > maxDeliveryFailures:
 		return problemf("delivery: invalid failure count")

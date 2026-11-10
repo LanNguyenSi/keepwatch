@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,10 @@ type Notice struct {
 const MaxNoticeBytes = 3600
 
 const (
+	// maxNoticeRunes cuts every string that comes from the host or the
+	// configuration in a notice, so that one long subject (the report allows
+	// 2000 characters, 6000 bytes of CJK) cannot use up the body.
+	maxNoticeRunes    = 200
 	maxTitleHostRunes = 60
 	maxSubjectsListed = 3
 	maxStillListed    = 10
@@ -70,10 +75,15 @@ func BuildNotice(in Input, prev *DeliveryNote, red *redact.Redactor) (Notice, bo
 	if !in.State.Used {
 		return Notice{}, false
 	}
-	v := buildView(in, red)
-	c := func(s string) string { return red.Clean(s) }
-	if in.State.Baseline {
-		return baselineNotice(v, in.Results, prev, c), true
+	v := cutView(buildView(in, red))
+	c := func(s string) string { return cutRunes(red.Clean(s), maxNoticeRunes) }
+	switch {
+	case in.State.Baseline:
+		return baselineNotice(v, in.Results, prev, false, c), true
+	case prev != nil && prev.Kind == "baseline":
+		// The first notification was never delivered: send the open
+		// findings now, in the form of a first report.
+		return baselineNotice(v, in.Results, prev, true, c), true
 	}
 	var alerts, others []viewChange
 	for _, ch := range v.Changes {
@@ -87,6 +97,37 @@ func BuildNotice(in Input, prev *DeliveryNote, red *redact.Redactor) (Notice, bo
 		return Notice{}, false
 	}
 	return changeNotice(v, alerts, others, prev, c), true
+}
+
+// cutRunes cuts s to n runes (not bytes: a character is never split) and
+// marks the cut with "...".
+func cutRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "..."
+}
+
+// cutView cuts the strings of a view that a notice shows. The report itself
+// keeps its longer limit.
+func cutView(v view) view {
+	c := func(s string) string { return cutRunes(s, maxNoticeRunes) }
+	v.Host, v.State.Reason = c(v.Host), c(v.State.Reason)
+	changes := make([]viewChange, len(v.Changes))
+	for i, ch := range v.Changes {
+		ch.Kind, ch.CheckID, ch.CheckKind, ch.Severity = c(ch.Kind), c(ch.CheckID), c(ch.CheckKind), c(ch.Severity)
+		ch.From, ch.To, ch.Subject = c(ch.From), c(ch.To), c(ch.Subject)
+		ch.FromSeverity, ch.ToSeverity = c(ch.FromSeverity), c(ch.ToSeverity)
+		changes[i] = ch
+	}
+	v.Changes = changes
+	refs := make([]viewRef, len(v.StillFailing))
+	for i, r := range v.StillFailing {
+		r.CheckID = c(r.CheckID)
+		refs[i] = r
+	}
+	v.StillFailing = refs
+	return v
 }
 
 // bodyBuilder collects lines up to a budget and counts the ones left out.
@@ -136,8 +177,11 @@ func changeLine(c viewChange) string {
 
 func deliveryLine(p *DeliveryNote, c func(string) string) string {
 	what := "the notification of an earlier run"
-	if p.Kind == "weekly" {
+	switch p.Kind {
+	case "weekly":
 		what = "the weekly report"
+	case "baseline":
+		what = "the first notification (the open findings)"
 	}
 	reason := c(p.Reason)
 	if reason == "" {
@@ -167,6 +211,11 @@ func changeNotice(v view, alerts, others []viewChange, prev *DeliveryNote, c fun
 		b.blank()
 		b.add("**Alerts**")
 		b.blank()
+		// Highest severity first: when the body is too small for all of
+		// them, it is the low ones that are left out.
+		sort.SliceStable(alerts, func(i, j int) bool {
+			return rankOf(result.Severity(alerts[i].Severity)) > rankOf(result.Severity(alerts[j].Severity))
+		})
 		for _, ch := range alerts {
 			b.add(changeLine(ch))
 			if rankOf(result.Severity(ch.Severity)) > rankOf(sev) {
@@ -206,9 +255,13 @@ func changeNotice(v view, alerts, others []viewChange, prev *DeliveryNote, c fun
 	return Notice{Title: title, Body: b.String(), Severity: sev, Tags: tags}
 }
 
-func baselineNotice(v view, results []result.Result, prev *DeliveryNote, c func(string) string) Notice {
+func baselineNotice(v view, results []result.Result, prev *DeliveryNote, resend bool, c func(string) string) Notice {
 	var b bodyBuilder
-	b.add("**First run:** there is no previous run to compare with, so no changes are reported. " + mdCode(v.State.Reason))
+	if resend {
+		b.add("**First report:** the notification of the first run could not be delivered, so these are the open findings now.")
+	} else {
+		b.add("**First run:** there is no previous run to compare with, so no changes are reported. " + mdCode(v.State.Reason))
+	}
 	b.blank()
 	b.add(mdCode(countsLine(v.Counts)))
 	if prev != nil {
@@ -240,8 +293,12 @@ func baselineNotice(v view, results []result.Result, prev *DeliveryNote, c func(
 	if rankOf(sev) >= rankOf(result.High) {
 		tags = []string{"keepwatch", "rotating_light"}
 	}
+	first := "first run"
+	if resend {
+		first = "first report"
+	}
 	return Notice{
-		Title:    fmt.Sprintf("keepwatch %s: first run, %d open %s", shortHost(v.Host), open, plural(open, "finding", "findings")),
+		Title:    fmt.Sprintf("keepwatch %s: %s, %d open %s", shortHost(v.Host), first, open, plural(open, "finding", "findings")),
 		Body:     b.String(),
 		Severity: sev,
 		Tags:     tags,

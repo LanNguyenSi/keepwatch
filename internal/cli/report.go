@@ -131,10 +131,27 @@ func runReport(e env, args []string, stdout, stderr io.Writer) int {
 		// Record it, so the next `check --notify` says so. A record that is
 		// already there stays: it is about changes that were never told,
 		// which weighs more than a digest.
+		//
+		// The state read at the start is up to a minute old (two timeouts and
+		// a wait), and a `check` may have committed in between: its snapshot
+		// must not be rolled back. So the state is read again right before
+		// it is written, and the failure is recorded only on the snapshot
+		// that was read at the start and has no record. What remains is the
+		// time between that read and the rename (there is no lock; see
+		// the README).
+		if e.afterSend != nil {
+			e.afterSend()
+		}
 		if lr.State != nil && lr.State.Delivery == nil {
-			if serr := store.Save(failedState(lr.State, lr.State, state.DeliveryWeekly, now, derr, red)); serr != nil {
-				fmt.Fprintf(stderr, "keepwatch report: warning: the failure could not be recorded in the state: %s\n", red.Clean(serr.Error()))
-				return ExitInternal
+			lr2, lerr := store.Load()
+			switch {
+			case lerr != nil || lr2.State == nil || lr2.State.Delivery != nil || !lr2.State.RunAt.Equal(lr.State.RunAt):
+				fmt.Fprintln(stderr, "keepwatch report: warning: the state changed while the report was being sent, the failure is not recorded in it")
+			default:
+				if serr := store.Save(failedState(lr2.State, lr2.State, state.DeliveryWeekly, e.now(), derr, red)); serr != nil {
+					fmt.Fprintf(stderr, "keepwatch report: warning: the failure could not be recorded in the state: %s\n", red.Clean(serr.Error()))
+					return ExitInternal
+				}
 			}
 		}
 		return ExitDelivery

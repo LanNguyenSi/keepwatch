@@ -45,6 +45,10 @@ type env struct {
 	// its retry).
 	notifier   notify.Notifier
 	notifyOpts []notify.Option
+	// afterSend runs in `report --weekly --notify` after a failed delivery
+	// and before the failure is recorded; tests change the state there, as a
+	// concurrent `check` would.
+	afterSend func()
 }
 
 func (e env) withDefaults() env {
@@ -249,6 +253,13 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 		if deliveryErr = ntf.Send(e.ctx, toMessage(notice)); deliveryErr != nil {
 			fmt.Fprintf(stderr, "keepwatch check: the notification was not delivered: %s\n", red.Clean(deliveryErr.Error()))
 		}
+		if e.ctx.Err() != nil {
+			// A signal during the delivery: the run is interrupted like
+			// one that was interrupted during the checks. Nothing is
+			// stored, so the next run reports (and, if it was not
+			// delivered, sends) the same changes again.
+			return fail("interrupted: %v", e.ctx.Err())
+		}
 	}
 	if saveState {
 		// The state moves forward only after the report was written and,
@@ -263,11 +274,18 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 			// failure, so the next run compares with it again and reports
 			// the same changes. Without a previous snapshot (a first run)
 			// the current one is stored: it holds no change to lose.
-			toSave, committed = failedState(prev, cur, state.DeliveryCheck, now, deliveryErr, red), false
+			kind := state.DeliveryCheck
+			if in.State.Baseline || (prev != nil && prev.Delivery != nil && prev.Delivery.Kind == state.DeliveryBaseline) {
+				// The message was the notice of a first run, or the
+				// resend of it: what is owed is the list of open
+				// findings, not the changes since a snapshot.
+				kind = state.DeliveryBaseline
+			}
+			toSave, committed = failedState(prev, cur, kind, now, deliveryErr, red), false
 		case holdState:
 			toSave, committed = nil, false
 			fmt.Fprintln(stderr, "keepwatch check: warning: the state is not moved forward: the last notification was not delivered yet, run with --notify")
-		case prev != nil && prev.Delivery != nil && prev.Delivery.Kind == state.DeliveryWeekly && !doNotify:
+		case prev != nil && prev.Delivery != nil && prev.Delivery.Kind != state.DeliveryCheck && !doNotify:
 			d := *prev.Delivery
 			cur.Delivery = &d
 		}
@@ -278,6 +296,9 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		if committed {
+			if n := len(in.Diff.Alerts(result.Info)); n > 0 && !doNotify && !in.State.Baseline && cfg.Notify.Ntfy != nil {
+				fmt.Fprintf(stderr, "keepwatch check: warning: this run did not use --notify and moved the state forward past %d alert-worthy %s that no notification will tell\n", n, plural(n, "change", "changes"))
+			}
 			recordHistory(cfg.StateDir, now, in, red, stderr)
 		}
 	}

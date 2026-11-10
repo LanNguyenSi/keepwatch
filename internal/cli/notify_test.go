@@ -370,7 +370,7 @@ func TestNotifyAuthFailureIsExit4WithoutRetry(t *testing.T) {
 	}
 }
 
-func TestNotifyFailedBaselineIsStoredWithTheFailureAndRetried(t *testing.T) {
+func TestNotifyFailedBaselineIsStoredAsItsOwnKindAndTheOpenFindingsAreResent(t *testing.T) {
 	n := newFakeNtfy(t)
 	f := notifyFixture(t, n, badHost(), "")
 	n.answer(500, 500)
@@ -378,22 +378,51 @@ func TestNotifyFailedBaselineIsStoredWithTheFailureAndRetried(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	st := f.loadState()
-	if st.Delivery == nil || len(st.Checks) != 3 {
+	if st.Delivery == nil || st.Delivery.Kind != state.DeliveryBaseline || len(st.Checks) != 3 {
 		t.Fatalf("state %+v", st)
 	}
 	if len(f.history().Runs) != 0 {
 		t.Error("history written for an undelivered run")
 	}
+	// Still down: the kind stays, the count grows.
+	n.answer(500, 500)
 	f.next(badHost())
+	if code, _, _ := f.check("--notify"); code != ExitDelivery {
+		t.Fatalf("exit %d", code)
+	}
+	if d := f.delivery(); d == nil || d.Kind != state.DeliveryBaseline || d.Failures != 2 {
+		t.Fatalf("record %+v", d)
+	}
+	// A run without --notify does not hold the snapshot (the open findings
+	// are resent from the results of the run that delivers) and keeps the
+	// record.
+	f.next(badHost().AddResult(svcArgv, res("active\n", 0)))
+	if code, _, errb := f.check(); code != 1 || strings.Contains(errb, "not moved forward") {
+		t.Fatalf("exit %d stderr %q", code, errb)
+	}
+	if d := f.delivery(); d == nil || d.Kind != state.DeliveryBaseline {
+		t.Fatalf("record after a run without --notify: %+v", d)
+	}
+	f.next(badHost().AddResult(svcArgv, res("active\n", 0)))
 	code, _, _ := f.check("--notify")
-	if code != 1 || n.count() != 3 {
+	if code != 1 || n.count() != 5 {
 		t.Fatalf("exit %d, %d requests", code, n.count())
 	}
-	if !strings.Contains(n.last().Body, "**Last delivery failed:**") || !strings.Contains(n.last().Header.Get("Title"), "earlier notification was not delivered") {
-		t.Errorf("last message:\n%v\n%s", n.last().Header, n.last().Body)
+	r := n.last()
+	if !strings.HasPrefix(r.Body, "**First report:**") || !strings.Contains(r.Header.Get("Title"), "first report, 2 open findings") ||
+		!strings.Contains(r.Body, "**Last delivery failed:** the first notification (the open findings) could not be delivered") ||
+		!strings.Contains(r.Body, "- FAIL ` t.sshd ` (` high `)") || strings.Contains(r.Body, "everything since the last report") ||
+		strings.Contains(r.Body, "t.service") {
+		t.Errorf("last message:\n%v\n%s", r.Header, r.Body)
 	}
 	if f.loadState().Delivery != nil {
 		t.Error("record not cleared")
+	}
+	// And it is quiet afterwards.
+	f.next(badHost().AddResult(svcArgv, res("active\n", 0)))
+	f.check("--notify")
+	if n.count() != 5 {
+		t.Errorf("%d requests", n.count())
 	}
 }
 
@@ -628,5 +657,82 @@ func TestNotifyRecordedReasonIsShortAndRedacted(t *testing.T) {
 	d := f.delivery()
 	if d == nil || strings.Contains(d.Reason, "hunter2") || !strings.HasSuffix(d.Reason, "...") || len([]rune(d.Reason)) != maxReasonRunes+3 {
 		t.Errorf("reason %q (%d runes)", d.Reason, len([]rune(d.Reason)))
+	}
+}
+
+func TestNotifyARunWithoutTheFlagWarnsWhenItConsumesAlerts(t *testing.T) {
+	n := newFakeNtfy(t)
+	f := notifyFixture(t, n, goodHost(), "")
+	f.check("--notify")
+	f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
+	_, _, errb := f.check()
+	if !strings.Contains(errb, "did not use --notify and moved the state forward past 1 alert-worthy change that no notification will tell") {
+		t.Errorf("stderr %q", errb)
+	}
+	// No alert, no warning; a fix is not an alert.
+	f.next(goodHost())
+	if _, _, errb := f.check(); strings.Contains(errb, "alert-worthy") {
+		t.Errorf("stderr %q", errb)
+	}
+	// Without a configured channel there is nobody to tell: no warning.
+	g := newFixture(t, goodHost(), "")
+	g.check()
+	g.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
+	if _, _, errb := g.check(); strings.Contains(errb, "alert-worthy") {
+		t.Errorf("stderr %q", errb)
+	}
+	// And a first run is a baseline, not a consumed alert.
+	h := notifyFixture(t, n, badHost(), "")
+	if _, _, errb := h.check(); strings.Contains(errb, "alert-worthy") {
+		t.Errorf("stderr %q", errb)
+	}
+}
+
+// cancelNotifier cancels the context of the run while it "sends".
+type cancelNotifier struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (c cancelNotifier) Send(context.Context, notify.Message) error {
+	c.cancel()
+	return c.err
+}
+
+func TestNotifyASignalDuringTheDeliveryIsAnInterruptedRun(t *testing.T) {
+	for name, sendErr := range map[string]error{
+		"delivery fails": &notify.Error{Class: notify.Transient, Msg: "no answer: context canceled"},
+		"delivery works": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			n := newFakeNtfy(t)
+			f := notifyFixture(t, n, goodHost(), "")
+			f.check("--notify")
+			stateBefore, _ := os.ReadFile(f.statePath())
+			histBefore, _ := os.ReadFile(filepath.Join(f.stateDir, "history.json"))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.env.ctx = ctx
+			f.env.notifier = cancelNotifier{cancel, sendErr}
+			f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
+			code, _, errb := f.check("--notify")
+			if code != ExitInternal || !strings.Contains(errb, "interrupted") {
+				t.Fatalf("exit %d stderr %q", code, errb)
+			}
+			if after, _ := os.ReadFile(f.statePath()); string(after) != string(stateBefore) {
+				t.Errorf("an interrupted run wrote the state:\n%s", after)
+			}
+			if after, _ := os.ReadFile(filepath.Join(f.stateDir, "history.json")); string(after) != string(histBefore) {
+				t.Error("an interrupted run wrote the history")
+			}
+			// The next run reports and sends the change.
+			f.env.ctx = context.Background()
+			f.env.notifier = nil
+			f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)))
+			if code, _, _ := f.check("--notify"); code != 1 || !strings.Contains(n.last().Body, "` t.sshd `") {
+				t.Errorf("exit %d\n%s", code, n.last().Body)
+			}
+		})
 	}
 }

@@ -24,6 +24,12 @@ func TestDeliveryRecordRoundTripsAndIsOmittedWhenAbsent(t *testing.T) {
 		t.Errorf("a state without a record holds the field:\n%s", b)
 	}
 
+	for _, kind := range []string{DeliveryCheck, DeliveryWeekly, DeliveryBaseline} {
+		mustSave(t, s, withDelivery(&Delivery{FailedAt: t0, Failures: 1, Kind: kind}))
+		if lr, err := s.Load(); err != nil || lr.State == nil || lr.State.Delivery == nil || lr.State.Delivery.Kind != kind {
+			t.Errorf("kind %q: %+v %v", kind, lr, err)
+		}
+	}
 	want := &Delivery{FailedAt: t0.Add(time.Hour), Failures: 3, Kind: DeliveryCheck, Reason: "ntfy: HTTP 503 (after 2 attempts)"}
 	mustSave(t, s, withDelivery(want))
 	lr, err = s.Load()

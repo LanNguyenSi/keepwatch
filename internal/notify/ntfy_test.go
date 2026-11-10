@@ -580,6 +580,10 @@ func TestNewNtfyChecksItsSettings(t *testing.T) {
 		"", "ntfy.example.com", "http://ntfy.example.com", "ftp://ntfy.example.com", "https://", "https://:443", "https://host:",
 		"https://user:pass@ntfy.example.com", "https://user@ntfy.example.com", "https://ntfy.example.com?x=1", "https://ntfy.example.com/?", "https://ntfy.example.com#frag",
 		"http://127.0.0.1.example.com", "file:///etc/passwd",
+		// http is for loopback only: any other IP literal would send the
+		// token in plaintext.
+		"http://192.0.2.10", "http://10.0.0.1", "http://[2001:db8::1]", "http://169.254.169.254", "http://0.0.0.0", "http://[::]",
+		"http://[::ffff:192.0.2.10]", "http://[fe80::1%25eth0]", "http://localhost.", "http://LOCALHOST.example.com", "http://2130706433", "http://127.1",
 	}
 	for _, u := range bad {
 		if _, err := NewNtfy(NtfyConfig{URL: u, Topic: "alerts"}); err == nil {

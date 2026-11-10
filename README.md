@@ -618,9 +618,27 @@ fails now, not that something changed.
 
 At most one message per run, so a timer that runs every few hours sends at most that
 many messages a day, however many things change. A check in `error` is one change of
-status; the evidence of an `error` is never listed item by item. A baseline notice
-is informational: if its delivery fails, the first state is stored with the record of
-the failure and the baseline notice is not repeated; the next run compares normally.
+status; the evidence of an `error` is never listed item by item. If the delivery
+of a baseline notice fails, the first state is stored with a `delivery` record of kind
+`baseline`; the next run with `--notify` sends the open findings of that run again as a
+"first report" (not the changes since a snapshot, because nothing was ever delivered),
+and keeps doing so until a delivery works.
+
+**Every string of a message is cut at 200 characters** (whole characters, with `...`), so
+that one long subject cannot use up the body, and the alerts are listed with the highest
+severity first: when the body is too small for all of them it is the low ones that are
+left out ("N more lines not shown"), never the critical one. The counts in the title and
+heading are always the real ones.
+
+**Use `--notify` for every run that is supposed to tell.** A run without `--notify`
+(a manual `keepwatch check`, a script) moves the snapshot forward like any other run, so
+the alert-worthy changes it finds are consumed: the next scheduled run with `--notify`
+compares with that snapshot and does not send them. When `notify.ntfy` is configured, such
+a run says so on stderr ("moved the state forward past N alert-worthy changes that no
+notification will tell"). Use `--no-state` for a look that must not do that.
+
+**A signal during the delivery** (SIGINT, SIGTERM) is an interrupted run like one during the
+checks: exit code 3, nothing is stored, the next run reports and sends the same changes.
 
 **Priority and tags.** The priority is that of the highest severity among the alerts
 (baseline: among the `fail` and `error` findings): critical 5 (urgent), high 4, medium
@@ -641,9 +659,10 @@ argument of [Output safety](#output-safety) therefore holds for ntfy: everything
 comes from the host or the configuration is put into a code span whose fence is longer
 than any run of backticks in it, and nothing outside a code span is anything but bold
 words, list markers, numbers and fixed phrases; a link, an image, HTML, a heading, an
-`@` or a line that starts a block cannot be made out of evidence. Two things stay: the
-Android app has a linkify plugin that may make a bare web address clickable even in a
-code span (the text of the link is the address, there is no hidden target), and ntfy shows the text of a message
+`@` or a line that starts a block cannot be made out of evidence. One thing stays:
+the Android app's linkify plugin acts on running text only and not on a code span
+(Markwon 4.6.2: the listener is fired by the text visitor, not by the code visitor), and
+ntfy shows the text of a message
 to everybody who can read the topic: on an open server the topic name is the only
 secret, so use a long one or an access token. No table is used, because the web app
 does not render them. A body is cut at 3,600 bytes (ntfy's limit is 4,096; a longer body
@@ -713,7 +732,12 @@ full history (60 runs of 100 changes) is about 1.7 MB, and when hostile subjects
 the oldest runs are dropped. It is a convenience, not a source of truth: a history that
 cannot be read or written is a warning on stderr and does not change the exit code; an
 unusable file is replaced by the next write. A `check` and a `report` that run at the
-same moment are not coordinated (known limit, like two `check` runs).
+same moment are not coordinated, for `history.json` and for `state.json` alike (known
+limit, like two `check` runs; there is no lock). `report --notify` narrows the window for
+the one write it makes: it reads the state again right after a failed delivery (which
+can be a minute after it first read it) and records the failure only if the snapshot and
+the record are still the ones it started with, otherwise it only warns. What remains is
+the time between that read and the rename.
 
 ### Output safety
 

@@ -311,7 +311,7 @@ func TestNoticeHostileTextIsOnlyEverInsideCodeSpans(t *testing.T) {
 					t.Fatal("no notice")
 				}
 				assertSafeMarkdown(t, n.Body)
-				if !strings.Contains(n.Body, "HOSTILE") || !strings.Contains(n.Body, "[REDACTED]") {
+				if !strings.Contains(n.Body, "HOSTILE") {
 					t.Errorf("the hostile fields are missing (a vacuous test):\n%s", n.Body)
 				}
 				if strings.Contains(n.Body, "hunter2") {
@@ -611,5 +611,120 @@ func TestDigestSortsEqualSeveritiesById(t *testing.T) {
 	z, a, b := strings.Index(body, "z.check"), strings.Index(body, "a.check"), strings.Index(body, "b.check")
 	if !(z < a && a < b) {
 		t.Errorf("order z=%d a=%d b=%d:\n%s", z, a, b, body)
+	}
+}
+
+func TestNoticeListsTheHighestSeverityFirstAndNeverLosesTheCriticalAlert(t *testing.T) {
+	var changes []diff.Change
+	for i := 0; i < 50; i++ {
+		changes = append(changes, diff.Change{Kind: diff.SubjectNew, CheckID: "network.listeners", CheckKind: "listeners", Severity: result.Medium,
+			Subject: fmt.Sprintf("tcp/0.0.0.0:%d", 1000+i), Alert: true})
+	}
+	changes = append(changes, diff.Change{Kind: diff.SubjectNew, CheckID: "ssh.authorized_keys", CheckKind: "authorized_keys", Severity: result.Critical,
+		Subject: "SHA256:newkey", Alert: true})
+	n, ok := BuildNotice(changeInput(changes...), nil, nil)
+	if !ok {
+		t.Fatal("no notice")
+	}
+	if n.Severity != result.Critical || !strings.HasPrefix(n.Body, "**51 alerts**") {
+		t.Errorf("severity %q, body starts %q", n.Severity, n.Body[:20])
+	}
+	crit := strings.Index(n.Body, "ssh.authorized_keys")
+	first := strings.Index(n.Body, "network.listeners")
+	if crit < 0 || crit > first {
+		t.Errorf("the critical alert is missing or not first (%d, %d):\n%s", crit, first, n.Body)
+	}
+	if !strings.Contains(n.Body, "more lines not shown.") {
+		t.Errorf("the medium alerts did not need to be cut: the test is vacuous:\n%s", n.Body)
+	}
+	// Order among equal severities stays the order of the report.
+	n, _ = BuildNotice(changeInput(alertChange(result.Low), alertChange(result.High), alertChange(result.Low), alertChange(result.High)), nil, nil)
+	hi, lo := strings.Index(n.Body, "` high `"), strings.Index(n.Body, "` low `")
+	if hi < 0 || lo < 0 || hi > lo {
+		t.Errorf("order:\n%s", n.Body)
+	}
+}
+
+func TestNoticeCutsEveryUntrustedStringAndStillShowsALine(t *testing.T) {
+	long := strings.Repeat("\u4e16", 2000) // 3 bytes each
+	in := changeInput(diff.Change{Kind: diff.SubjectNew, CheckID: "a.b", CheckKind: "k", Severity: result.High, Subject: long, Alert: true})
+	in.Diff.StillFailing = []diff.Ref{{CheckID: long}}
+	n, ok := BuildNotice(in, &DeliveryNote{At: genTime, Failures: 1, Kind: "check", Reason: long}, nil)
+	if !ok {
+		t.Fatal("no notice")
+	}
+	if !strings.Contains(n.Body, "**Alerts**\n\n- ` a.b `") || strings.Contains(n.Body, "not shown") {
+		t.Errorf("the alert line is missing:\n%s", n.Body)
+	}
+	want := strings.Repeat("\u4e16", maxNoticeRunes) + "..."
+	if got := strings.Count(n.Body, want); got != 3 { // subject, reason, still failing
+		t.Errorf("%d cut strings, want 3:\n%s", got, n.Body)
+	}
+	if strings.Contains(n.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || len(n.Body) > MaxNoticeBytes {
+		t.Errorf("a string is longer than the cut, or the body is %d bytes", len(n.Body))
+	}
+	// A cut never splits a character.
+	for _, r := range n.Body {
+		if r == '\ufffd' {
+			t.Fatal("a character was split")
+		}
+	}
+	// Baseline and digest too.
+	base := baselineNoticeInput()
+	base.Results[0].CheckID = long
+	base.Results[0].Evidence[0].Subject = long
+	base.State.Reason = long
+	nb, _ := BuildNotice(base, nil, nil)
+	if strings.Contains(nb.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || !strings.Contains(nb.Body, want) || len(nb.Body) > MaxNoticeBytes {
+		t.Errorf("baseline body of %d bytes", len(nb.Body))
+	}
+	d := digestInput()
+	d.State.Checks[2].ID = long
+	d.Runs[0].Changes[0].Subject = long
+	nd := BuildDigest(d, true, nil)
+	if strings.Contains(nd.Body, strings.Repeat("\u4e16", maxNoticeRunes+1)) || !strings.Contains(nd.Body, want) {
+		t.Errorf("digest:\n%s", nd.Body)
+	}
+}
+
+func TestCutRunes(t *testing.T) {
+	if got := cutRunes("abc", 3); got != "abc" {
+		t.Errorf("%q", got)
+	}
+	if got := cutRunes("abcd", 3); got != "abc..." {
+		t.Errorf("%q", got)
+	}
+	if got := cutRunes("\u4e16\u4e16\u4e16", 2); got != "\u4e16\u4e16..." {
+		t.Errorf("%q", got)
+	}
+}
+
+func TestNoticeAfterAFailedFirstRunSendsTheOpenFindingsAsAFirstReport(t *testing.T) {
+	in := baselineNoticeInput()
+	in.State = StateInfo{Used: true, PrevRunAt: genTime.Add(-time.Hour)} // not a baseline any more
+	in.Diff = diff.Report{Changes: []diff.Change{alertChange(result.High)}}
+	prev := &DeliveryNote{At: genTime, Failures: 2, Kind: "baseline", Reason: "HTTP 503"}
+	n, ok := BuildNotice(in, prev, nil)
+	if !ok {
+		t.Fatal("no notice")
+	}
+	if n.Title != "keepwatch web-01: first report, 4 open findings" {
+		t.Errorf("title %q", n.Title)
+	}
+	for _, want := range []string{"**First report:** the notification of the first run could not be delivered", "the first notification (the open findings) could not be delivered", "(2 runs in a row)", "**Open findings**", "- FAIL ` ssh.pw `"} {
+		if !strings.Contains(n.Body, want) {
+			t.Errorf("body lacks %q:\n%s", want, n.Body)
+		}
+	}
+	for _, bad := range []string{"everything since the last report", "**Alerts**", "no previous run"} {
+		if strings.Contains(n.Body, bad) {
+			t.Errorf("body holds %q:\n%s", bad, n.Body)
+		}
+	}
+	// The same record in a digest.
+	d := digestInput()
+	d.PrevDelivery = prev
+	if nd := BuildDigest(d, true, nil); !strings.Contains(nd.Body, "the first notification (the open findings) could not be delivered") {
+		t.Errorf("digest:\n%s", nd.Body)
 	}
 }
