@@ -152,7 +152,7 @@ func TestOlderSchemasAreABaselineWithAWarning(t *testing.T) {
 		s, dir := newStore(t)
 		writeStateFile(t, s, dir, doc)
 		lr, err := s.Load()
-		if err != nil || lr.State != nil || lr.Missing || !strings.Contains(lr.Problem, "this keepwatch reads version 3 only") {
+		if err != nil || lr.State != nil || lr.Missing || !strings.Contains(lr.Problem, "this keepwatch reads version 4 only") {
 			t.Errorf("%s: Load = %+v, %v", name, lr, err)
 		}
 	}

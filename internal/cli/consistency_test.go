@@ -89,8 +89,12 @@ func TestCheckWithAnInconsistentStateOfTheRunIsAnInternalError(t *testing.T) {
 		t.Errorf("the state file changed:\n%s", after)
 	}
 	entries, _ := os.ReadDir(f.stateDir)
-	if len(entries) != 1 {
-		t.Errorf("state directory holds %d entries, want only state.json", len(entries))
+	for _, en := range entries {
+		// history.json is the record of the earlier run; anything else would
+		// be a leftover of the run that did not save.
+		if en.Name() != state.FileName && en.Name() != "history.json" {
+			t.Errorf("state directory holds %q, want only state.json and history.json", en.Name())
+		}
 	}
 
 	// With --no-state the check is not reached.

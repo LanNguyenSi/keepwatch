@@ -763,8 +763,12 @@ func TestCheckDoesNotAdvanceTheStateWhenTheReportCannotBeWritten(t *testing.T) {
 		t.Errorf("the state moved forward although the report was not written:\n%s", after)
 	}
 	entries, _ := os.ReadDir(f.stateDir)
-	if len(entries) != 1 {
-		t.Errorf("state directory holds %d entries, want only state.json", len(entries))
+	for _, en := range entries {
+		// history.json is the record of the earlier run; anything else would
+		// be a leftover of the run that did not save.
+		if en.Name() != state.FileName && en.Name() != "history.json" {
+			t.Errorf("state directory holds %q, want only state.json and history.json", en.Name())
+		}
 	}
 
 	// The next run, with a working stdout, reports the change.
@@ -807,7 +811,7 @@ func TestCheckStateThatCannotBeSavedIsToldAfterTheReport(t *testing.T) {
 // run is a baseline with a warning, never a comparison that guesses and never
 // a silent "no changes". The file is replaced by one of the current version.
 func TestCheckTreatsAStateFileOfTheOlderSchemaVersionAsABaseline(t *testing.T) {
-	for _, old := range []string{"1", "2"} {
+	for _, old := range []string{"1", "2", "3"} {
 		t.Run("version "+old, func(t *testing.T) {
 			f := newFixture(t, goodHost(), "")
 			f.check()
@@ -815,7 +819,7 @@ func TestCheckTreatsAStateFileOfTheOlderSchemaVersionAsABaseline(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			prev := strings.Replace(string(b), `"schema_version": 3`, `"schema_version": `+old, 1)
+			prev := strings.Replace(string(b), `"schema_version": 4`, `"schema_version": `+old, 1)
 			if prev == string(b) {
 				t.Fatalf("no schema_version in the state file:\n%s", b)
 			}

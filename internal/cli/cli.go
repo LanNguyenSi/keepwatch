@@ -30,7 +30,7 @@ type command struct {
 // commands lists the top-level commands in help order.
 var commands = []command{
 	{"check", "run the checks and report findings"},
-	{"report", "show the result of the last run"},
+	{"report", "the weekly report (report --weekly)"},
 	{"config", "configuration tools (config check)"},
 	{"doctor", "diagnose the local environment"},
 	{"init", "write an example configuration"},
@@ -66,7 +66,9 @@ func dispatch(e env, args []string, stdout, stderr io.Writer) int {
 		return runInit(rest, stdout, stderr)
 	case "check":
 		return runCheck(e, rest, stdout, stderr)
-	case "report", "doctor", "install", "uninstall":
+	case "report":
+		return runReport(e, rest, stdout, stderr)
+	case "doctor", "install", "uninstall":
 		return runStub(name, rest, stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "keepwatch: unknown command %q\n", name)

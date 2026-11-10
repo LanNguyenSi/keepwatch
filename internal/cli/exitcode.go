@@ -8,6 +8,14 @@ const (
 	// a state directory that cannot be trusted or a state that cannot be
 	// written, an interrupted run, a failed write of the report).
 	ExitInternal = 3
+	// ExitDelivery: a notification that --notify asked for could not be
+	// delivered. The state is not moved forward then (see the README), so
+	// the next run reports the same changes again. Against the other codes:
+	// 3 wins over 4 (the run itself is unreliable), 4 wins over 1 (the
+	// checks' own verdict is in the report and the next run repeats it; that
+	// the alert did not arrive is what an operator who relies on it has to
+	// learn from the exit code).
+	ExitDelivery = 4
 )
 
 // authorizedKeysKind is the probe kind whose warn results count like
