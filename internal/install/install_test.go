@@ -60,8 +60,14 @@ func (r *rig) uninstall(o install.UninstallOptions) error {
 	if o.ConfigPath == "" {
 		o.ConfigPath = cfgPath
 	}
-	if o.StateDir == "" {
-		o.StateDir = stateDir
+	if o.DefaultConfigPath == "" {
+		o.DefaultConfigPath = cfgPath
+	}
+	if o.DefaultStateDir == "" {
+		o.DefaultStateDir = stateDir
+	}
+	if o.StateDirOf == nil {
+		o.StateDirOf = func(string) (string, bool, error) { return stateDir, true, nil }
 	}
 	return install.Uninstall(context.Background(), r.deps, o)
 }
@@ -676,17 +682,213 @@ func TestPurge(t *testing.T) {
 			t.Errorf("the state directory stays because of its own leftovers:\n%s", r.out)
 		}
 	})
-	t.Run("a custom configuration path purges its own directory only", func(t *testing.T) {
+}
+
+// The configuration side of --purge is for a path that is provably keepwatch's:
+// the default path, or the --config recorded in an installed unit. That a file
+// loads as a keepwatch configuration proves nothing (an empty YAML file does).
+func TestPurgeLeavesAConfigurationThatIsNotProvablyKeepwatchs(t *testing.T) {
+	foreignFiles := func(r *rig) {
+		r.fs.AddDir("/etc/otherapp", 0o755, 0)
+		r.fs.AddFile("/etc/otherapp/otherapp.yaml", 0o644, 0, "a: 1\n")
+		r.fs.AddFile("/etc/otherapp/empty.yaml", 0o644, 0, "")
+		r.fs.AddFile("/etc/otherapp/daemon.json", 0o644, 0, "{}")
+		r.fs.AddDir("/etc/otherapp/conf.d", 0o755, 0)
+		r.fs.AddFile("/etc/otherapp/conf.d/10-site.yaml", 0o644, 0, "b: 2\n")
+		r.fs.AddFile("/etc/otherapp/notes.txt", 0o644, 0, "mine")
+	}
+	untouched := func(t *testing.T, r *rig) {
+		t.Helper()
+		for _, p := range []string{"/etc/otherapp/otherapp.yaml", "/etc/otherapp/empty.yaml", "/etc/otherapp/daemon.json", "/etc/otherapp/conf.d", "/etc/otherapp/conf.d/10-site.yaml", "/etc/otherapp/notes.txt", "/etc/otherapp"} {
+			if !r.fs.Exists(p) {
+				t.Errorf("%s was removed", p)
+			}
+		}
+	}
+	noLoad := func(t *testing.T) func(string) (string, bool, error) {
+		return func(p string) (string, bool, error) {
+			t.Errorf("the configuration %s was consulted although it is not keepwatch's", p)
+			return "/etc/otherapp", true, nil
+		}
+	}
+	for _, foreign := range []string{"/etc/otherapp/otherapp.yaml", "/etc/otherapp/empty.yaml", "/etc/otherapp/daemon.json"} {
+		t.Run("foreign "+foreign, func(t *testing.T) {
+			r := newRig()
+			if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
+				t.Fatal(err)
+			}
+			foreignFiles(r)
+			r.fs.AddFile(stateDir+"/state.json", 0o600, 0, "{}")
+			err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: foreign, ConfigExplicit: true, StateDirOf: noLoad(t)})
+			if !errors.Is(err, install.ErrRefused) || !strings.Contains(err.Error(), "remove it and its conf.d by hand") {
+				t.Fatalf("err = %v, want a refusal that says to remove it by hand", err)
+			}
+			untouched(t, r)
+			if !strings.Contains(r.out.String(), "left "+foreign) {
+				t.Errorf("the output does not list the file left:\n%s", r.out)
+			}
+			// What can be proven is still done: the units, and the state directory
+			// the units recorded.
+			for _, n := range install.UnitNames {
+				if r.fs.Exists(unitPath(n)) {
+					t.Errorf("%s was not removed", n)
+				}
+			}
+			if r.fs.Exists(stateDir + "/state.json") {
+				t.Errorf("the recorded state was not purged:\n%s", r.out)
+			}
+		})
+	}
+	t.Run("without an installed unit nothing is known: remove by hand", func(t *testing.T) {
+		r := newRig()
+		foreignFiles(r)
+		err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: "/etc/otherapp/otherapp.yaml", ConfigExplicit: true, StateDirOf: noLoad(t)})
+		if !errors.Is(err, install.ErrRefused) || !strings.Contains(err.Error(), "by hand") {
+			t.Fatalf("err = %v", err)
+		}
+		untouched(t, r)
+		if !strings.Contains(r.out.String(), "no installed unit records a state directory") {
+			t.Errorf("no word about the state directory:\n%s", r.out)
+		}
+	})
+	t.Run("after a plain uninstall a custom --config is refused, the default path still purges", func(t *testing.T) {
+		r := newRig()
+		if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
+			t.Fatal(err)
+		}
+		foreignFiles(r)
+		r.fs.AddFile(cfgPath, 0o644, 0, "{}\n")
+		if err := r.uninstall(install.UninstallOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: "/etc/otherapp/otherapp.yaml", ConfigExplicit: true, StateDirOf: noLoad(t)})
+		if !errors.Is(err, install.ErrRefused) {
+			t.Fatalf("err = %v", err)
+		}
+		untouched(t, r)
+		if err := r.uninstall(install.UninstallOptions{Purge: true}); err != nil {
+			t.Fatalf("purge of the default path: %v\n%s", err, r.out)
+		}
+		if r.fs.Exists(cfgPath) || r.fs.Exists("/etc/keepwatch") {
+			t.Errorf("the default configuration is still there:\n%s", r.out)
+		}
+	})
+	t.Run("a unit file without the marker records nothing", func(t *testing.T) {
+		r := newRig()
+		foreignFiles(r)
+		r.fs.AddFile(unitPath(install.CheckService), 0o644, 0, "[Service]\nExecStart=/usr/bin/x check --config /etc/otherapp/otherapp.yaml\nReadWritePaths=/etc/otherapp\n")
+		err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: "/etc/otherapp/otherapp.yaml", ConfigExplicit: true, StateDirOf: noLoad(t)})
+		if !errors.Is(err, install.ErrRefused) {
+			t.Fatalf("err = %v", err)
+		}
+		untouched(t, r)
+		if !r.fs.Exists(unitPath(install.CheckService)) {
+			t.Error("the foreign unit file was removed")
+		}
+	})
+	t.Run("an empty configuration path is never trusted", func(t *testing.T) {
+		r := newRig()
+		r.fs.AddFile(unitPath(install.CheckService), 0o644, 0, "# keepwatch-managed-unit: x\n[Service]\nExecStart=/usr/local/bin/keepwatch check\n")
+		err := install.Uninstall(context.Background(), r.deps, install.UninstallOptions{Purge: true, ConfigPath: "", ConfigExplicit: true,
+			DefaultConfigPath: cfgPath, DefaultStateDir: stateDir, StateDirOf: noLoad(t)})
+		if !errors.Is(err, install.ErrRefused) {
+			t.Errorf("a unit without --config and an empty path: err = %v", err)
+		}
+	})
+	t.Run("dry run refuses the same and removes nothing", func(t *testing.T) {
+		r := newRig()
+		if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
+			t.Fatal(err)
+		}
+		foreignFiles(r)
+		r.fs.Log = nil
+		err := r.uninstall(install.UninstallOptions{DryRun: true, Purge: true, ConfigPath: "/etc/otherapp/otherapp.yaml", ConfigExplicit: true, StateDirOf: noLoad(t)})
+		if !errors.Is(err, install.ErrRefused) || len(r.fs.Log) != 0 {
+			t.Errorf("err = %v, log = %v", err, r.fs.Log)
+		}
+	})
+}
+
+func TestPurgeFollowsTheConfigurationRecordedInTheUnits(t *testing.T) {
+	setup := func() *rig {
 		r := newRig()
 		r.fs.AddDir("/srv", 0o755, 0)
 		r.fs.AddDir("/srv/kw", 0o755, 0)
-		r.fs.AddFile("/srv/kw/main.yaml", 0o644, 0, "{}")
-		r.fs.AddFile("/srv/kw/other.yaml", 0o644, 0, "{}")
-		if err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: "/srv/kw/main.yaml"}); err != nil {
+		r.fs.AddFile("/srv/kw/main.yaml", 0o644, 0, "{}\n")
+		s := spec(t)
+		s.ConfigPath, s.StateDir = "/srv/kw/main.yaml", "/srv/kw/state"
+		if err := r.install(t, install.InstallOptions{Spec: s, ConfigFound: true}); err != nil {
 			t.Fatal(err)
 		}
-		if r.fs.Exists("/srv/kw/main.yaml") || !r.fs.Exists("/srv/kw/other.yaml") || !r.fs.Exists("/srv/kw") {
-			t.Error("purge removed the wrong files")
+		r.fs.AddDir("/srv/kw/conf.d", 0o755, 0)
+		r.fs.AddFile("/srv/kw/conf.d/10-site.yaml", 0o644, 0, "{}\n")
+		r.fs.AddFile("/srv/kw/state/state.json", 0o600, 0, "{}")
+		r.fs.AddFile("/srv/kw/other.yaml", 0o644, 0, "{}")
+		// Another configuration, at the default path, is not what the units use.
+		r.fs.AddDir("/etc/keepwatch", 0o750, 0)
+		r.fs.AddFile(cfgPath, 0o644, 0, "{}\n")
+		return r
+	}
+	read := func(t *testing.T) func(string) (string, bool, error) {
+		return func(p string) (string, bool, error) {
+			if p != "/srv/kw/main.yaml" {
+				t.Errorf("the configuration %s was consulted", p)
+			}
+			return "/srv/kw/state", true, nil
+		}
+	}
+	for name, explicit := range map[string]bool{"without --config": false, "with the recorded --config": true} {
+		t.Run(name, func(t *testing.T) {
+			r := setup()
+			o := install.UninstallOptions{Purge: true, StateDirOf: read(t)}
+			if explicit {
+				o.ConfigPath, o.ConfigExplicit = "/srv/kw/main.yaml", true
+			}
+			if err := r.uninstall(o); err != nil {
+				t.Fatalf("%v\n%s", err, r.out)
+			}
+			for _, p := range []string{"/srv/kw/main.yaml", "/srv/kw/conf.d", "/srv/kw/conf.d/10-site.yaml", "/srv/kw/state/state.json", "/srv/kw/state"} {
+				if r.fs.Exists(p) {
+					t.Errorf("%s is still there", p)
+				}
+			}
+			for _, p := range []string{"/srv/kw/other.yaml", "/srv/kw", cfgPath, "/etc/keepwatch"} {
+				if !r.fs.Exists(p) {
+					t.Errorf("%s was removed", p)
+				}
+			}
+		})
+	}
+	t.Run("the default path is trusted too, next to a recorded one", func(t *testing.T) {
+		r := setup()
+		err := r.uninstall(install.UninstallOptions{Purge: true, ConfigPath: cfgPath, ConfigExplicit: true,
+			StateDirOf: func(string) (string, bool, error) { return stateDir, true, nil }})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, r.out)
+		}
+		if r.fs.Exists(cfgPath) || !r.fs.Exists("/srv/kw/main.yaml") {
+			t.Error("purge went to the wrong configuration")
+		}
+	})
+	t.Run("an unreadable configuration falls back to what the unit recorded", func(t *testing.T) {
+		r := setup()
+		err := r.uninstall(install.UninstallOptions{Purge: true,
+			StateDirOf: func(string) (string, bool, error) { return "", true, errors.New("bad yaml") }})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, r.out)
+		}
+		if r.fs.Exists("/srv/kw/state/state.json") || !strings.Contains(r.out.String(), "warning: the configuration /srv/kw/main.yaml cannot be read") {
+			t.Errorf("\n%s", r.out)
+		}
+	})
+	t.Run("no configuration, no unit: the default state directory", func(t *testing.T) {
+		r := newRig()
+		r.fs.AddDir(stateDir, 0o700, 0)
+		r.fs.AddFile(stateDir+"/state.json", 0o600, 0, "{}")
+		err := r.uninstall(install.UninstallOptions{Purge: true,
+			StateDirOf: func(string) (string, bool, error) { return "", false, nil }})
+		if err != nil || r.fs.Exists(stateDir) || !strings.Contains(r.out.String(), "purging the default") {
+			t.Errorf("err = %v\n%s", err, r.out)
 		}
 	})
 }

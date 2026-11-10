@@ -190,27 +190,13 @@ func runUninstall(e env, args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	h := opsFor(e).withDefaults(e, nil)
-	stateDir := filepath.Clean(config.DefaultStateDir)
-	if purge {
-		dir, found, err := stateDirOf(h, path)
-		switch {
-		case err != nil:
-			fmt.Fprintf(stderr, "keepwatch uninstall: warning: the configuration cannot be read (%v), purging the default state directory %s\n", firstLineOf(err), stateDir)
-		case found:
-			stateDir = dir
-		}
-	}
 	deps := install.Deps{FS: h.fs, Runner: h.runner, Geteuid: h.geteuid, UnitDir: h.unitDir, SystemdRunDir: h.systemdRunDir, Out: stdout}
-	err = install.Uninstall(e.ctx, deps, install.UninstallOptions{DryRun: dryRun, Purge: purge, ConfigPath: path, StateDir: stateDir})
+	err = install.Uninstall(e.ctx, deps, install.UninstallOptions{
+		DryRun: dryRun, Purge: purge, ConfigPath: path, ConfigExplicit: cfgPath != "",
+		DefaultConfigPath: config.DefaultPath, DefaultStateDir: filepath.Clean(config.DefaultStateDir),
+		StateDirOf: func(p string) (string, bool, error) { return stateDirOf(h, p) },
+	})
 	return installExit("uninstall", err, stderr)
-}
-
-func firstLineOf(err error) string {
-	var errs config.Errors
-	if errors.As(err, &errs) && len(errs) > 0 {
-		return errs[0].Error()
-	}
-	return err.Error()
 }
 
 // sendTest is the seam for `doctor --send-test`: it delivers a test

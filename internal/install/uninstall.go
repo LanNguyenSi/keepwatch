@@ -30,16 +30,31 @@ type UninstallOptions struct {
 	DryRun bool
 	// Purge also removes keepwatch's configuration and state.
 	Purge bool
-	// ConfigPath and StateDir are the paths Purge works on.
-	ConfigPath string
-	StateDir   string
+	// ConfigPath is the main configuration file as the command line gave it
+	// (or the default), ConfigExplicit says whether it was given.
+	ConfigPath     string
+	ConfigExplicit bool
+	// DefaultConfigPath is the default path of the configuration file;
+	// DefaultStateDir the default state directory.
+	DefaultConfigPath string
+	DefaultStateDir   string
+	// StateDirOf returns the state_dir of the configuration file at the path
+	// (found is false when the file does not exist).
+	StateDirOf func(configPath string) (dir string, found bool, err error)
 }
 
 // Uninstall stops and disables the timers, removes the unit files that carry
 // the marker, and reloads systemd. A file with the name of a unit that does
 // not carry the marker (or that is a link) is left alone and reported. With
-// Purge it then removes keepwatch's own configuration and state files and the
-// directories that are empty afterwards; see the README for the list.
+// Purge it then removes keepwatch's own state files, and its configuration
+// files if the configuration provably is keepwatch's, and the directories that
+// are empty afterwards; see the README for the list.
+//
+// A configuration file is proven to be keepwatch's only by its path: the
+// default path, or the --config recorded in an installed unit that carries the
+// marker (read before the units are removed). That a file loads as a keepwatch
+// configuration proves nothing: an empty YAML file loads. Anything else is
+// left alone and reported, and the result is ErrRefused.
 func Uninstall(ctx context.Context, d Deps, o UninstallOptions) error {
 	say := func(format string, a ...any) { fmt.Fprintf(d.Out, format+"\n", a...) }
 	would := ""
@@ -52,6 +67,7 @@ func Uninstall(ctx context.Context, d Deps, o UninstallOptions) error {
 
 	unitDir := d.unitDir()
 	ours := map[string]bool{}
+	var rec Installed // what the installed units say, read before they are removed
 	ud, err := d.FS.OpenDir(unitDir)
 	switch {
 	case err == nil:
@@ -76,6 +92,15 @@ func Uninstall(ctx context.Context, d Deps, o UninstallOptions) error {
 					say("left %s: not written by keepwatch (no marker comment)", p)
 				default:
 					ours[name] = true
+					if strings.HasSuffix(name, ".service") {
+						in := Inspect(cur)
+						if rec.ConfigPath == "" {
+							rec.ConfigPath = in.ConfigPath
+						}
+						if rec.ReadWritePaths == "" {
+							rec.ReadWritePaths = in.ReadWritePaths
+						}
+					}
 				}
 			}
 		}
@@ -130,9 +155,9 @@ func Uninstall(ctx context.Context, d Deps, o UninstallOptions) error {
 	}
 
 	if o.Purge {
-		return d.purge(o, say, would)
+		return d.purge(o, rec, say, would)
 	}
-	say("configuration (%s) and state (%s) are kept; --purge removes them", filepath.Dir(o.ConfigPath), o.StateDir)
+	say("configuration and state are kept; --purge removes them")
 	return nil
 }
 
@@ -140,8 +165,47 @@ func Uninstall(ctx context.Context, d Deps, o UninstallOptions) error {
 // configuration directory, and each directory if nothing else is in it. It
 // never removes a directory with content it does not own, never follows a link
 // and never goes outside the two directories (and conf.d below the second).
-func (d Deps) purge(o UninstallOptions, say func(string, ...any), would string) error {
+// The configuration side is only for a path that is provably keepwatch's (see
+// Uninstall); rec is what the installed units recorded.
+func (d Deps) purge(o UninstallOptions, rec Installed, say func(string, ...any), would string) error {
+	cfgPath := o.ConfigPath
+	if !o.ConfigExplicit && rec.ConfigPath != "" {
+		cfgPath = rec.ConfigPath
+	}
+	trusted := cfgPath == o.DefaultConfigPath || (rec.ConfigPath != "" && cfgPath == rec.ConfigPath)
+
+	// The state directory: from a configuration that is keepwatch's, else from
+	// what the units recorded, else not at all.
+	stateDir := ""
+	if trusted && o.StateDirOf != nil {
+		dir, found, err := o.StateDirOf(cfgPath)
+		switch {
+		case err != nil:
+			say("warning: the configuration %s cannot be read (%v)", cfgPath, firstLine(err.Error()))
+		case found:
+			stateDir = dir
+		}
+	}
+	if stateDir == "" {
+		stateDir = rec.ReadWritePaths
+	}
+	if stateDir == "" && trusted {
+		stateDir = o.DefaultStateDir
+		say("the state directory is not known from a configuration or an installed unit, purging the default %s", stateDir)
+	}
+
 	var problems []string
+	var refusals []string
+	if !trusted {
+		m := fmt.Sprintf("%s is neither the default configuration path (%s) nor the --config of an installed keepwatch unit, so it is not provably keepwatch's: remove it and its conf.d by hand", cfgPath, o.DefaultConfigPath)
+		say("left %s: %s", cfgPath, m)
+		refusals = append(refusals, m)
+	}
+	if stateDir == "" {
+		m := "no installed unit records a state directory for that configuration: remove its state by hand"
+		say("left the state directory: %s", m)
+		refusals = append(refusals, m)
+	}
 	do := func(dir, label string, owned func(name string) bool) {
 		od, err := d.FS.OpenDir(dir)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -186,24 +250,31 @@ func (d Deps) purge(o UninstallOptions, say func(string, ...any), would string) 
 			}
 		}
 	}
-	do(o.StateDir, "state", func(n string) bool {
-		return n == stateFile || strings.HasPrefix(n, tempPrefix) || strings.HasPrefix(n, ProbePrefix) || strings.HasPrefix(n, tmpWritePrefix)
-	})
-
-	cfgDir := filepath.Dir(o.ConfigPath)
-	confd := filepath.Join(cfgDir, "conf.d")
-	if info, err := d.FS.Lstat(confd); err == nil {
-		if info.IsDir() {
-			do(confd, "drop-ins", func(n string) bool { return strings.HasSuffix(n, ".yaml") && !strings.HasPrefix(n, ".") })
-		} else {
-			say("left %s: not a directory", confd)
-		}
+	if stateDir != "" {
+		do(stateDir, "state", func(n string) bool {
+			return n == stateFile || strings.HasPrefix(n, tempPrefix) || strings.HasPrefix(n, ProbePrefix) || strings.HasPrefix(n, tmpWritePrefix)
+		})
 	}
-	mainName := filepath.Base(o.ConfigPath)
-	do(cfgDir, "configuration", func(n string) bool { return n == mainName })
+
+	if trusted {
+		cfgDir := filepath.Dir(cfgPath)
+		confd := filepath.Join(cfgDir, "conf.d")
+		if info, err := d.FS.Lstat(confd); err == nil {
+			if info.IsDir() {
+				do(confd, "drop-ins", func(n string) bool { return strings.HasSuffix(n, ".yaml") && !strings.HasPrefix(n, ".") })
+			} else {
+				say("left %s: not a directory", confd)
+			}
+		}
+		mainName := filepath.Base(cfgPath)
+		do(cfgDir, "configuration", func(n string) bool { return n == mainName })
+	}
 
 	if len(problems) > 0 {
 		return failed("%s", strings.Join(problems, "\n"))
+	}
+	if len(refusals) > 0 {
+		return refuse("%s", strings.Join(refusals, "; "))
 	}
 	return nil
 }

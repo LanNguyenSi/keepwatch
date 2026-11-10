@@ -895,7 +895,8 @@ Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
 failed after work had started (a `systemctl` command, a write; what was done is
 printed and a second run continues), 2 refused or usage error (not root, systemd
 not running, bad flag, a file that is not keepwatch's, an invalid configuration;
-nothing was changed), 3 internal error.
+nothing was changed, except that `uninstall --purge` exits 2 after doing what it
+could when it refuses a configuration it cannot prove is keepwatch's), 3 internal error.
 
 ### The units and their hardening
 
@@ -949,17 +950,29 @@ configuration and state stay. `--dry-run` lists what would be done.
 
 `--purge` additionally removes keepwatch's own files and nothing else:
 
-- in `state_dir`: `state.json` and leftover `.state.json.tmp-*` files, then the
-  directory if it is empty;
+- in the state directory: `state.json`, leftover `.state.json.tmp-*` files and the
+  probe and temporary files that `doctor` and the atomic writer leave after a crash,
+  then the directory if it is empty;
 - the main configuration file, the `*.yaml` files in the `conf.d` directory next to
   it, then `conf.d` and the configuration directory if each is empty.
+
+Which configuration is keepwatch's is decided by its path alone, because that a
+file loads as a keepwatch configuration proves nothing (an empty YAML file does).
+It is keepwatch's if it is the default path, `/etc/keepwatch/keepwatch.yaml`, or the
+`--config` recorded in an installed unit that carries the marker (read before the
+units are removed). Without `--config`, `--purge` uses the recorded one. The state
+directory comes from that configuration, else from the `ReadWritePaths` of the
+units. For any other `--config`, and for a plain `uninstall` run earlier followed by
+a purge of a custom path, the configuration side is skipped: the output says
+`left FILE: ... remove it and its conf.d by hand`, and the exit code is 2 (the units
+and the state that could be proven were still removed).
 
 Every other file in these directories (for example the file named by
 `notify.ntfy.token_file`) stays, and so does the directory that holds it; the
 output says `left DIR: it holds entries that are not keepwatch's own (...)`.
 A symbolic link is never followed or removed as if it were a keepwatch file. If
-the configuration cannot be read, `--purge` uses the default state directory
-and says so. Use `--config` to point it at a configuration file in another place.
+the configuration cannot be read, `--purge` says so and takes the state directory
+from the units, or the default one.
 
 ### doctor
 

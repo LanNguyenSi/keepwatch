@@ -278,9 +278,58 @@ func TestUninstallCommand(t *testing.T) {
 		h.cfgErr = config.Errors{{File: "/etc/keepwatch/keepwatch.yaml", Line: 1, Msg: "bad"}}
 		h.fs.AddDir("/var/lib/keepwatch", 0o700, 0)
 		h.fs.AddFile("/var/lib/keepwatch/state.json", 0o600, 0, "{}")
-		code, _, stderr := runCmd("uninstall", "--purge")
-		if code != ExitOK || !strings.Contains(stderr, "warning") || h.fs.Exists("/var/lib/keepwatch/state.json") {
-			t.Errorf("exit = %d stderr = %q", code, stderr)
+		code, stdout, _ := runCmd("uninstall", "--purge")
+		if code != ExitOK || !strings.Contains(stdout, "warning") || h.fs.Exists("/var/lib/keepwatch/state.json") {
+			t.Errorf("exit = %d stdout = %q", code, stdout)
+		}
+	})
+	t.Run("purge of a configuration that is not keepwatch's is refused with exit 2 and leaves it", func(t *testing.T) {
+		h := newHost(t)
+		h.fs.AddDir("/etc/otherapp", 0o755, 0)
+		h.fs.AddFile("/etc/otherapp/otherapp.yaml", 0o644, 0, "a: 1\n")
+		h.fs.AddFile("/etc/otherapp/empty.yaml", 0o644, 0, "")
+		for _, f := range []string{"otherapp.yaml", "empty.yaml"} {
+			code, stdout, stderr := runCmd("uninstall", "--purge", "--config", "/etc/otherapp/"+f)
+			if code != ExitUsage || !strings.Contains(stderr, "by hand") || !strings.Contains(stdout, "left /etc/otherapp/"+f) {
+				t.Errorf("%s: exit = %d stderr = %q stdout = %q", f, code, stderr, stdout)
+			}
+			if !h.fs.Exists("/etc/otherapp/"+f) || !h.fs.Exists("/etc/otherapp") {
+				t.Errorf("%s was removed", f)
+			}
+		}
+	})
+	t.Run("purge follows the --config recorded in the units, and an explicit other --config is refused", func(t *testing.T) {
+		h := newHost(t)
+		h.fs.AddDir("/srv", 0o755, 0)
+		h.fs.AddDir("/srv/kw", 0o755, 0)
+		h.fs.AddFile("/srv/kw/main.yaml", 0o644, 0, "{}\n")
+		h.fs.AddFile("/srv/kw/other.yaml", 0o644, 0, "{}\n")
+		h.cfg.StateDir = "/srv/kw/state"
+		if code, _, stderr := runCmd("install", "--config", "/srv/kw/main.yaml"); code != ExitOK {
+			t.Fatalf("install: %d %q", code, stderr)
+		}
+		if code, _, stderr := runCmd("uninstall", "--purge", "--config", "/srv/kw/other.yaml"); code != ExitUsage || !strings.Contains(stderr, "by hand") {
+			t.Errorf("another --config: exit = %d stderr = %q", code, stderr)
+		}
+		if !h.fs.Exists("/srv/kw/other.yaml") || h.fs.Exists("/srv/kw/state/state.json") || h.fs.Exists("/etc/systemd/system/"+install.CheckTimer) {
+			t.Error("the refusal did not leave the foreign file or did not do the provable work")
+		}
+		// The units are gone now; the recorded path is no longer known.
+		if code, _, _ := runCmd("uninstall", "--purge", "--config", "/srv/kw/main.yaml"); code != ExitUsage || !h.fs.Exists("/srv/kw/main.yaml") {
+			t.Errorf("after the units are gone a custom --config is not proven: exit = %d", code)
+		}
+	})
+	t.Run("purge without --config uses the recorded one", func(t *testing.T) {
+		h := newHost(t)
+		h.fs.AddDir("/srv", 0o755, 0)
+		h.fs.AddDir("/srv/kw", 0o755, 0)
+		h.fs.AddFile("/srv/kw/main.yaml", 0o644, 0, "{}\n")
+		h.cfg.StateDir = "/srv/kw/state"
+		if code, _, stderr := runCmd("install", "--config", "/srv/kw/main.yaml"); code != ExitOK {
+			t.Fatalf("install: %d %q", code, stderr)
+		}
+		if code, stdout, stderr := runCmd("uninstall", "--purge"); code != ExitOK || h.fs.Exists("/srv/kw/main.yaml") {
+			t.Errorf("exit = %d stderr = %q\n%s", code, stderr, stdout)
 		}
 	})
 	t.Run("not root is 2", func(t *testing.T) {
