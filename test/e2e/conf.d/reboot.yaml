@@ -1,0 +1,4 @@
+# Added by the "reboot" scenario only.
+checks:
+  system.reboot_required:
+    enabled: true

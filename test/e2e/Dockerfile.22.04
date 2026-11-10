@@ -1,0 +1,27 @@
+# End-to-end image for keepwatch on Ubuntu 22.04. The base is pinned by the digest
+# of the multi-arch index, so arm64 and amd64 hosts get the same release.
+FROM ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openssh-server fail2ban unattended-upgrades needrestart \
+      iproute2 python3 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# The test configuration is root-owned and not group/other writable, as
+# keepwatch requires of a configuration file.
+RUN mkdir -p /etc/keepwatch /var/lib/keepwatch /opt/keepwatch /out \
+ && chmod 755 /etc/keepwatch \
+ && chmod 700 /var/lib/keepwatch
+COPY keepwatch-e2e.yaml /etc/keepwatch/keepwatch.yaml
+COPY fail2ban-e2e.local /etc/fail2ban/jail.d/e2e.local
+COPY conf.d/ /opt/e2e/conf.d/
+COPY sshd/ /opt/e2e/sshd/
+COPY scenario.sh listen.py /opt/e2e/
+RUN chown -R root:root /etc/keepwatch /etc/fail2ban/jail.d/e2e.local /opt/e2e \
+ && chmod 644 /etc/keepwatch/keepwatch.yaml /etc/fail2ban/jail.d/e2e.local \
+ && chmod 755 /opt/e2e/scenario.sh
+
+# keepwatch is copied in at run time (docker cp), so one image serves every build.
+ENTRYPOINT ["/opt/e2e/scenario.sh"]

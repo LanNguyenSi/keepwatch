@@ -5,7 +5,7 @@ PKG     := github.com/LanNguyenSi/keepwatch/internal/version
 LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PKG).Date=$(DATE)
 STATICCHECK ?= staticcheck
 
-.PHONY: build test lint clean
+.PHONY: build test lint e2e clean
 
 build:
 	mkdir -p bin
@@ -19,6 +19,9 @@ lint:
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	go vet ./...
 	$(STATICCHECK) ./...
+
+e2e:
+	test/e2e/run.sh
 
 clean:
 	rm -rf bin dist
