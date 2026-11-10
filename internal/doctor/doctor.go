@@ -545,7 +545,8 @@ func (d Deps) unitConfig(out reporter, unit, cfgPath string) {
 // unitNotify checks that an installed service notifies exactly when
 // notify.ntfy is configured. A service with --notify and no notify.ntfy exits
 // 3 on every run. One without --notify while notify.ntfy is configured moves
-// the state forward past the alerts, so nobody is told of them.
+// the state forward past the alerts, so nobody is told of them: a loss, and a
+// problem.
 func (d Deps) unitNotify(out reporter, unit string, unitNotifies bool, cfg *config.Config) {
 	if cfg == nil {
 		return
@@ -555,7 +556,7 @@ func (d Deps) unitNotify(out reporter, unit string, unitNotifies bool, cfg *conf
 	case unitNotifies && !configured:
 		out.add(Problem, "units", "%s runs with --notify, but notify.ntfy is not configured: every scheduled run exits 3. Configure notify.ntfy, or run \"keepwatch install\" again to drop --notify", unit)
 	case !unitNotifies && configured:
-		out.add(Warn, "units", "notify.ntfy is configured, but %s runs without --notify: a scheduled run consumes the alerts it finds and nobody is told. Run \"keepwatch install\" again", unit)
+		out.add(Problem, "units", "notify.ntfy is configured, but %s runs without --notify: every scheduled run consumes the alerts it finds and nobody is told, which is a loss. Run \"keepwatch install\" again", unit)
 	}
 }
 

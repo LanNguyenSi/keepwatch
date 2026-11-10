@@ -574,7 +574,7 @@ func TestInstallAddsNotifyOnlyWhenConfigured(t *testing.T) {
 		}
 		withNtfy(t, h)
 		code, stdout, _ := runCmd("doctor")
-		if code != ExitOK || !strings.Contains(stdout, "warn    units: notify.ntfy is configured, but /etc/systemd/system/keepwatch-check.service runs without --notify") {
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM units: notify.ntfy is configured, but /etc/systemd/system/keepwatch-check.service runs without --notify") {
 			t.Fatalf("doctor: exit = %d\n%s", code, stdout)
 		}
 		h.sd.Runner.Calls = nil

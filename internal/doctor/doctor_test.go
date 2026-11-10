@@ -714,17 +714,17 @@ func TestUnitsNotifyMatchTheConfiguration(t *testing.T) {
 			}
 		}
 	})
-	t.Run("configured, unit without --notify: warn for each service", func(t *testing.T) {
+	t.Run("configured, unit without --notify: a problem for each service (alerts are lost)", func(t *testing.T) {
 		r := newRig(t)
 		reinstall(r, false)
 		rep := r.run()
 		for _, svc := range []string{install.CheckService, install.ReportService} {
-			if !has(rep, doctor.Warn, "units", "notify.ntfy is configured", svc, "without --notify", "consumes the alerts", "keepwatch install\" again") {
+			if !has(rep, doctor.Problem, "units", "notify.ntfy is configured", svc, "without --notify", "consumes the alerts", "a loss", "keepwatch install\" again") {
 				t.Errorf("%s:\n%s", svc, dump(rep))
 			}
 		}
-		if rep.Problems() != 0 {
-			t.Errorf("a missing --notify is a warning, not a problem:\n%s", dump(rep))
+		if rep.Problems() != 2 || rep.Warnings() != 0 {
+			t.Errorf("want exactly the two problems, one per service:\n%s", dump(rep))
 		}
 	})
 	t.Run("not configured, unit with --notify: every run exits 3, a problem", func(t *testing.T) {
