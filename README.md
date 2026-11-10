@@ -610,7 +610,9 @@ one block when it is matched:
   and `bypass` are left alone). A quoted value may hold escaped quotes
   (`"a\"b"`) and a quote that is never closed runs to the end of the text;
 - `--password value` style flags (also when a NUL byte, as in a command line
-  read from `/proc`, separates the flag from its value), `Authorization: ...`
+  read from `/proc`, separates the flag from its value; a flag counts only at the
+  start or after a separator, so a word such as `prohibit-password` or
+  `x-token` is not a flag), `Authorization: ...`
   values, `Cookie:` and `Set-Cookie:` values (the rest of the line), bearer
   tokens;
 - URLs with credentials (`scheme://user:password@host`, `scheme://token@host`);

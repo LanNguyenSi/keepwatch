@@ -129,6 +129,8 @@ var positives = []struct {
 	{"flag at the start", "--password hunter2", "hunter2", "--password [REDACTED]"},
 	{"single dash flag", "tool -password hunter2", "hunter2", "-password [REDACTED]"},
 	{"flag with a prefix", "tool --db-password hunter2 x", "hunter2", "--db-password [REDACTED] x"},
+	{"upper-case flag", "tool --Password hunter2", "hunter2", "--Password [REDACTED]"},
+	{"upper-case token flag", "tool -TOKEN hunter2", "hunter2", "-TOKEN [REDACTED]"},
 	{"api-key flag after a command", "cmd --api-key hunter2", "hunter2", "--api-key [REDACTED]"},
 	{"quoted flag", `cmd "--token" hunter2`, "hunter2", `"--token" [REDACTED]`},
 	{"single quoted flag", `cmd '--token' hunter2`, "hunter2", `'--token' [REDACTED]`},
