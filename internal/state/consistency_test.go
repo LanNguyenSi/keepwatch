@@ -67,6 +67,41 @@ func TestCheckConsistencyRejectsEachInconsistency(t *testing.T) {
 	}
 }
 
+// Every check of the state is examined, not only the first: the broken one is
+// second of two, last of three, and in the middle.
+func TestCheckConsistencyExaminesEveryCheck(t *testing.T) {
+	build := func(n int) *State {
+		var rs []result.Result
+		for i := 0; i < n; i++ {
+			r := capped(106 + i)
+			r.CheckID = fmt.Sprintf("c%d", i)
+			rs = append(rs, r)
+		}
+		return FromResults(rs, t0, nil)
+	}
+	for _, tc := range []struct{ n, broken int }{{2, 1}, {3, 2}, {3, 1}} {
+		st := build(tc.n)
+		if err := CheckConsistency(st); err != nil {
+			t.Fatalf("n=%d: the starting state is not consistent: %v", tc.n, err)
+		}
+		st.Checks[tc.broken].Items[0].Key = result.SubjectKey("not in the set")
+		err := CheckConsistency(st)
+		want := fmt.Sprintf("check %q", fmt.Sprintf("c%d", tc.broken))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("n=%d broken=%d: error = %v, want one naming %s", tc.n, tc.broken, err, want)
+		}
+	}
+	// the items-vs-total rule too, on a later check
+	st := build(2)
+	c := &st.Checks[1]
+	c.Total, c.Keys = 1, c.Keys[:1]
+	c.Digest = result.DigestOfKeys(c.Keys)
+	c.Items = []Item{{Key: c.Keys[0]}, {Key: c.Keys[0]}}
+	if err := CheckConsistency(st); err == nil || !strings.Contains(err.Error(), "items listed for a total of") {
+		t.Errorf("second check listing more items than its total: %v", err)
+	}
+}
+
 // A state that is fine for a run but that the checks for a foreign file would
 // refuse is not an inconsistency of the run.
 func TestCheckConsistencyDoesNotApplyTheLimitsOfAFile(t *testing.T) {

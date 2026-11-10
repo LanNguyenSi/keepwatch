@@ -476,9 +476,10 @@ not read or written, and the exit code is 3, because the next run could not be
 compared reliably.
 
 Before the comparison, keepwatch checks the state it built from this run for
-consistency: for each check with a key set, the keys are sorted, unique and
-hash-sized, the total and the digest match them, no more items are listed than
-the set holds and every listed item is in the set. This cannot fail on a correct
+consistency: for each check with a key set, the digest is hash-sized and no
+more items are listed than the total; and (for sets small enough to list their
+keys) the keys are sorted, unique and hash-sized, the total and the digest match
+them and every listed item is in the set. This cannot fail on a correct
 build; if it does, it is a defect in keepwatch, not a property of the host. The
 run then takes the same path as an unusable state directory: the report is still
 printed, no changes are reported, a warning names the check and the rule (never

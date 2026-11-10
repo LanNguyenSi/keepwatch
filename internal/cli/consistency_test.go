@@ -41,7 +41,7 @@ func TestCheckWithAnInconsistentStateOfTheRunIsAnInternalError(t *testing.T) {
 			if st.Checks[i].Kind == "service_active" {
 				// a set that holds a different item than the one listed
 				other := result.SubjectKey("some other item")
-				st.Checks[i].Items = []state.Item{{Key: result.SubjectKey("listed"), Subject: "listed"}}
+				st.Checks[i].Items = []state.Item{{Key: result.SubjectKey("SECRET-SUBJECT"), Subject: "SECRET-SUBJECT"}}
 				st.Checks[i].Total = 1
 				st.Checks[i].Keys = []string{other}
 				st.Checks[i].Digest = result.DigestOfKeys([]string{other})
@@ -70,14 +70,14 @@ func TestCheckWithAnInconsistentStateOfTheRunIsAnInternalError(t *testing.T) {
 	if len(v.Changes) != 0 {
 		t.Errorf("a diff was computed: %v", v.Changes)
 	}
-	if !strings.Contains(out, "t.service") {
+	if !strings.Contains(out, "t.service") || strings.Contains(out, "SECRET-SUBJECT") {
 		t.Errorf("the report does not show the results:\n%s", out)
 	}
 	for _, where := range []string{errb, strings.Join(v.Warnings, "\n")} {
 		if !strings.Contains(where, "internal inconsistency") || !strings.Contains(where, "not in the key set") {
 			t.Errorf("warning missing or without the rule: %q", where)
 		}
-		if strings.Contains(where, "listed") && strings.Contains(where, "subject") {
+		if strings.Contains(where, "SECRET-SUBJECT") {
 			t.Errorf("warning names a subject: %q", where)
 		}
 	}
