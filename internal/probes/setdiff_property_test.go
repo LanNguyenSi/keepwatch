@@ -126,15 +126,15 @@ func runOf(t *testing.T, rng *rand.Rand, sd side, clean func(string) string, st 
 		ev[i] = result.Evidence{Subject: s, Detail: "d"}
 	}
 	rng.Shuffle(len(ev), func(i, j int) { ev[i], ev[j] = ev[j], ev[i] })
-	shown, _ := probes.LimitEvidence(ev)
+	shown, _, set := probes.LimitEvidence(ev)
 	exceptedRaw := map[string]bool{}
 	for i := range shown {
-		if !shown[i].IsMarker() && sd.covered[shown[i].Subject] {
+		if (set == nil || i < len(shown)-1) && sd.covered[shown[i].Subject] {
 			shown[i].Excepted = true
 			exceptedRaw[shown[i].Subject] = true
 		}
 	}
-	r := result.Result{CheckID: "c", Kind: "k", Status: st, Severity: result.High, Evidence: shown}
+	r := result.Result{CheckID: "c", Kind: "k", Status: st, Severity: result.High, Evidence: shown, Set: set}
 	return state.FromResults([]result.Result{r}, time.Unix(0, 0), clean).Checks[0], exceptedRaw
 }
 

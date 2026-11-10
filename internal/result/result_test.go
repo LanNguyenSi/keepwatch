@@ -43,7 +43,7 @@ func TestResultJSONShape(t *testing.T) {
 }
 
 func TestEvidenceSetIsNotSerialized(t *testing.T) {
-	r := Result{Evidence: []Evidence{{Subject: "(1 more not shown)", Set: NewEvidenceSet([]Evidence{{Subject: "x"}})}}}
+	r := Result{Evidence: []Evidence{{Subject: "a"}, {Subject: "(1 more not shown)"}}, Set: NewEvidenceSet([]Evidence{{Subject: "a"}, {Subject: "x"}})}
 	b, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,22 @@ func TestEvidenceSetIsNotSerialized(t *testing.T) {
 			t.Errorf("%s contains %q", b, leak)
 		}
 	}
-	if !r.Evidence[0].IsMarker() || (Evidence{Subject: "(1 more not shown)"}).IsMarker() {
-		t.Error("IsMarker must follow the set, not the text")
+}
+
+func TestListedDropsTheMarkerOfACutListOnly(t *testing.T) {
+	ev := []Evidence{{Subject: "a"}, {Subject: "(1 more not shown)"}}
+	cut := Result{Evidence: ev, Set: NewEvidenceSet(ev)}
+	if got := cut.Listed(); len(got) != 1 || got[0].Subject != "a" {
+		t.Errorf("cut list: %+v", got)
+	}
+	// Without a set nothing is a marker, whatever the text says.
+	if got := (Result{Evidence: ev}).Listed(); len(got) != 2 {
+		t.Errorf("uncut list that looks cut: %+v", got)
+	}
+	if got := (Result{Set: cut.Set}).Listed(); len(got) != 0 {
+		t.Errorf("set without evidence: %+v", got)
+	}
+	if ev[1].Subject != "(1 more not shown)" || len(cut.Evidence) != 2 {
+		t.Error("Listed changed the evidence")
 	}
 }

@@ -585,19 +585,20 @@ func TestFromResultsMergesResultsThatShareAnID(t *testing.T) {
 	}
 }
 
-// capped returns what a probe returns for a list of total distinct subjects:
-// the first 99 sorted and the marker that carries the set of all of them.
-func capped(total int) []result.Evidence {
+// capped returns what the engine hands over for a list of total distinct
+// subjects that a probe cut: the first 99 sorted and the marker, with the set
+// of all of them.
+func capped(total int) result.Result {
 	all := make([]result.Evidence, total)
 	for i := range all {
 		all[i] = result.Evidence{Subject: fmt.Sprintf("item-%05d", i), Detail: "d"}
 	}
-	out := append([]result.Evidence(nil), all[:99]...)
-	return append(out, result.Evidence{
+	ev := append([]result.Evidence(nil), all[:99]...)
+	ev = append(ev, result.Evidence{
 		Subject: fmt.Sprintf("(%d more not shown)", total-99),
 		Detail:  fmt.Sprintf("%d further items are not listed, the limit is 100 items", total-99),
-		Set:     result.NewEvidenceSet(all),
 	})
+	return result.Result{CheckID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low, Evidence: ev, Set: result.NewEvidenceSet(all)}
 }
 
 func items(n int) []result.Evidence {
@@ -608,32 +609,35 @@ func items(n int) []result.Evidence {
 	return out
 }
 
-func TestMarkerIsRecognisedByItsSetOnly(t *testing.T) {
-	look := func(n int) result.Evidence {
-		return result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", n), Detail: fmt.Sprintf("%d further items are not listed, the limit is 100 items", n)}
+func TestMarkerIsRecognisedByTheSetOnly(t *testing.T) {
+	look := result.Evidence{Subject: "(7 more not shown)", Detail: "7 further items are not listed, the limit is 100 items"}
+	res := func(ev []result.Evidence, set *result.EvidenceSet) result.Result {
+		return result.Result{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: ev, Set: set}
 	}
 	cases := []struct {
 		name      string
-		ev        []result.Evidence
+		r         result.Result
 		wantItems int
-		wantSet   bool
 	}{
-		{"genuine marker", capped(106), 99, true},
-		{"no marker", items(10), 10, false},
-		{"empty", nil, 0, false},
-		{"a text that looks exactly like the marker is an item", append(items(99), look(7)), 100, false},
-		{"an excepted marker is still the marker", append(items(99), result.Evidence{Subject: "(7 more not shown)", Excepted: true, Set: result.NewEvidenceSet(items(106))}), 99, true},
-		{"the marker is found wherever it is", append([]result.Evidence{capped(106)[99]}, items(5)...), 5, true},
+		{"a cut list: the last item is the marker", capped(106), 99},
+		{"no set: nothing is a marker", res(items(10), nil), 10},
+		{"empty", res(nil, nil), 0},
+		{"a text that looks exactly like the marker is an item without a set", res(append(items(99), look), nil), 100},
+		{"an excepted marker is still the marker", func() result.Result {
+			r := capped(106)
+			r.Evidence[99].Excepted = true
+			return r
+		}(), 99},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, set := splitMarker(c.ev)
-			if len(got) != c.wantItems || (set != nil) != c.wantSet {
-				t.Errorf("items %d, set %v; want %d, %v", len(got), set != nil, c.wantItems, c.wantSet)
+			st := FromResults([]result.Result{c.r}, t0, nil)
+			if got := len(st.Checks[0].Items); got != c.wantItems {
+				t.Errorf("%d items stored, want %d", got, c.wantItems)
 			}
-			for _, e := range got {
-				if e.IsMarker() {
-					t.Errorf("the marker is among the items")
+			for _, it := range st.Checks[0].Items {
+				if strings.Contains(it.Subject, "more not shown") && c.r.Set != nil {
+					t.Errorf("the marker is stored as an item")
 				}
 			}
 		})
@@ -641,7 +645,7 @@ func TestMarkerIsRecognisedByItsSetOnly(t *testing.T) {
 }
 
 func TestMarkerBecomesTheKeySet(t *testing.T) {
-	st := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: capped(106)}}, t0, nil)
+	st := FromResults([]result.Result{capped(106)}, t0, nil)
 	c := st.Checks[0]
 	if len(c.Items) != 99 || !c.Capped() || c.Total != 106 || len(c.Keys) != 106 || c.SetTotal() != 106 {
 		t.Fatalf("check: %d items, total %d, %d keys", len(c.Items), c.Total, len(c.Keys))
@@ -672,7 +676,7 @@ func TestMarkerBecomesTheKeySet(t *testing.T) {
 
 func TestValidateAcceptsWhatFromResultsProduces(t *testing.T) {
 	st := FromResults([]result.Result{
-		{CheckID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low, Evidence: capped(106)},
+		capped(106),
 		{CheckID: "c.d", Kind: "k", Status: result.Skipped, Severity: result.Info},
 	}, t0, nil)
 	b, err := Marshal(st)
@@ -843,8 +847,8 @@ func TestMergedResultsUniteTheirSets(t *testing.T) {
 	one := capped(130)
 	two := capped(150)
 	st := FromResults([]result.Result{
-		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: one},
-		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: two},
+		one,
+		two,
 		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: []result.Evidence{{Subject: "extra"}}},
 	}, t0, nil)
 	c := st.Checks[0]
@@ -858,18 +862,16 @@ func TestMergedResultsUniteTheirSets(t *testing.T) {
 }
 
 func TestMergedResultsOfSetsTooLargeToListKeepADigest(t *testing.T) {
-	big := func(prefix string, n int) []result.Evidence {
+	big := func(prefix string, n int) result.Result {
 		all := make([]result.Evidence, n)
 		for i := range all {
 			all[i] = result.Evidence{Subject: fmt.Sprintf("%s%06d", prefix, i)}
 		}
-		return append(append([]result.Evidence(nil), all[:99]...), result.Evidence{Subject: "(m)", Set: result.NewEvidenceSet(all)})
+		ev := append(append([]result.Evidence(nil), all[:99]...), result.Evidence{Subject: "(m)"})
+		return result.Result{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: ev, Set: result.NewEvidenceSet(all)}
 	}
-	build := func(second []result.Evidence) Check {
-		st := FromResults([]result.Result{
-			{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: big("x", result.MaxKeys+10)},
-			{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: second},
-		}, t0, nil)
+	build := func(second result.Result) Check {
+		st := FromResults([]result.Result{big("x", result.MaxKeys+10), second}, t0, nil)
 		if err := validate(st); err != nil {
 			t.Fatalf("invalid: %v", err)
 		}

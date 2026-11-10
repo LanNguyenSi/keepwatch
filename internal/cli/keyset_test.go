@@ -153,3 +153,80 @@ checks:
 		t.Fatalf("saved check %+v", c)
 	}
 }
+
+// When the warnings replace the evidence, their set replaces the set of the
+// failing list. Here the failing list is cut and the warnings are not: the
+// check must be stored as the plain warn list it is, without the set of the
+// failing items (which would not describe the list in the state).
+func TestCheckDropsTheSetOfTheFailingListWhenUncutWarningsReplaceIt(t *testing.T) {
+	const disk = `
+checks:
+  - id: t.disk
+    title: Disk
+    kind: disk_usage
+    params: {warn_percent: 80, fail_percent: 90}
+    severity: medium
+    rationale: r
+    fix_hint: f
+`
+	cat, err := catalog.Parse([]byte(disk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mounts strings.Builder
+	st := map[string]probes.Statfs{}
+	add := func(point string, pct uint64) {
+		fmt.Fprintf(&mounts, "%d 1 8:1 / %s rw - ext4 /dev/x rw\n", len(st)+1, point)
+		st[point] = probes.Statfs{BlockSize: 4096, Blocks: 1000, Bfree: 1000 - pct*10, Bavail: 1000 - pct*10, Files: 1000, Ffree: 1000 - pct*10}
+	}
+	for i := 0; i < 130; i++ {
+		add(fmt.Sprintf("/f%03d", i), 95)
+	}
+	add("/w1", 85)
+	add("/w2", 85)
+	// An exception for the whole check covers every failing item.
+	f := newFixture(t, fake.New(nil), "exceptions:\n  - check: t.disk\n    reason: ok\n    expires: 2099-12-31\n")
+	f.env.catalog = cat
+	f.env.fs = probestest.MemFS{"/proc/self/mountinfo": mounts.String()}
+	f.env.statfs = func(p string) (probes.Statfs, error) { return st[p], nil }
+	f.check("--format", "json")
+	c := f.loadState().Find("t.disk")
+	if c == nil || c.Status != "warn" || c.Capped() || len(c.Items) != 2 || c.Total != 0 || c.Keys != nil {
+		t.Fatalf("saved check %+v", c)
+	}
+}
+
+// A probe that itself reports warn with a cut list (no failing item, no
+// exception): the set of that list goes to the state as it is.
+func TestCheckKeepsTheSetOfACutWarnList(t *testing.T) {
+	const disk = `
+checks:
+  - id: t.disk
+    title: Disk
+    kind: disk_usage
+    params: {warn_percent: 80, fail_percent: 90}
+    severity: medium
+    rationale: r
+    fix_hint: f
+`
+	cat, err := catalog.Parse([]byte(disk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mounts strings.Builder
+	st := map[string]probes.Statfs{}
+	for i := 0; i < 130; i++ {
+		p := fmt.Sprintf("/w%03d", i)
+		fmt.Fprintf(&mounts, "%d 1 8:1 / %s rw - ext4 /dev/x rw\n", i+1, p)
+		st[p] = probes.Statfs{BlockSize: 4096, Blocks: 1000, Bfree: 150, Bavail: 150, Files: 1000, Ffree: 150}
+	}
+	f := newFixture(t, fake.New(nil), "")
+	f.env.catalog = cat
+	f.env.fs = probestest.MemFS{"/proc/self/mountinfo": mounts.String()}
+	f.env.statfs = func(p string) (probes.Statfs, error) { return st[p], nil }
+	f.check("--format", "json")
+	c := f.loadState().Find("t.disk")
+	if c == nil || c.Status != "warn" || c.Total != 130 || len(c.Keys) != 130 || len(c.Items) != 99 {
+		t.Fatalf("saved check %+v", c)
+	}
+}

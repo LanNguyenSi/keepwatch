@@ -68,6 +68,12 @@ type Outcome struct {
 	Evidence []result.Evidence
 	// Warnings are the warning items found next to failing ones (Status fail).
 	Warnings []result.Evidence
+	// Set is the complete set of the list in Evidence, and WarningsSet that of
+	// Warnings; each is nil unless that list was cut (see limitEvidence). The
+	// engine copies Set to the result, or WarningsSet when the warnings
+	// replace the evidence.
+	Set         *result.EvidenceSet
+	WarningsSet *result.EvidenceSet
 }
 
 // Env is everything a probe may use besides its parameters.

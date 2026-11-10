@@ -16,7 +16,8 @@ const maxEvidence = 100
 
 // limitEvidence sorts items by subject and, when there are more than
 // maxEvidence, keeps the first maxEvidence-1 and appends one marker item that
-// says how many are not shown. It returns the items and the number hidden.
+// says how many are not shown. It returns the items, the number hidden and the
+// complete set of the list (nil when nothing was cut).
 //
 // The marker is an item on purpose. An exception removes a failing check only
 // when every evidence item is covered; a list that silently dropped the tail
@@ -24,15 +25,16 @@ const maxEvidence = 100
 // subject changes with the count, so no exception matches it by accident, and
 // the check stays failed.
 //
-// The marker also carries the complete set of the list (result.EvidenceSet),
-// computed over all items before the cut. Without it the items that were left
-// out are gone, and two runs of a capped check could not be compared (see the
-// diff package). Every probe that can list more than maxEvidence items must
-// go through this function; nothing else may cut a list.
-func limitEvidence(items []result.Evidence) ([]result.Evidence, int) {
+// The set is computed over all items before the cut. Without it the items that
+// were left out are gone, and two runs of a capped check could not be compared
+// (see the diff package). The caller puts it into the Outcome next to the list
+// it belongs to (Outcome.Set for Evidence, Outcome.WarningsSet for Warnings).
+// Every probe that can list more than maxEvidence items must go through this
+// function; nothing else may cut a list.
+func limitEvidence(items []result.Evidence) ([]result.Evidence, int, *result.EvidenceSet) {
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
 	if len(items) <= maxEvidence {
-		return items, 0
+		return items, 0, nil
 	}
 	hidden := len(items) - (maxEvidence - 1)
 	set := result.NewEvidenceSet(items)
@@ -40,9 +42,8 @@ func limitEvidence(items []result.Evidence) ([]result.Evidence, int) {
 	out = append(out, result.Evidence{
 		Subject: fmt.Sprintf("(%d more not shown)", hidden),
 		Detail:  fmt.Sprintf("%d further items are not listed, the limit is %d items", hidden, maxEvidence),
-		Set:     set,
 	})
-	return out, hidden
+	return out, hidden, set
 }
 
 // moreNote renders the "and M more" part of a summary, or "" when nothing is

@@ -216,12 +216,12 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	}
 	// A local user can open tens of thousands of sockets, so the evidence is
 	// limited; the summary and the marker item say how many are not shown.
-	shown, hidden := limitEvidence(ev)
+	shown, hidden, set := limitEvidence(ev)
 
 	switch {
 	case len(failures) > 0:
 		o := partialError(failures, ev)
-		o.Evidence = shown
+		o.Evidence, o.Set = shown, set
 		return o
 	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
@@ -230,6 +230,7 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 		Status:   result.Fail,
 		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden),
 		Evidence: shown,
+		Set:      set,
 	}
 }
 

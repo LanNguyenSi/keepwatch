@@ -258,12 +258,12 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 
 	switch {
 	case len(causes) > 0:
-		shown, _ := limitEvidence(fails)
+		shown, _, set := limitEvidence(fails)
 		o := partialError(causes, fails)
-		o.Evidence = shown
+		o.Evidence, o.Set = shown, set
 		return o
 	case len(fails) > 0:
-		shown, hidden := limitEvidence(fails)
+		shown, hidden, set := limitEvidence(fails)
 		what := fmt.Sprintf("%d unexpected authorized key(s)", len(fails))
 		if unreadable > 0 {
 			what += fmt.Sprintf(" (%d of them lines that start with a key type but cannot be read)", unreadable)
@@ -272,14 +272,15 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; also %d warning(s): %s", len(warns), subjectList(sortedEvidence(warns), 5))
 		}
-		shownWarns, _ := limitEvidence(warns)
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
+		shownWarns, _, warnSet := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Set: set, Warnings: shownWarns, WarningsSet: warnSet}
 	case len(warns) > 0:
-		shown, hidden := limitEvidence(warns)
+		shown, hidden, set := limitEvidence(warns)
 		return Outcome{
 			Status:   result.Warn,
 			Summary:  fmt.Sprintf("no unexpected authorized keys, but %d thing(s) need a look: %s", len(warns), subjectList(shown, 5)) + moreNote(hidden),
 			Evidence: shown,
+			Set:      set,
 		}
 	}
 	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("all %d authorized key(s) of %d user(s) are expected", total, len(accounts))}

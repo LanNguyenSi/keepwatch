@@ -375,7 +375,7 @@ func TestDiskUsageEvidenceIsLimited(t *testing.T) {
 	if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(51 more not shown)" {
 		t.Fatalf("%d items", len(o.Evidence))
 	}
-	wantCapped(t, o.Evidence, 150)
+	wantCapped(t, o.Evidence, o.Set, 150)
 }
 
 // The warnings carried next to a failure are capped on their own, with their
@@ -393,13 +393,13 @@ func TestDiskUsageWarningsAreLimited(t *testing.T) {
 	}
 	o := execDisk(diskProbe(t, nil), mountFS(lines...), st)
 	wantStatus(t, o, result.Fail)
-	if len(o.Evidence) != 1 || o.Evidence[0].IsMarker() {
+	if len(o.Evidence) != 1 || o.Set != nil {
 		t.Fatalf("the failing list: %+v", o.Evidence)
 	}
 	if len(o.Warnings) != 100 {
 		t.Fatalf("%d warnings", len(o.Warnings))
 	}
-	wantCapped(t, o.Warnings, 130)
+	wantCapped(t, o.Warnings, o.WarningsSet, 130)
 }
 
 func TestDiskUsageParams(t *testing.T) {

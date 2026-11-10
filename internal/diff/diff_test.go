@@ -38,7 +38,7 @@ const cutAt = 100
 // more than cutAt items the first cutAt-1 and the marker that carries the set
 // of all of them. A name ending in "!" is an item an exception covers, as the
 // engine marks it: only among the items that are listed.
-func listed(names ...string) []result.Evidence {
+func listed(names ...string) ([]result.Evidence, *result.EvidenceSet) {
 	type item struct {
 		name string
 		ex   bool
@@ -61,16 +61,18 @@ func listed(names ...string) []result.Evidence {
 		out = append(out, result.Evidence{Subject: it.name, Excepted: it.ex})
 	}
 	if len(all) > cutAt {
-		out = append(out, result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", len(all)-(cutAt-1)), Set: result.NewEvidenceSet(raw)})
+		out = append(out, result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", len(all)-(cutAt-1))})
+		return out, result.NewEvidenceSet(raw)
 	}
-	return out
+	return out, nil
 }
 
 // big builds a check as the state package builds it from a probe's result:
 // capped when names has more than cutAt items. clean is the display cleaner
 // (nil leaves subjects as they are).
 func big(clean func(string) string, id string, st result.Status, names ...string) state.Check {
-	r := result.Result{CheckID: id, Kind: "k", Status: st, Severity: result.High, Evidence: listed(names...)}
+	ev, set := listed(names...)
+	r := result.Result{CheckID: id, Kind: "k", Status: st, Severity: result.High, Evidence: ev, Set: set}
 	return state.FromResults([]result.Result{r}, time.Unix(0, 0), clean).Checks[0]
 }
 

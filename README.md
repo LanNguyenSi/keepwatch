@@ -273,7 +273,7 @@ with no file found at all the check is `skipped`.
 At most 100 evidence items come back from a check, sorted by subject; when
 there are more, the last item is a marker "(N more not shown)" and the summary
 says "and N more". The marker keeps an exception for the shown items from
-hiding the rest, and carries the complete list as a set of keys so that the
+hiding the rest. The complete list is kept next to it as a set of keys so that the
 comparison with the previous run sees every item, not only the shown ones (see
 "The comparison with the last run").
 
@@ -321,6 +321,11 @@ result as the new "previous run".
 | `--format` | `text` (default), `json` or `markdown` |
 | `--no-state` | only check: the state of the last run is neither read nor written, and the report has no comparison |
 | `--fail-on SEVERITY` | lowest severity that makes the exit code 1: `info`, `low`, `medium` (default), `high`, `critical` |
+
+The JSON report carries `schema_version` 2. Version 2 added the change kinds
+`hidden_gone` and `set_changed` (with the fields `hidden_gone`, `old_total` and
+`new_total`) and no longer produces `count_change`, which version 1 reports could
+hold.
 
 ### Exit codes
 

@@ -166,8 +166,8 @@ func pipeline(t *testing.T, n int) (time.Duration, uint64) {
 			// Probes list items in the order of the host, not sorted.
 			rng := rand.New(rand.NewSource(1))
 			rng.Shuffle(len(ev), func(i, j int) { ev[i], ev[j] = ev[j], ev[i] })
-			shown, _ := probes.LimitEvidence(ev)
-			r := result.Result{CheckID: "c", Kind: "k", Status: result.Fail, Severity: result.High, Evidence: shown}
+			shown, _, set := probes.LimitEvidence(ev)
+			r := result.Result{CheckID: "c", Kind: "k", Status: result.Fail, Severity: result.High, Evidence: shown, Set: set}
 			return state.FromResults([]result.Result{r}, time.Unix(0, 0), nil).Checks[0]
 		}
 		prev := build(false)

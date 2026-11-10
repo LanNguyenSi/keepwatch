@@ -48,7 +48,12 @@ func ParseFormat(s string) (Format, error) {
 }
 
 // SchemaVersion is the version of the JSON report format.
-const SchemaVersion = 1
+//
+// Version 2: the change kinds hidden_gone and set_changed and the field
+// hidden_gone are new, and count_change is no longer produced (version 1
+// reports could hold it). The fields hidden_new, old_total and new_total keep
+// their meaning, except that old_total and new_total now belong to set_changed.
+const SchemaVersion = 2
 
 // StateInfo says how the run related to the stored state.
 type StateInfo struct {

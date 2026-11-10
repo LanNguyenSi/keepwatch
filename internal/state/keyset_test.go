@@ -32,7 +32,7 @@ func writeStateFile(t *testing.T, s *Store, dir, content string) {
 }
 
 func cappedState(total int) *State {
-	return FromResults([]result.Result{{CheckID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low, Evidence: capped(total)}}, t0, nil)
+	return FromResults([]result.Result{capped(total)}, t0, nil)
 }
 
 func TestACappedCheckSurvivesSaveAndLoad(t *testing.T) {
@@ -44,7 +44,7 @@ func TestACappedCheckSurvivesSaveAndLoad(t *testing.T) {
 		}
 		a, b := st.Checks[0], got.Checks[0]
 		// The state keeps exactly the set the probe built, whatever its size.
-		if probeSet := capped(total)[99].Set; a.Total != probeSet.Total || a.Digest != probeSet.Digest || !slices.Equal(a.Keys, probeSet.Keys) {
+		if probeSet := capped(total).Set; a.Total != probeSet.Total || a.Digest != probeSet.Digest || !slices.Equal(a.Keys, probeSet.Keys) {
 			t.Errorf("total %d: the state's set differs from the probe's", total)
 		}
 		if a.Total != b.Total || a.Digest != b.Digest || !slices.Equal(a.Keys, b.Keys) || len(a.Items) != len(b.Items) {

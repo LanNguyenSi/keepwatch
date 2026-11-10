@@ -132,17 +132,18 @@ func (dockerProbe) Run(ctx context.Context, env *Env) Outcome {
 		return Outcome{Status: result.Skipped, Summary: `program "docker" is not installed and the daemon left no configuration, check skipped`}
 	}
 
-	ev, hidden := limitEvidence(d.ev)
+	ev, hidden, set := limitEvidence(d.ev)
 	switch {
 	case len(d.causes) > 0:
 		o := partialError(d.causes, d.ev)
-		o.Evidence = ev
+		o.Evidence, o.Set = ev, set
 		return o
 	case len(d.ev) > 0:
 		return Outcome{
 			Status:   result.Fail,
 			Summary:  fmt.Sprintf("%d docker exposure finding(s): %s", len(d.ev), d.names()) + d.noteText() + moreNote(hidden),
 			Evidence: ev,
+			Set:      set,
 		}
 	}
 	return Outcome{Status: result.Pass, Summary: "the docker daemon is not reachable over TCP" + d.passText() + d.noteText()}

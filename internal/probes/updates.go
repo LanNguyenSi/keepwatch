@@ -183,11 +183,12 @@ func (u updatesProbe) Run(ctx context.Context, env *Env) Outcome {
 			warn = " (stale: newer updates may exist)"
 			warnings = []result.Evidence{u.staleItem(ageNote)}
 		}
-		shown, hidden := limitEvidence(ev)
+		shown, hidden, set := limitEvidence(ev)
 		return Outcome{
 			Status:   result.Fail,
 			Summary:  fmt.Sprintf("%d pending security update(s): %s; %s; package lists %s%s", len(ev), strings.Join(names, ", "), base, ageNote, warn) + moreNote(hidden),
 			Evidence: shown,
+			Set:      set,
 			Warnings: warnings,
 		}
 	}

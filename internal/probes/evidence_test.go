@@ -3,6 +3,7 @@ package probes_test
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
@@ -19,12 +20,12 @@ func evidenceN(n int) []result.Evidence {
 
 func TestLimitEvidence(t *testing.T) {
 	t.Run("a list at the cap is untouched and has no set", func(t *testing.T) {
-		ev, hidden := probes.LimitEvidence(evidenceN(probes.MaxEvidence))
-		if len(ev) != probes.MaxEvidence || hidden != 0 {
-			t.Fatalf("%d items, %d hidden", len(ev), hidden)
+		ev, hidden, set := probes.LimitEvidence(evidenceN(probes.MaxEvidence))
+		if len(ev) != probes.MaxEvidence || hidden != 0 || set != nil {
+			t.Fatalf("%d items, %d hidden, set %v", len(ev), hidden, set != nil)
 		}
 		for _, e := range ev {
-			if e.IsMarker() {
+			if strings.Contains(e.Subject, "more not shown") {
 				t.Fatalf("marker in an uncapped list: %+v", e)
 			}
 		}
@@ -36,13 +37,13 @@ func TestLimitEvidence(t *testing.T) {
 			all = append(all, e.Subject)
 		}
 		sort.Strings(all)
-		ev, hidden := probes.LimitEvidence(in)
+		ev, hidden, set := probes.LimitEvidence(in)
 		if len(ev) != probes.MaxEvidence || hidden != 2 || ev[probes.MaxEvidence-1].Subject != "(2 more not shown)" {
 			t.Fatalf("%d items, %d hidden, last %+v", len(ev), hidden, ev[len(ev)-1])
 		}
-		wantCapped(t, ev, probes.MaxEvidence+1)
+		wantCapped(t, ev, set, probes.MaxEvidence+1)
 		member := map[string]bool{}
-		for _, k := range ev[len(ev)-1].Set.Keys {
+		for _, k := range set.Keys {
 			member[k] = true
 		}
 		// The two items that were cut are in the set.
@@ -55,12 +56,11 @@ func TestLimitEvidence(t *testing.T) {
 	t.Run("duplicate subjects count once in the set", func(t *testing.T) {
 		in := evidenceN(probes.MaxEvidence + 50)
 		in = append(in, in[:20]...)
-		ev, _ := probes.LimitEvidence(in)
-		wantCapped(t, ev, probes.MaxEvidence+50)
+		ev, _, set := probes.LimitEvidence(in)
+		wantCapped(t, ev, set, probes.MaxEvidence+50)
 	})
 	t.Run("a very long list keeps only the total and the digest", func(t *testing.T) {
-		ev, _ := probes.LimitEvidence(evidenceN(result.MaxKeys + 1))
-		set := ev[len(ev)-1].Set
+		_, _, set := probes.LimitEvidence(evidenceN(result.MaxKeys + 1))
 		if set == nil || set.Total != result.MaxKeys+1 || set.Keys != nil || len(set.Digest) != 64 {
 			t.Fatalf("%+v", set)
 		}

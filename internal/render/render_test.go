@@ -225,7 +225,7 @@ func TestJSONIsValidAndCarriesTheCleanedText(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &back); err != nil {
 		t.Fatalf("not valid JSON: %v", err)
 	}
-	if back.SchemaVersion != SchemaVersion || len(back.Results) != 7 || len(back.Changes) != 13 {
+	if back.SchemaVersion != 2 || SchemaVersion != 2 || len(back.Results) != 7 || len(back.Changes) != 13 {
 		t.Errorf("round trip: %d results, %d changes", len(back.Results), len(back.Changes))
 	}
 	if strings.Contains(out, "<script>") || strings.Contains(out, "<script") && false {

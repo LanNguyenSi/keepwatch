@@ -762,7 +762,7 @@ func TestListenersEvidenceIsLimited(t *testing.T) {
 		if o.Evidence[0].Subject != "tcp/0.0.0.0:10000" || o.Evidence[98].Subject != "tcp/0.0.0.0:10098" || o.Evidence[99].Subject != "(401 more not shown)" {
 			t.Fatalf("first %q, 99th %q, marker %q", o.Evidence[0].Subject, o.Evidence[98].Subject, o.Evidence[99].Subject)
 		}
-		wantCapped(t, o.Evidence, 500)
+		wantCapped(t, o.Evidence, o.Set, 500)
 		wantSummary(t, o, "500 listening sockets")
 		wantSummary(t, o, "and 401 more")
 	})
@@ -773,7 +773,7 @@ func TestListenersEvidenceIsLimited(t *testing.T) {
 		if len(o.Evidence) != 100 {
 			t.Fatalf("%d items", len(o.Evidence))
 		}
-		wantCapped(t, o.Evidence, 300)
+		wantCapped(t, o.Evidence, o.Set, 300)
 		wantSummary(t, o, "also found")
 		wantSummary(t, o, "and 295 more")
 	})

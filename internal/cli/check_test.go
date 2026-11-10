@@ -250,7 +250,7 @@ func TestCheckFormats(t *testing.T) {
 	if err := json.Unmarshal([]byte(js), &v); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, js)
 	}
-	if v.SchemaVersion != 1 || v.ExitCode != 1 || v.Host != "testhost" || v.Counts.Fail != 3 || v.Counts.Total != 3 || v.State.Used || len(v.Results) != 3 {
+	if v.SchemaVersion != 2 || v.ExitCode != 1 || v.Host != "testhost" || v.Counts.Fail != 3 || v.Counts.Total != 3 || v.State.Used || len(v.Results) != 3 {
 		t.Errorf("json report %+v", v)
 	}
 	_, md, _ := f.check("--format", "markdown", "--no-state")

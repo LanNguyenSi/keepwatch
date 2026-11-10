@@ -184,25 +184,6 @@ func (s *State) Find(id string) *Check {
 
 var keyRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// splitMarker separates the marker that the probes append when they left
-// items out from the items before it, and returns the set the marker carries
-// (nil when the list was not cut). The marker is recognised by the set it
-// carries, which no host output can produce, and not by its text.
-func splitMarker(ev []result.Evidence) ([]result.Evidence, *result.EvidenceSet) {
-	var set *result.EvidenceSet
-	items := make([]result.Evidence, 0, len(ev))
-	for _, e := range ev {
-		if e.IsMarker() {
-			if set == nil {
-				set = e.Set
-			}
-			continue
-		}
-		items = append(items, e)
-	}
-	return items, set
-}
-
 // statusRank orders statuses from least to most severe, for merging results
 // that share a check id.
 var statusRank = map[result.Status]int{
@@ -230,7 +211,7 @@ func FromResults(rs []result.Result, now time.Time, clean func(string) string) *
 	index := map[string]int{}
 	var parts [][]part // per check
 	for _, r := range rs {
-		items, set := splitMarker(r.Evidence)
+		items, set := r.Listed(), r.Set
 		if set == nil && len(items) > maxItems {
 			// A probe that did not cut its list: cut it here, so that the
 			// state stays valid and the whole list is still compared.

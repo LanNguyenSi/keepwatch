@@ -7,7 +7,9 @@ import "github.com/LanNguyenSi/keepwatch/internal/result"
 func AptPolicyShape(line string) string { return classifyAptPolicyLine(line).shape }
 
 // LimitEvidence exposes limitEvidence to the external tests.
-func LimitEvidence(items []result.Evidence) ([]result.Evidence, int) { return limitEvidence(items) }
+func LimitEvidence(items []result.Evidence) ([]result.Evidence, int, *result.EvidenceSet) {
+	return limitEvidence(items)
+}
 
 // MaxEvidence is the display cap of a list.
 const MaxEvidence = maxEvidence

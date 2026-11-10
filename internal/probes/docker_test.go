@@ -632,7 +632,7 @@ func TestDockerBoundsAndChunks(t *testing.T) {
 		if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(51 more not shown)" {
 			t.Fatalf("%d items, last %+v", len(o.Evidence), o.Evidence[len(o.Evidence)-1])
 		}
-		wantCapped(t, o.Evidence, 150)
+		wantCapped(t, o.Evidence, o.Set, 150)
 		wantSummary(t, o, "and 51 more")
 	})
 }
