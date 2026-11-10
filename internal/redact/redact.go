@@ -126,8 +126,14 @@ var builtin = []rule{
 	// env-style NAME_KEY=value
 	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9])[a-z0-9]+[_-]key["']?\s*=\s*)(` + valueRe + `)`), "${1}" + Replacement},
 	// --password hunter2, -token abc (a value that does not start with "-");
-	// a NUL byte between flag and value counts as a space
-	{regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}" + Replacement},
+	// a NUL byte between flag and value counts as a space, a quote around the
+	// flag ("--token" x) is allowed. A flag starts at the beginning of the text
+	// or after any character that cannot be part of a word (space, NUL, quote,
+	// "=", "(", "[", ",", ...): inside a word such as "prohibit-password" or
+	// "without-password" the "-password" is no flag and the next word is no
+	// value. Only a letter, digit, "_" or "-" in front keeps a match from
+	// starting, so a real flag behind any other separator stays redacted.
+	{regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(-[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)["']?[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}${2}" + Replacement},
 	// AWS access key ids
 	{regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), Replacement},
 	// GitHub tokens
