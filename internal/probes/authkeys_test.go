@@ -655,6 +655,17 @@ func TestAuthorizedKeysSshdProblems(t *testing.T) {
 			}
 		}
 	})
+	t.Run("sshd -T fails and more than 100 findings are confirmed: the set is kept", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 150; i++ {
+			k := wire("ssh-ed25519", pk32(fmt.Sprintf("key%03d", i)))
+			b.WriteString("ssh-ed25519 " + base64.StdEncoding.EncodeToString(k) + "\n")
+		}
+		many := keyHost(t, v, map[string]string{aliceAK: b.String()})
+		o := execKeys(keysProbe(t), newRunner().AddError(sshdArgv, execx.ErrTimeout), many, exp)
+		wantStatus(t, o, result.Error)
+		wantCapped(t, o.Evidence, o.Set, 150)
+	})
 	t.Run("sshd -T fails and nothing is wrong in the default files", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: ed.line + "\n"})
 		o := execKeys(keysProbe(t), newRunner().Add(sshdArgv, v+"/sshd_T_no_privsep_dir"), fsys, exp)

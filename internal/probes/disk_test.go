@@ -419,6 +419,21 @@ func TestDiskUsageCutWarnListHasASet(t *testing.T) {
 	}
 }
 
+// An error that keeps the confirmed failures keeps their set too.
+func TestDiskUsagePartialResultWithACutListHasASet(t *testing.T) {
+	var lines []string
+	st := &statfsMap{by: map[string]probes.Statfs{}, errs: map[string]error{"/broken": errors.New("boom")}}
+	lines = append(lines, mi(1, "/broken", "ext4"))
+	for i := 0; i < 130; i++ {
+		p := fmt.Sprintf("/f%03d", i)
+		lines = append(lines, mi(i+2, p, "ext4"))
+		st.by[p] = usage(95, 1)
+	}
+	o := execDisk(diskProbe(t, nil), mountFS(lines...), st)
+	wantStatus(t, o, result.Error)
+	wantCapped(t, o.Evidence, o.Set, 130)
+}
+
 func TestDiskUsageParams(t *testing.T) {
 	bad := map[string]map[string]any{
 		"warn above fail":      {"warn_percent": 91},

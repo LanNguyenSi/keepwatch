@@ -316,6 +316,17 @@ func TestCertExpiryCutListsKeepTheirSets(t *testing.T) {
 	wantCapped(t, o.Warnings, o.WarningsSet, 130)
 }
 
+func TestCertExpiryPartialResultWithACutListHasASet(t *testing.T) {
+	files := map[string]string{"/opt/zz-broken.pem": "this is not a certificate"}
+	soon := pemCert(t, "x", t0.Add(days(1)))
+	for i := 0; i < 130; i++ {
+		files[fmt.Sprintf("/opt/c%03d.pem", i)] = soon
+	}
+	o := execCert(certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}), certFS(files))
+	wantStatus(t, o, result.Error)
+	wantCapped(t, o.Evidence, o.Set, 130)
+}
+
 func TestCertExpiryManyFiles(t *testing.T) {
 	files := map[string]string{}
 	one := pemCert(t, "x", t0.Add(days(1)))
