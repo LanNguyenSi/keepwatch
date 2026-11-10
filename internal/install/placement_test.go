@@ -220,40 +220,69 @@ func TestCheckPlacementRefusesWhatAnotherUserCanChange(t *testing.T) {
 	}
 }
 
-// The sandbox table decides by role, and it comes before the walk: a path
-// below /var/run is refused for what /run is, not for the link at /var/run.
+// The table of places the run cannot use is one rule for every role, and it
+// comes before the walk: a path below /var/run is refused for what /run is,
+// not for the link at /var/run.
 func TestCheckPlacementRefusesWhatTheSandboxHides(t *testing.T) {
+	type setup func(m *installtest.MemFS, p *install.Paths)
+	binary := func(path string) setup { return func(m *installtest.MemFS, p *install.Paths) { p.Binary = path } }
+	config := func(path string) setup { return func(m *installtest.MemFS, p *install.Paths) { p.ConfigPath = path } }
+	token := func(path string) setup { return func(m *installtest.MemFS, p *install.Paths) { p.TokenFile = path } }
+	state := func(path string) setup { return func(m *installtest.MemFS, p *install.Paths) { p.StateDir = path } }
+	const reboot = "empty after a reboot"
 	cases := []struct {
 		name  string
-		setup func(m *installtest.MemFS, p *install.Paths)
+		setup setup
 		parts []string
 	}{
-		{"binary under /tmp", func(m *installtest.MemFS, p *install.Paths) { p.Binary = "/tmp/keepwatch" },
+		{"binary under /tmp", binary("/tmp/keepwatch"),
 			[]string{"the keepwatch binary /tmp/keepwatch is under /tmp:", "PrivateTmp=yes", "the scheduled run cannot start", "put it elsewhere"}},
-		{"binary under /dev", func(m *installtest.MemFS, p *install.Paths) { p.Binary = "/dev/shm/keepwatch" },
-			[]string{"the keepwatch binary /dev/shm/keepwatch is under /dev:", "PrivateDevices=yes"}},
-		{"binary under the kernel modules", func(m *installtest.MemFS, p *install.Paths) { p.Binary = "/usr/lib/modules/keepwatch" },
+		{"binary under /dev", binary("/dev/kw/keepwatch"),
+			[]string{"the keepwatch binary /dev/kw/keepwatch is under /dev:", "PrivateDevices=yes"}},
+		{"binary under /dev/shm", binary("/dev/shm/keepwatch"),
+			[]string{"the keepwatch binary /dev/shm/keepwatch is under /dev/shm:", reboot, "noexec", "the scheduled run cannot start"}},
+		{"binary under the kernel modules", binary("/usr/lib/modules/keepwatch"),
 			[]string{"is under /usr/lib/modules:", "ProtectKernelModules=yes"}},
-		{"config under /tmp", func(m *installtest.MemFS, p *install.Paths) { p.ConfigPath = "/tmp/kwc/keepwatch.yaml" },
+		{"binary under /run", binary("/run/kwbin/keepwatch"),
+			[]string{"the keepwatch binary /run/kwbin/keepwatch is under /run:", reboot, "the scheduled run cannot start"}},
+		{"config under /tmp", config("/tmp/kwc/keepwatch.yaml"),
 			[]string{"the configuration directory /tmp/kwc is under /tmp:", "the scheduled run exits 3", `put it elsewhere and run "keepwatch install" again`}},
-		{"config under /var/tmp", func(m *installtest.MemFS, p *install.Paths) { p.ConfigPath = "/var/tmp/keepwatch.yaml" },
+		{"config under /var/tmp", config("/var/tmp/keepwatch.yaml"),
 			[]string{"the configuration directory /var/tmp is under /var/tmp:"}},
-		{"token file under /tmp", func(m *installtest.MemFS, p *install.Paths) { p.TokenFile = "/tmp/kwtok/ntfy.token" },
+		{"config under /run", config("/run/kw/keepwatch.yaml"),
+			[]string{"the configuration directory /run/kw is under /run:", reboot, "the scheduled run exits 3"}},
+		{"config under /run/credentials", config("/run/credentials/kw/keepwatch.yaml"),
+			[]string{"the configuration directory /run/credentials/kw is under /run/credentials:", "no credentials of its own", "does not exist for it", "the scheduled run exits 3"}},
+		{"token file under /tmp", token("/tmp/kwtok/ntfy.token"),
 			[]string{"the directory of notify.ntfy.token_file /tmp/kwtok is under /tmp:", "PrivateTmp=yes", "the scheduled run exits 3"}},
-		{"token file under /dev", func(m *installtest.MemFS, p *install.Paths) { p.TokenFile = "/dev/shm/ntfy.token" },
-			[]string{"the directory of notify.ntfy.token_file /dev/shm is under /dev:"}},
-		{"state_dir under /tmp", func(m *installtest.MemFS, p *install.Paths) { p.StateDir = "/tmp/kwstate" },
+		{"token file under /dev/shm", token("/dev/shm/ntfy.token"),
+			[]string{"the directory of notify.ntfy.token_file /dev/shm is under /dev/shm:", reboot}},
+		{"token file under /run", token("/run/kw/ntfy.token"),
+			[]string{"the directory of notify.ntfy.token_file /run/kw is under /run:", reboot, "the scheduled run exits 3"}},
+		{"token file under /run/credentials", token("/run/credentials/kw/ntfy.token"),
+			[]string{"the directory of notify.ntfy.token_file /run/credentials/kw is under /run/credentials:", "no credentials of its own"}},
+		{"token file under /run/systemd/incoming", token("/run/systemd/incoming/ntfy.token"),
+			[]string{"is under /run/systemd/incoming:", "directory of its own"}},
+		{"state_dir under /tmp", state("/tmp/kwstate"),
 			[]string{"state_dir /tmp/kwstate is under /tmp:", "the scheduled run fails to start"}},
-		{"state_dir under /run", func(m *installtest.MemFS, p *install.Paths) { p.StateDir = "/run/keepwatch" },
-			[]string{"state_dir /run/keepwatch is under /run:", "empty after a reboot"}},
+		{"state_dir under /run", state("/run/keepwatch"),
+			[]string{"state_dir /run/keepwatch is under /run:", reboot}},
+		{"state_dir in the control group file system", state("/sys/fs/cgroup/kwstate"),
+			[]string{"state_dir /sys/fs/cgroup/kwstate is under /sys:", "file system of the kernel", "the scheduled run fails to start"}},
+		{"state_dir under /proc", state("/proc/kwstate"),
+			[]string{"state_dir /proc/kwstate is under /proc:", "file system of the kernel"}},
 		{"state_dir under the link /var/run", func(m *installtest.MemFS, p *install.Paths) {
 			m.AddSymlink("/var/run", "/run")
 			p.StateDir = "/var/run/keepwatch"
-		}, []string{"state_dir /var/run/keepwatch is under /var/run:", "empty after a reboot"}},
+		}, []string{"state_dir /var/run/keepwatch is under /var/run: /var/run is /run, a tmpfs", reboot}},
 		{"state_dir under the link /var/lock", func(m *installtest.MemFS, p *install.Paths) {
 			m.AddSymlink("/var/lock", "/run/lock")
 			p.StateDir = "/var/lock/keepwatch"
-		}, []string{"state_dir /var/lock/keepwatch is under /var/lock:", "empty after a reboot"}},
+		}, []string{"state_dir /var/lock/keepwatch is under /var/lock: /var/lock is /run/lock", reboot}},
+		{"config under the link /var/run", func(m *installtest.MemFS, p *install.Paths) {
+			m.AddSymlink("/var/run", "/run")
+			p.ConfigPath = "/var/run/kw/keepwatch.yaml"
+		}, []string{"the configuration directory /var/run/kw is under /var/run: /var/run is /run", reboot}},
 	}
 	for _, c := range cases {
 		m, p := placedFS(), fullPaths()
@@ -269,18 +298,21 @@ func TestCheckPlacementRefusesWhatTheSandboxHides(t *testing.T) {
 			}
 		}
 		if strings.Contains(got[0], "symbolic link") {
-			t.Errorf("%s: the link is named, not what the sandbox does:\n%s", c.name, got[0])
+			t.Errorf("%s: the link is named, not what is the matter with the place:\n%s", c.name, got[0])
+		}
+		if len(m.Log) != 0 {
+			t.Errorf("%s: the check changed something: %v", c.name, m.Log)
 		}
 	}
-	// A configuration file and a token file may lie below /run: it is only
-	// state_dir that must survive a reboot.
+	// A configuration and a token file that exist below /run, root's and with
+	// the right modes, are refused all the same: the place is the problem.
 	m, p := placedFS(), fullPaths()
 	m.AddDir("/run/kw", 0o750, 0)
 	m.AddFile("/run/kw/keepwatch.yaml", 0o640, 0, "{}\n")
 	m.AddFile("/run/kw/ntfy.token", 0o600, 0, "t\n")
 	p.ConfigPath, p.TokenFile = "/run/kw/keepwatch.yaml", "/run/kw/ntfy.token"
-	if got := problemsOf(m, p); len(got) != 0 {
-		t.Errorf("configuration below /run: %q", got)
+	if got := problemsOf(m, p); len(got) != 1 || !strings.Contains(got[0], "the configuration directory /run/kw is under /run") {
+		t.Errorf("configuration and token below /run: %q", got)
 	}
 	// An absent conf.d is not looked at, wherever it would lie; a present one
 	// under a hidden path is covered by the directory above it.
@@ -374,6 +406,28 @@ func TestInstallRefusesAPlacementProblem(t *testing.T) {
 		}, "state_dir /home/tester/kwstate cannot be created in a trusted place: /home/tester is owned by uid 1000"},
 		"state_dir under /run": {func(r *rig, o *install.InstallOptions) { o.Spec.StateDir = "/run/keepwatch" },
 			"state_dir /run/keepwatch is under /run"},
+		"state_dir in the control group file system, where a mkdir would make a control group": {func(r *rig, o *install.InstallOptions) {
+			r.fs.AddDir("/sys", 0o555, 0)
+			r.fs.AddDir("/sys/fs", 0o755, 0)
+			r.fs.AddDir("/sys/fs/cgroup", 0o755, 0)
+			o.Spec.StateDir = "/sys/fs/cgroup/kwstate"
+		}, "state_dir /sys/fs/cgroup/kwstate is under /sys"},
+		"token file under /run/credentials": {func(r *rig, o *install.InstallOptions) {
+			r.fs.AddDir("/run/credentials", 0o755, 0)
+			r.fs.AddDir("/run/credentials/kw", 0o700, 0)
+			r.fs.AddFile("/run/credentials/kw/ntfy.token", 0o600, 0, "t\n")
+			o.TokenFile = "/run/credentials/kw/ntfy.token"
+		}, "the directory of notify.ntfy.token_file /run/credentials/kw is under /run/credentials"},
+		"configuration under /run": {func(r *rig, o *install.InstallOptions) {
+			r.fs.AddDir("/run/kw", 0o750, 0)
+			r.fs.AddFile("/run/kw/keepwatch.yaml", 0o640, 0, "{}\n")
+			o.Spec.ConfigPath = "/run/kw/keepwatch.yaml"
+		}, "the configuration directory /run/kw is under /run"},
+		"binary under /run": {func(r *rig, o *install.InstallOptions) {
+			r.fs.AddDir("/run/kwbin", 0o755, 0)
+			r.fs.AddFile("/run/kwbin/keepwatch", 0o755, 0, "")
+			o.Spec.Binary = "/run/kwbin/keepwatch"
+		}, "the keepwatch binary /run/kwbin/keepwatch is under /run"},
 		"binary under /dev": {func(r *rig, o *install.InstallOptions) { o.Spec.Binary = "/dev/shm/keepwatch" },
 			"the keepwatch binary /dev/shm/keepwatch is under /dev"},
 	}

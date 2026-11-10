@@ -3,6 +3,7 @@ package install
 import (
 	"flag"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -226,32 +227,69 @@ func TestInspect(t *testing.T) {
 
 func TestHiddenBy(t *testing.T) {
 	type c struct {
-		path string
-		role Role
-		want string // the hiding path; empty means allowed
+		path  string
+		want  string // the path of the entry that refuses it; empty means allowed
+		hides bool   // the entry says that the sandbox hides the directory
 	}
 	cases := []c{
-		{"/tmp/x", RoleBinary, "/tmp"}, {"/tmp/x", RoleConfig, "/tmp"}, {"/tmp/x", RoleState, "/tmp"},
-		{"/tmp", RoleState, "/tmp"}, {"/var/tmp/a/b", RoleConfig, "/var/tmp"}, {"/var/tmp", RoleBinary, "/var/tmp"},
-		{"/dev/kw", RoleState, "/dev"}, {"/dev/shm/kw", RoleBinary, "/dev"},
-		{"/run/kw", RoleState, "/run"}, {"/var/run/kw", RoleState, "/var/run"}, {"/dev/shm/kw", RoleState, "/dev"},
-		{"/var/lock/kw", RoleState, "/var/lock"}, {"/var/lock", RoleState, "/var/lock"}, {"/var/lock/kw.yaml", RoleConfig, ""},
-		{"/usr/lib/modules/kw", RoleBinary, "/usr/lib/modules"}, {"/usr/lib/modules/kw.yaml", RoleConfig, "/usr/lib/modules"},
-		{"/lib/modules/kw", RoleState, "/lib/modules"}, {"/usr/lib/keepwatch", RoleState, ""},
-		// /run holds a binary or a configuration file without trouble.
-		{"/run/kw/keepwatch", RoleBinary, ""}, {"/run/kw/kw.yaml", RoleConfig, ""},
-		// Names that only start like a hidden path.
-		{"/tmpfiles/x", RoleState, ""}, {"/var/tmpx", RoleState, ""}, {"/runner/x", RoleState, ""}, {"/devices", RoleBinary, ""},
-		{"/var/lib/keepwatch", RoleState, ""}, {"/etc/keepwatch/keepwatch.yaml", RoleConfig, ""}, {"/usr/local/bin/keepwatch", RoleBinary, ""},
+		{"/tmp/x", "/tmp", true}, {"/tmp", "/tmp", true}, {"/var/tmp/a/b", "/var/tmp", true}, {"/var/tmp", "/var/tmp", true},
+		{"/dev/kw", "/dev", true}, {"/dev", "/dev", true},
+		{"/usr/lib/modules/kw", "/usr/lib/modules", true}, {"/lib/modules/kw", "/lib/modules", true},
+		{"/proc/1", "/proc", true}, {"/proc", "/proc", true}, {"/sys/fs/cgroup/kwstate", "/sys", false}, {"/sys", "/sys", false},
+		{"/run/kw", "/run", false}, {"/run", "/run", false}, {"/run/lock/kw", "/run", false}, {"/run/systemd/system", "/run", false},
+		{"/var/run/kw", "/var/run", false}, {"/var/lock/kw", "/var/lock", false}, {"/var/lock", "/var/lock", false},
+		// The most specific entry wins: /dev/shm lies in /dev and is not hidden,
+		// /run/credentials lies in /run and is.
+		{"/dev/shm/kw", "/dev/shm", false}, {"/dev/shm", "/dev/shm", false}, {"/dev/shmx", "/dev", true},
+		{"/run/credentials/kw/ntfy.token", "/run/credentials", true}, {"/run/credentials", "/run/credentials", true}, {"/run/credentialsx", "/run", false},
+		{"/run/systemd/incoming/x", "/run/systemd/incoming", true},
+		// Names that only start like one of them, and the places things belong.
+		{"/tmpfiles/x", "", false}, {"/var/tmpx", "", false}, {"/runner/x", "", false}, {"/devices", "", false},
+		{"/procfs", "", false}, {"/system", "", false}, {"/var/runner", "", false}, {"/var/locks", "", false}, {"/usr/lib/keepwatch", "", false},
+		{"/var/lib/keepwatch", "", false}, {"/etc/keepwatch/keepwatch.yaml", "", false}, {"/usr/local/bin/keepwatch", "", false}, {"/", "", false},
 	}
+	// One rule for every role.
 	for _, c := range cases {
-		h, ok := HiddenBy(c.path, c.role)
-		if ok != (c.want != "") || h.Path != c.want {
-			t.Errorf("HiddenBy(%q, %v) = %+v, %v; want %q", c.path, c.role, h, ok, c.want)
+		for _, role := range []Role{RoleBinary, RoleConfig, RoleState} {
+			h, ok := HiddenBy(c.path, role)
+			if ok != (c.want != "") || h.Path != c.want || h.Hides != c.hides {
+				t.Errorf("HiddenBy(%q, %v) = %+v, %v; want %q, hides %v", c.path, role, h, ok, c.want, c.hides)
+			}
+			if ok && h.Why == "" {
+				t.Errorf("HiddenBy(%q) names no reason: %+v", c.path, h)
+			}
 		}
-		if ok && (h.Option == "" || h.Why == "") {
-			t.Errorf("HiddenBy(%q) names no option or reason: %+v", c.path, h)
+	}
+	// An entry carries the option that causes it, when one option does.
+	if h, _ := HiddenBy("/tmp/x", RoleConfig); h.Option != "PrivateTmp=yes" {
+		t.Errorf("/tmp: option %q", h.Option)
+	}
+	if h, _ := HiddenBy("/run/x", RoleConfig); h.Option != "" {
+		t.Errorf("/run: option %q", h.Option)
+	}
+	// The reasons say what is the matter with the place, not something else.
+	for p, want := range map[string]string{
+		"/dev/shm/kw": "noexec", "/var/run/kw": "/var/run is /run", "/var/lock/kw": "/var/lock is /run/lock",
+		"/run/kw": "empty after a reboot", "/run/credentials/kw": "no credentials of its own", "/sys/kw": "file system of the kernel",
+	} {
+		if h, _ := HiddenBy(p, RoleState); !strings.Contains(h.Why, want) || strings.Contains(h.Why, "PrivateDevices") {
+			t.Errorf("%s: reason %q, want it to say %q", p, h.Why, want)
 		}
+	}
+	// An entry binds the roles it names and no other, and among the entries
+	// that bind a role the longest path wins, in whatever order they stand.
+	table := []sandboxEntry{
+		{"", false, "for the state", []string{"/a"}, []Role{RoleState}},
+		{"", true, "for the configuration", []string{"/a/b"}, []Role{RoleConfig, RoleState}},
+		{"", false, "short, and last", []string{"/a/b/c/d", "/a/b/c"}, []Role{RoleConfig}},
+	}
+	for role, want := range map[Role]string{RoleBinary: "", RoleConfig: "/a/b/c/d", RoleState: "/a/b"} {
+		if h, ok := hiddenIn(table, "/a/b/c/d/e", role); h.Path != want || ok != (want != "") {
+			t.Errorf("role %v: %+v, %v; want %q", role, h, ok, want)
+		}
+	}
+	if h, ok := hiddenIn(table, "/a/x", RoleConfig); ok {
+		t.Errorf("/a binds the state only: %+v", h)
 	}
 }
 
@@ -273,8 +311,8 @@ var hardeningClasses = map[string]optionClass{
 	"PrivateTmp":           {"yes", true, "an own, empty /tmp and /var/tmp"},
 	"PrivateDevices":       {"yes", true, "an own /dev with only the pseudo devices"},
 	"ProtectKernelModules": {"yes", true, "/usr/lib/modules is made inaccessible"},
-	"ReadWritePaths":       {"{{state}}", true, "the directory must exist when the service starts, so it cannot lie where a reboot empties it"},
 
+	"ReadWritePaths":          {"{{state}}", false, "the one writable path; it hides nothing. That the directory must be there when the service starts is why a place a reboot empties is refused, by entries without an option"},
 	"ProtectSystem":           {"strict", false, "read-only, everything stays visible; the one writable path is ReadWritePaths"},
 	"ProtectHome":             {"read-only", false, "read-only: /home, /root and /run/user stay visible (yes or tmpfs would hide them)"},
 	"ProtectKernelTunables":   {"yes", false, "/proc/sys, /sys and some files of /proc become read-only and stay visible; nothing can be created in a kernel file system anyway"},
@@ -339,15 +377,34 @@ func couplingErrors(hardening string, table []sandboxEntry, classes map[string]o
 			errs = append(errs, "hardeningClasses names "+name+", which the hardening does not set")
 		}
 	}
+	// An entry names the option that causes it, or none: what follows from
+	// the sandbox as such, from a file system of the kernel or from a reboot
+	// has no option to point at. Either kind needs a reason, paths and roles,
+	// and no path may be claimed twice or be written loosely, because the
+	// table is matched against the text of a path.
+	inTable := map[string]bool{}
 	for _, e := range table {
 		name, _, _ := strings.Cut(e.option, "=")
+		label := e.option
+		if label == "" {
+			label = "(no option) " + strings.Join(e.paths, " ")
+		}
 		switch {
-		case !set[e.option]:
+		case e.option != "" && !set[e.option]:
 			errs = append(errs, "sandboxPaths names "+e.option+", which the hardening does not set")
-		case !classes[name].hides:
+		case e.option != "" && !classes[name].hides:
 			errs = append(errs, "sandboxPaths names "+e.option+", which is classified as not hiding paths")
 		case len(e.paths) == 0 || len(e.roles) == 0 || e.why == "":
-			errs = append(errs, "the sandboxPaths entry of "+e.option+" has no path, no role or no reason")
+			errs = append(errs, "the sandboxPaths entry of "+label+" has no path, no role or no reason")
+		}
+		for _, p := range e.paths {
+			if !strings.HasPrefix(p, "/") || path.Clean(p) != p {
+				errs = append(errs, "the sandboxPaths entry of "+label+" has the path "+p+", which is not a clean absolute path")
+			}
+			if inTable[p] {
+				errs = append(errs, "sandboxPaths has the path "+p+" twice")
+			}
+			inTable[p] = true
 		}
 	}
 	return errs
@@ -356,8 +413,10 @@ func couplingErrors(hardening string, table []sandboxEntry, classes map[string]o
 // The table of hidden paths and the hardening options are tied in both
 // directions: every option is classified as hiding paths or not, an option
 // that hides paths has an entry in the table, and every entry of the table
-// names an option that is set and that hides paths. So an option cannot be
-// added, changed or removed without this table being looked at again.
+// that names an option names one that is set and that hides paths. So an
+// option cannot be added, changed or removed without this table being looked
+// at again. An entry may also name no option (what is tied to no single one);
+// such an entry is held to the same form.
 func TestSandboxPathsFollowTheHardening(t *testing.T) {
 	for _, e := range couplingErrors(serviceHardening, sandboxPaths, hardeningClasses) {
 		t.Error(e)
@@ -385,14 +444,21 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 		{"a new option that hides a temporary file system", serviceHardening + "TemporaryFileSystem=/var\n", sandboxPaths, "unclassified option TemporaryFileSystem=/var"},
 		{"a classified option with a new value", strings.Replace(serviceHardening, "ProtectHome=read-only", "ProtectHome=yes", 1), sandboxPaths, "option ProtectHome=yes was classified for the value read-only"},
 		{"a hiding option without an entry", serviceHardening, without("PrivateDevices=yes"), "option PrivateDevices=yes hides paths but sandboxPaths has no entry"},
-		{"the state entry is gone", serviceHardening, without("ReadWritePaths={{state}}"), "option ReadWritePaths={{state}} hides paths but sandboxPaths has no entry"},
+		{"another hiding option without an entry", serviceHardening, without("ProtectKernelModules=yes"), "option ProtectKernelModules=yes hides paths but sandboxPaths has no entry"},
 		{"an option was removed, its entry stayed", strings.Replace(serviceHardening, "PrivateTmp=yes\n", "", 1), sandboxPaths, "sandboxPaths names PrivateTmp=yes, which the hardening does not set"},
 		{"an option was removed, its classification stayed", strings.Replace(serviceHardening, "RemoveIPC=yes\n", "", 1), sandboxPaths, "hardeningClasses names RemoveIPC, which the hardening does not set"},
-		{"an entry for an option that is not set", serviceHardening, with(sandboxEntry{"PrivateUsers=yes", "w", []string{"/x"}, all}), "sandboxPaths names PrivateUsers=yes, which the hardening does not set"},
-		{"an entry for an option that does not hide", serviceHardening, with(sandboxEntry{"ProtectHome=read-only", "w", []string{"/home"}, all}), "sandboxPaths names ProtectHome=read-only, which is classified as not hiding paths"},
-		{"an entry without a path", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", "w", nil, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
-		{"an entry without a role", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", "w", []string{"/tmp"}, nil}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
-		{"an entry without a reason", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", "", []string{"/tmp"}, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"an entry for an option that is not set", serviceHardening, with(sandboxEntry{"PrivateUsers=yes", true, "w", []string{"/x"}, all}), "sandboxPaths names PrivateUsers=yes, which the hardening does not set"},
+		{"an entry for an option that does not hide", serviceHardening, with(sandboxEntry{"ProtectHome=read-only", true, "w", []string{"/home"}, all}), "sandboxPaths names ProtectHome=read-only, which is classified as not hiding paths"},
+		{"an entry without a path", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", nil, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"an entry without a role", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", []string{"/tmp"}, nil}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"an entry without a reason", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "", []string{"/tmp"}, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		// An entry without an option is allowed, and held to the same.
+		{"an entry without an option and without a reason", serviceHardening, with(sandboxEntry{"", false, "", []string{"/x"}, all}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
+		{"an entry without an option and without a role", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/x"}, nil}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
+		{"an entry without an option and without a path", serviceHardening, with(sandboxEntry{"", true, "w", nil, all}), "the sandboxPaths entry of (no option)  has no path, no role or no reason"},
+		{"a path in two entries", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/run"}, all}), "sandboxPaths has the path /run twice"},
+		{"a path with a trailing slash", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/x/"}, all}), "has the path /x/, which is not a clean absolute path"},
+		{"a relative path", serviceHardening, with(sandboxEntry{"", false, "w", []string{"x"}, all}), "has the path x, which is not a clean absolute path"},
 		{"a line that is no option", serviceHardening + "PrivateTmp\n", sandboxPaths, "not an option line: PrivateTmp"},
 	}
 	for _, c := range broken {
@@ -454,13 +520,13 @@ func TestValidateLeavesWhatTheSandboxHidesToThePlacementCheck(t *testing.T) {
 	}
 	hidden := 0
 	d := defaultSpec()
-	for _, e := range Manifest(Paths{Binary: d.Binary, ConfigPath: "/run/kw/kw.yaml", StateDir: d.StateDir}) {
+	for _, e := range Manifest(Paths{Binary: d.Binary, ConfigPath: "/srv/kw/kw.yaml", StateDir: d.StateDir}) {
 		if _, ok := HiddenBy(e.Path, e.Role); ok {
 			hidden++
 		}
 	}
 	if hidden != 0 {
-		t.Errorf("a configuration file below /run: %d entries hidden", hidden)
+		t.Errorf("a configuration file below /srv: %d entries hidden", hidden)
 	}
 }
 

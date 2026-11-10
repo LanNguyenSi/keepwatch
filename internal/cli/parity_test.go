@@ -327,6 +327,9 @@ func TestParityOfInstallDoctorAndTheScheduledRun(t *testing.T) {
 		accepted bool
 		// msg is in the refusal of install and in the report of doctor.
 		msg string
+		// absent is a path that must not exist after the three have run: the
+		// refusal has to come before anything is created.
+		absent string
 	}{
 		{name: "valid: the default host", build: func(j *jail) {}, accepted: true},
 		{name: "valid: own paths, conf.d, token file and notifications", build: func(j *jail) {
@@ -339,12 +342,43 @@ func TestParityOfInstallDoctorAndTheScheduledRun(t *testing.T) {
 			j.cfgPath = "/srv/kw/main.yaml"
 			j.writeConfig(j.cfgPath, "/srv/kw/state", "/srv/kw/secrets/ntfy.token")
 		}, accepted: true},
-		{name: "valid: configuration and token file below /run", build: func(j *jail) {
+
+		// What a reboot empties: /run for every role, not for state_dir alone.
+		{name: "volatile: configuration and token file below /run", build: func(j *jail) {
 			j.mkdir("/run/kw", 0o750)
 			j.write("/run/kw/ntfy.token", 0o600, testToken+"\n")
 			j.cfgPath = "/run/kw/keepwatch.yaml"
 			j.writeConfig(j.cfgPath, jailState, "/run/kw/ntfy.token")
-		}, accepted: true},
+		}, fails: failsHidden, msg: "the configuration directory /run/kw is under /run"},
+		{name: "volatile: token file below /run", build: func(j *jail) {
+			j.mkdir("/run/kw", 0o700)
+			j.write("/run/kw/ntfy.token", 0o600, testToken+"\n")
+			j.writeConfig(j.cfgPath, jailState, "/run/kw/ntfy.token")
+		}, fails: failsHidden, msg: "the directory of notify.ntfy.token_file /run/kw is under /run"},
+		{name: "volatile: binary below /run", build: func(j *jail) {
+			j.mkdir("/run/kwbin", 0o755)
+			j.write("/run/kwbin/keepwatch", 0o755, "the binary")
+			j.binary = "/run/kwbin/keepwatch"
+		}, fails: failsHidden, msg: "the keepwatch binary /run/kwbin/keepwatch is under /run"},
+
+		// What the sandbox hides although no option of the unit names it.
+		{name: "hidden: token file below /run/credentials", build: func(j *jail) {
+			j.mkdir("/run/credentials/kw", 0o700)
+			j.write("/run/credentials/kw/ntfy.token", 0o600, testToken+"\n")
+			j.writeConfig(j.cfgPath, jailState, "/run/credentials/kw/ntfy.token")
+		}, fails: failsHidden, msg: "the directory of notify.ntfy.token_file /run/credentials/kw is under /run/credentials"},
+		{name: "hidden: configuration below /run/credentials", build: func(j *jail) {
+			j.mkdir("/run/credentials/kw", 0o750)
+			j.cfgPath = "/run/credentials/kw/keepwatch.yaml"
+			j.writeConfig(j.cfgPath, jailState, "")
+		}, fails: failsHidden, msg: "the configuration directory /run/credentials/kw is under /run/credentials"},
+
+		// A file system of the kernel: a mkdir there would make a control
+		// group, so install must refuse before it creates anything.
+		{name: "kernel: state_dir in the control group file system", build: func(j *jail) {
+			j.mkdir("/sys/fs/cgroup", 0o755)
+			j.writeConfig(j.cfgPath, "/sys/fs/cgroup/kwstate", "")
+		}, fails: failsNamespace, msg: "state_dir /sys/fs/cgroup/kwstate is under /sys", absent: "/sys/fs/cgroup/kwstate"},
 
 		// What the sandbox hides, or a reboot empties.
 		{name: "hidden: configuration through a link into a directory below /tmp", build: func(j *jail) {
@@ -498,6 +532,11 @@ func TestParityOfInstallDoctorAndTheScheduledRun(t *testing.T) {
 			}
 			if !installOK && j.unitFiles() != before {
 				t.Error("a refused install changed the unit files")
+			}
+			if c.absent != "" {
+				if _, err := os.Lstat(j.real(c.absent)); !os.IsNotExist(err) {
+					t.Errorf("%s exists after the refusal (%v)", c.absent, err)
+				}
 			}
 			if len(j.sd.Mutations()) != 0 && !installOK {
 				t.Errorf("a refused install ran %v", j.sd.Mutations())

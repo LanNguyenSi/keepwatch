@@ -876,15 +876,27 @@ a problem.
 
 The rule, for each path:
 
-1. It must not lie where the sandbox hides it or where a reboot empties it. None of
-   them may lie under `/tmp` or `/var/tmp` (`PrivateTmp=yes`: the services have their
-   own, empty ones), under `/dev` (`PrivateDevices=yes`) or under `/usr/lib/modules`
-   and `/lib/modules` (`ProtectKernelModules=yes`), and `state_dir` not under `/run`, `/var/run`,
-   `/var/lock` or `/dev/shm` either: they are empty after a reboot, and a service
-   whose `ReadWritePaths` names a missing directory does not start (status
-   226/NAMESPACE). A configuration file or a token file under `/run` is fine. This
-   list is tied to the hardening options by a test: an option cannot be added, changed
-   or removed without the list being judged again.
+1. It must not lie where the sandbox hides it, in a file system of the kernel, or
+   where a reboot empties it. The rule is the same for every path of the table above,
+   the binary, the configuration, the token file and `state_dir` alike: none of them
+   may lie under `/dev`, `/proc`, `/sys`, `/run`, `/tmp` or `/var/tmp`, nor under the
+   module directories `/usr/lib/modules` and `/lib/modules`. The message says what is
+   the matter with the place:
+   - `/tmp` and `/var/tmp` (`PrivateTmp=yes`), `/dev` (`PrivateDevices=yes`) and the
+     module directories (`ProtectKernelModules=yes`): the services have their own or
+     none, so the path does not exist for them.
+   - `/run`, and so `/var/run` and `/var/lock`, which are links into it: a tmpfs that
+     is empty after a reboot. A file there is gone until something puts it back, and a
+     service whose `ReadWritePaths` names a missing directory does not start (status
+     226/NAMESPACE). `/dev/shm` is the same and runs no programs.
+   - `/run/credentials` and `/run/systemd/incoming`: systemd keeps them away from a
+     sandboxed service although no option of the unit says so.
+   - `/proc` and `/sys`: file systems of the kernel. A `state_dir` there is refused
+     before anything is created (a directory made below `/sys/fs/cgroup` would be a
+     control group).
+
+   The options of the units are tied to this list by a test: an option cannot be
+   added, changed or removed without the list being judged again.
 2. Every component of the path, from `/` down to the path itself, is looked at with
    `lstat` and must be no symbolic link, be owned by root and not be writable by
    group or other. So a configuration below `/home/someone` is refused even when the
@@ -903,9 +915,23 @@ The message names the path, the component that failed and the fix, for a binary 
 example `install -o root -g root -m 0755 keepwatch /usr/local/bin/` and then
 `/usr/local/bin/keepwatch install`. What lies under a path that already has a
 problem is not reported a second time.
-Limits: POSIX ACLs, file capabilities and bind mounts over a checked directory are
-not examined. The walk shows who can change a path now; it does not notice a change
-later, and a unit that fails tells nobody (`doctor` shows the failed last run).
+Limits:
+
+- A token file below `/run` is refused, also one that a secrets agent writes there at
+  every boot: keepwatch cannot tell that it will be back before the timer fires. Keep
+  the token on a file system that survives a reboot, for example in `/etc/keepwatch`.
+  The units do not use `LoadCredential=`, so nothing can be handed to them through
+  `/run/credentials` either.
+- The list of places is a list of paths. A tmpfs or another volatile file system
+  mounted somewhere else (a `/srv/scratch` on tmpfs, a `/tmp`-like mount under another
+  name) is not detected: keepwatch does not read the mount table.
+- POSIX ACLs, file capabilities and bind mounts over a checked directory are not
+  examined.
+- The walk shows who can change a path now; it does not notice a change later, and a
+  unit that fails tells nobody (`doctor` shows the failed last run).
+- `doctor` reads the unit files as `install` writes them. A unit file edited by hand
+  (a second `ExecStart` line, an added option that hides a path) and a drop-in are not
+  judged, see [doctor](#doctor).
 
 `install` is idempotent: with nothing to change it prints `already installed,
 nothing to change` and touches nothing (it still makes sure the timers are
@@ -1061,9 +1087,13 @@ configuration it examines:
   the check service decides and the other one is a problem in the same way.
 
 A `--config` in a unit that is not a clean absolute path is a problem and is never
-loaded. Limit: `doctor` reads the unit files, not drop-ins. A drop-in (for example
-`keepwatch-check.service.d/*.conf`) that replaces `ExecStart` or adds a hardening
-option is not looked at; the line about the last run is what shows its effect.
+loaded. Limit: `doctor` reads the unit files, not drop-ins, and it reads them as
+`install` writes them. A drop-in (for example `keepwatch-check.service.d/*.conf`)
+that replaces `ExecStart` or adds a hardening option is not looked at. Neither is a
+change made by hand to a unit file itself: of several `ExecStart` lines only the last
+is read, and an option added to the file (`ProtectHome=yes`, `InaccessiblePaths=`) is
+not judged, although `install` would call that file changed and rewrite it. The line
+about the last run is what shows the effect of either.
 
 | Area | What it checks | Level |
 |---|---|---|

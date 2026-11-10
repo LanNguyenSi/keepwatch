@@ -268,6 +268,12 @@ func TestDoctorPlacement(t *testing.T) {
 	}{
 		{"token file under /tmp", func(r *rig) { r.cfg.Notify.Ntfy.TokenFile = "/tmp/kwtok/ntfy.token" },
 			"config", []string{"the directory of notify.ntfy.token_file /tmp/kwtok is under /tmp", "the scheduled run exits 3"}, true},
+		{"token file below /run/credentials", func(r *rig) { r.cfg.Notify.Ntfy.TokenFile = "/run/credentials/kw/ntfy.token" },
+			"config", []string{"the directory of notify.ntfy.token_file /run/credentials/kw is under /run/credentials", "does not exist for it", "the scheduled run exits 3"}, true},
+		{"token file below /run", func(r *rig) { r.cfg.Notify.Ntfy.TokenFile = "/run/kw/ntfy.token" },
+			"config", []string{"the directory of notify.ntfy.token_file /run/kw is under /run", "empty after a reboot"}, true},
+		{"state_dir in the control group file system", func(r *rig) { r.cfg.StateDir = "/sys/fs/cgroup/kwstate" },
+			"state", []string{"state_dir /sys/fs/cgroup/kwstate is under /sys"}, false},
 		{"token file in the home of a user", func(r *rig) {
 			user(r)
 			r.fs.AddFile("/home/tester/ntfy.token", 0o600, 0, "t\n")

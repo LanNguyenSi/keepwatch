@@ -50,7 +50,9 @@ type PathEntry struct {
 	// Name says what the path is, for messages: "the configuration file".
 	Name string
 	Path string
-	// Role decides which sandbox rules apply (HiddenBy).
+	// Role says what the path is used for. The table of places the run
+	// cannot use (HiddenBy) is asked with it and binds every role alike; the
+	// role words what a problem does to the run.
 	Role Role
 	// Kind is what the path must be.
 	Kind   PathKind

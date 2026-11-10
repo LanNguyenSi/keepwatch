@@ -250,43 +250,84 @@ const (
 
 // sandboxEntry is one line of sandboxPaths.
 type sandboxEntry struct {
-	// option is the line of serviceHardening that causes the entry.
+	// option is the line of serviceHardening that causes the entry. It is
+	// empty for an entry that no single option causes: what every service
+	// with a mount namespace loses, a file system of the kernel, a place a
+	// reboot empties.
 	option string
-	why    string
-	paths  []string
-	roles  []Role
+	// hides says that the service does not see the directory the host has
+	// at the path (another one, or none). False means it is there but must
+	// not be relied on, and why says for what reason.
+	hides bool
+	why   string
+	paths []string
+	roles []Role
 }
 
-// sandboxPaths lists, next to the hardening constants below that cause them,
-// the paths a service does not see (or cannot rely on) and the roles for
-// which that is refused. The table is matched against the text of a path, so
-// it is only right for a path without a symbolic link in it: the placement
-// check refuses those (TrustedPath).
+// every is the roles of an entry that holds for whatever the path is used for.
+var every = []Role{RoleBinary, RoleConfig, RoleState}
+
+// sandboxPaths lists the places nothing the scheduled run depends on may lie
+// in, each with the reason. The rule is one of categories, the same for every
+// role: nothing below /dev, /proc, /sys, /run, /tmp and /var/tmp (and the
+// module directories, which one option hides). What the sandbox hides inside
+// such a place has its own entry, so that the message says what happens to the
+// path; the most specific entry wins.
+//
+// The table is matched against the text of a path, so it is only right for a
+// path without a symbolic link in it: the placement check refuses those
+// (TrustedPath). /var/run and /var/lock, which are links into /run on every
+// supported host, are named here so that the message says where they lead.
 //
 // A test ties the table to serviceHardening in both directions: every option
 // there is classified as hiding paths or not, an option that hides paths has
-// an entry here, and every entry here names an option that is set. Adding or
-// changing an option therefore means revisiting this table.
+// an entry here, and an entry that names an option names one that is set.
 var sandboxPaths = []sandboxEntry{
-	{"PrivateTmp=yes", "the service has its own empty /tmp and /var/tmp (PrivateTmp=yes), so the path does not exist for it",
-		[]string{"/tmp", "/var/tmp"}, []Role{RoleBinary, RoleConfig, RoleState}},
-	{"PrivateDevices=yes", "the service has its own /dev (PrivateDevices=yes), so the path does not exist for it",
-		[]string{"/dev"}, []Role{RoleBinary, RoleConfig, RoleState}},
-	{"ProtectKernelModules=yes", "the service cannot reach the kernel module directory (ProtectKernelModules=yes), so the path does not exist for it",
-		[]string{"/usr/lib/modules", "/lib/modules"}, []Role{RoleBinary, RoleConfig, RoleState}},
-	{"ReadWritePaths={{state}}", "it lives on a tmpfs that is empty after a reboot, and ReadWritePaths needs the directory to exist when the service starts",
-		[]string{"/run", "/var/run", "/var/lock", "/dev/shm"}, []Role{RoleState}},
+	{"PrivateTmp=yes", true, "the service has its own empty /tmp and /var/tmp (PrivateTmp=yes), so the path does not exist for it",
+		[]string{"/tmp", "/var/tmp"}, every},
+	{"PrivateDevices=yes", true, "the service has its own /dev (PrivateDevices=yes), so the path does not exist for it",
+		[]string{"/dev"}, every},
+	{"ProtectKernelModules=yes", true, "the service cannot reach the kernel module directory (ProtectKernelModules=yes), so the path does not exist for it",
+		[]string{"/usr/lib/modules", "/lib/modules"}, every},
+
+	{"", true, "systemd keeps /run/credentials away from a service that has no credentials of its own, so the path does not exist for it",
+		[]string{"/run/credentials"}, every},
+	{"", true, "the service has a directory of its own at /run/systemd/incoming, so the path does not exist for it",
+		[]string{"/run/systemd/incoming"}, every},
+	{"", true, "it is a file system of the kernel, of which the service has an instance of its own: nothing can be kept there",
+		[]string{"/proc"}, every},
+	{"", false, "it is a file system of the kernel: nothing can be kept there",
+		[]string{"/sys", "/dev/pts", "/dev/mqueue", "/dev/hugepages"}, every},
+	{"", false, "it is a tmpfs that is empty after a reboot, so what the scheduled run needs there is gone then",
+		[]string{"/run"}, every},
+	{"", false, "/var/run is /run, a tmpfs that is empty after a reboot, so what the scheduled run needs there is gone then",
+		[]string{"/var/run"}, every},
+	{"", false, "/var/lock is /run/lock, on a tmpfs that is empty after a reboot, so what the scheduled run needs there is gone then",
+		[]string{"/var/lock"}, every},
+	{"", false, "it is a tmpfs that is empty after a reboot, and programs do not run from it (noexec)",
+		[]string{"/dev/shm"}, every},
 }
 
-// Hidden is a sandbox path a value lies under.
+// Hidden is a path of sandboxPaths a value lies under.
 type Hidden struct {
 	Path, Option, Why string
+	// Hides: the service does not see the directory at all (see sandboxEntry).
+	Hides bool
 }
 
-// HiddenBy reports whether p lies under a path that the sandbox of the
-// services hides or that is volatile, for the role.
+// HiddenBy reports whether p lies under a path the scheduled run cannot use
+// for the role: one the sandbox of the services hides, a file system of the
+// kernel, or one a reboot empties.
 func HiddenBy(p string, role Role) (Hidden, bool) {
-	for _, e := range sandboxPaths {
+	return hiddenIn(sandboxPaths, p, role)
+}
+
+// hiddenIn is HiddenBy for a table. Of the entries that apply to the role, the
+// one with the longest path p lies under wins.
+func hiddenIn(table []sandboxEntry, p string, role Role) (Hidden, bool) {
+	var best Hidden
+	found := false
+	for _, e := range table {
 		applies := false
 		for _, r := range e.roles {
 			applies = applies || r == role
@@ -295,12 +336,12 @@ func HiddenBy(p string, role Role) (Hidden, bool) {
 			continue
 		}
 		for _, d := range e.paths {
-			if p == d || strings.HasPrefix(p, d+"/") {
-				return Hidden{Path: d, Option: e.option, Why: e.why}, true
+			if below(p, d) && len(d) > len(best.Path) {
+				best, found = Hidden{Path: d, Option: e.option, Why: e.why, Hides: e.hides}, true
 			}
 		}
 	}
-	return Hidden{}, false
+	return best, found
 }
 
 // File is one unit file to be written.
