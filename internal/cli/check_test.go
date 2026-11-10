@@ -803,29 +803,35 @@ func TestCheckStateThatCannotBeSavedIsToldAfterTheReport(t *testing.T) {
 	}
 }
 
-// A state file written by the previous schema version is read, not treated as
-// a broken file.
-func TestCheckReadsAStateFileOfTheOlderSchemaVersion(t *testing.T) {
-	f := newFixture(t, goodHost(), "")
-	f.check()
-	b, err := os.ReadFile(f.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	v1 := strings.Replace(string(b), `"schema_version": 2`, `"schema_version": 1`, 1)
-	if v1 == string(b) {
-		t.Fatalf("no schema_version in the state file:\n%s", b)
-	}
-	if err := os.WriteFile(f.statePath(), []byte(v1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.env.runner = goodHost().AddResult(svcArgv, res("inactive\n", 3))
-	f.clock = f.clock.Add(time.Hour)
-	code, out, errb := f.check()
-	if code != 1 || errb != "" || strings.Contains(out, "baseline run") || !strings.Contains(out, "! t.service (medium): now failing (was pass)") {
-		t.Errorf("exit %d stderr %q\n%s", code, errb, out)
-	}
-	if st := f.loadState(); st.SchemaVersion != state.SchemaVersion {
-		t.Errorf("the state was rewritten with schema version %d, want %d", st.SchemaVersion, state.SchemaVersion)
+// A state file of an older schema version has no key sets to compare with: the
+// run is a baseline with a warning, never a comparison that guesses and never
+// a silent "no changes". The file is replaced by one of the current version.
+func TestCheckTreatsAStateFileOfTheOlderSchemaVersionAsABaseline(t *testing.T) {
+	for _, old := range []string{"1", "2"} {
+		t.Run("version "+old, func(t *testing.T) {
+			f := newFixture(t, goodHost(), "")
+			f.check()
+			b, err := os.ReadFile(f.statePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			prev := strings.Replace(string(b), `"schema_version": 3`, `"schema_version": `+old, 1)
+			if prev == string(b) {
+				t.Fatalf("no schema_version in the state file:\n%s", b)
+			}
+			if err := os.WriteFile(f.statePath(), []byte(prev), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.env.runner = goodHost().AddResult(svcArgv, res("inactive\n", 3))
+			f.clock = f.clock.Add(time.Hour)
+			code, out, errb := f.check()
+			if code != 1 || !strings.Contains(errb, "previous state not used") || !strings.Contains(errb, "schema version "+old) ||
+				!strings.Contains(out, "baseline run") || strings.Contains(out, "now failing (was pass)") {
+				t.Errorf("exit %d stderr %q\n%s", code, errb, out)
+			}
+			if st := f.loadState(); st.SchemaVersion != state.SchemaVersion {
+				t.Errorf("the state was rewritten with schema version %d, want %d", st.SchemaVersion, state.SchemaVersion)
+			}
+		})
 	}
 }

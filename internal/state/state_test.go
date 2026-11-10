@@ -149,35 +149,36 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 	}
 	g := string(good)
 	cases := map[string]string{
-		"empty file":            "",
-		"truncated":             g[:len(g)/2],
-		"garbage":               "\x00\x01 not json",
-		"not an object":         "[1,2,3]",
-		"data after json":       g + "{}",
-		"unknown field":         strings.Replace(g, `"run_at"`, `"extra": 1, "run_at"`, 1),
-		"wrong schema":          strings.Replace(g, `"schema_version": 2`, `"schema_version": 3`, 1),
-		"schema zero":           strings.Replace(g, `"schema_version": 2`, `"schema_version": 0`, 1),
-		"no schema":             strings.Replace(g, `"schema_version": 2,`, ``, 1),
-		"cutoff without hidden": strings.Replace(g, `"items": [`, `"cutoff": "a", "items": [`, 1),
-		"cutoff too long":       strings.Replace(g, `"items": [`, `"hidden": 3, "cutoff": "`+strings.Repeat("c", maxSubjectLen+1)+`", "items": [`, 1),
-		"bad status":            strings.Replace(g, `"status": "fail"`, `"status": "bogus"`, 1),
-		"bad severity":          strings.Replace(g, `"severity": "high"`, `"severity": "extreme"`, 1),
-		"empty id":              strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
-		"duplicate id":          strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
-		"bad key":               strings.Replace(g, result.SubjectKey("passwordauthentication"), "xyz", 1),
-		"negative hidden":       strings.Replace(g, `"items": [`, `"hidden": -3, "items": [`, 1),
-		"no checks":             `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
-		"null checks":           `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
-		"wrong type":            strings.Replace(g, `"status": "fail"`, `"status": 7`, 1),
-		"huge item count":       hugeItems(),
-		"too many checks":       manyChecks(maxChecks + 1),
-		"id too long":           strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "`+strings.Repeat("a", maxIDLen+1)+`"`, 1),
-		"kind too long":         strings.Replace(g, `"kind": "service_active"`, `"kind": "`+strings.Repeat("k", maxIDLen+1)+`"`, 1),
-		"hidden too big":        strings.Replace(g, `"items": [`, fmt.Sprintf(`"hidden": %d, "items": [`, maxHidden+1), 1),
-		"duplicate key":         strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, result.SubjectKey("a")), 1),
-		"subject too long":      strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "`+strings.Repeat("s", maxSubjectLen+1)+`"`, 1),
-		"oversize":              strings.Repeat(" ", MaxFileSize+1),
-		"valid then spaces":     g + strings.Repeat(" ", MaxFileSize),
+		"empty file":          "",
+		"truncated":           g[:len(g)/2],
+		"garbage":             "\x00\x01 not json",
+		"not an object":       "[1,2,3]",
+		"data after json":     g + "{}",
+		"unknown field":       strings.Replace(g, `"run_at"`, `"extra": 1, "run_at"`, 1),
+		"version 1":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 1`, 1),
+		"version 2":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 2`, 1),
+		"version 4":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 4`, 1),
+		"schema zero":         strings.Replace(g, `"schema_version": 3`, `"schema_version": 0`, 1),
+		"no schema":           strings.Replace(g, `"schema_version": 3,`, ``, 1),
+		"cutoff of version 2": strings.Replace(g, `"items": [`, `"cutoff": "a", "items": [`, 1),
+		"hidden of version 2": strings.Replace(g, `"items": [`, `"hidden": 3, "items": [`, 1),
+		"exact of version 2":  strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "passwordauthentication", "exact": true`, 1),
+		"bad status":          strings.Replace(g, `"status": "fail"`, `"status": "bogus"`, 1),
+		"bad severity":        strings.Replace(g, `"severity": "high"`, `"severity": "extreme"`, 1),
+		"empty id":            strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
+		"duplicate id":        strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
+		"bad key":             strings.Replace(g, result.SubjectKey("passwordauthentication"), "xyz", 1),
+		"no checks":           `{"schema_version": 3, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
+		"null checks":         `{"schema_version": 3, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
+		"wrong type":          strings.Replace(g, `"status": "fail"`, `"status": 7`, 1),
+		"huge item count":     hugeItems(),
+		"too many checks":     manyChecks(maxChecks + 1),
+		"id too long":         strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "`+strings.Repeat("a", maxIDLen+1)+`"`, 1),
+		"kind too long":       strings.Replace(g, `"kind": "service_active"`, `"kind": "`+strings.Repeat("k", maxIDLen+1)+`"`, 1),
+		"duplicate key":       strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, result.SubjectKey("a")), 1),
+		"subject too long":    strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "`+strings.Repeat("s", maxSubjectLen+1)+`"`, 1),
+		"oversize":            strings.Repeat(" ", MaxFileSize+1),
+		"valid then spaces":   g + strings.Repeat(" ", MaxFileSize),
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -201,7 +202,7 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 
 func manyChecks(n int) string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":2,"run_at":"2026-11-10T12:00:00Z","checks":[`)
+	sb.WriteString(`{"schema_version":3,"run_at":"2026-11-10T12:00:00Z","checks":[`)
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -214,7 +215,7 @@ func manyChecks(n int) string {
 
 func hugeItems() string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":2,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
+	sb.WriteString(`{"schema_version":3,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
 	for i := 0; i < maxItems+1; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -491,7 +492,7 @@ func TestSaveFailureKeepsThePreviousStateAndLeavesNoTempFile(t *testing.T) {
 func TestSaveRefusesAStateTooLargeToReadBack(t *testing.T) {
 	s, dir := newStore(t)
 	big := &State{SchemaVersion: SchemaVersion, RunAt: t0, Checks: []Check{{ID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low}}}
-	for i := 0; i < 30000; i++ {
+	for i := 0; i < 60000; i++ {
 		big.Checks[0].Items = append(big.Checks[0].Items, Item{Key: result.SubjectKey(fmt.Sprint(i)), Subject: strings.Repeat("x", 200)})
 	}
 	if err := s.Save(big); err == nil || !strings.Contains(err.Error(), "larger than the limit") {
@@ -584,11 +585,19 @@ func TestFromResultsMergesResultsThatShareAnID(t *testing.T) {
 	}
 }
 
-func marker(hidden, limit int) result.Evidence {
-	return result.Evidence{
-		Subject: fmt.Sprintf("(%d more not shown)", hidden),
-		Detail:  fmt.Sprintf("%d further items are not listed, the limit is %d items", hidden, limit),
+// capped returns what a probe returns for a list of total distinct subjects:
+// the first 99 sorted and the marker that carries the set of all of them.
+func capped(total int) []result.Evidence {
+	all := make([]result.Evidence, total)
+	for i := range all {
+		all[i] = result.Evidence{Subject: fmt.Sprintf("item-%05d", i), Detail: "d"}
 	}
+	out := append([]result.Evidence(nil), all[:99]...)
+	return append(out, result.Evidence{
+		Subject: fmt.Sprintf("(%d more not shown)", total-99),
+		Detail:  fmt.Sprintf("%d further items are not listed, the limit is 100 items", total-99),
+		Set:     result.NewEvidenceSet(all),
+	})
 }
 
 func items(n int) []result.Evidence {
@@ -599,53 +608,71 @@ func items(n int) []result.Evidence {
 	return out
 }
 
-func TestMarkerIsRecognisedOnlyInItsExactForm(t *testing.T) {
-	genuine := append(items(99), marker(7, 100))
+func TestMarkerIsRecognisedByItsSetOnly(t *testing.T) {
+	look := func(n int) result.Evidence {
+		return result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", n), Detail: fmt.Sprintf("%d further items are not listed, the limit is 100 items", n)}
+	}
 	cases := []struct {
-		name       string
-		ev         []result.Evidence
-		wantItems  int
-		wantHidden int
+		name      string
+		ev        []result.Evidence
+		wantItems int
+		wantSet   bool
 	}{
-		{"genuine marker", genuine, 99, 7},
-		{"no marker", items(10), 10, 0},
-		{"empty", nil, 0, 0},
-		{"marker is not last", append([]result.Evidence{marker(7, 100)}, items(99)...), 100, 0},
-		{"wrong list length", append(items(5), marker(7, 100)), 6, 0},
-		{"hidden counts disagree", append(items(99), result.Evidence{Subject: "(7 more not shown)", Detail: "8 further items are not listed, the limit is 100 items"}), 100, 0},
-		{"only the subject looks like it", append(items(99), result.Evidence{Subject: "(7 more not shown)", Detail: "privileged container"}), 100, 0},
-		{"only the detail looks like it", append(items(99), result.Evidence{Subject: "web", Detail: "7 further items are not listed, the limit is 100 items"}), 100, 0},
-		{"zero hidden", append(items(99), marker(0, 100)), 100, 0},
-		{"excepted marker", append(items(99), result.Evidence{Subject: marker(7, 100).Subject, Detail: marker(7, 100).Detail, Excepted: true}), 100, 0},
-		{"huge number", append(items(99), marker(1, 100)), 99, 1},
-		{"digits overflow", append(items(99), result.Evidence{Subject: "(99999999999999999999 more not shown)", Detail: "99999999999999999999 further items are not listed, the limit is 100 items"}), 100, 0},
+		{"genuine marker", capped(106), 99, true},
+		{"no marker", items(10), 10, false},
+		{"empty", nil, 0, false},
+		{"a text that looks exactly like the marker is an item", append(items(99), look(7)), 100, false},
+		{"an excepted marker is still the marker", append(items(99), result.Evidence{Subject: "(7 more not shown)", Excepted: true, Set: result.NewEvidenceSet(items(106))}), 99, true},
+		{"the marker is found wherever it is", append([]result.Evidence{capped(106)[99]}, items(5)...), 5, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, hidden := splitMarker(c.ev)
-			if len(got) != c.wantItems || hidden != c.wantHidden {
-				t.Errorf("items %d, hidden %d; want %d, %d", len(got), hidden, c.wantItems, c.wantHidden)
+			got, set := splitMarker(c.ev)
+			if len(got) != c.wantItems || (set != nil) != c.wantSet {
+				t.Errorf("items %d, set %v; want %d, %v", len(got), set != nil, c.wantItems, c.wantSet)
+			}
+			for _, e := range got {
+				if e.IsMarker() {
+					t.Errorf("the marker is among the items")
+				}
 			}
 		})
 	}
 }
 
-func TestMarkerBecomesHiddenCount(t *testing.T) {
-	st := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: append(items(99), marker(7, 100))}}, t0, nil)
+func TestMarkerBecomesTheKeySet(t *testing.T) {
+	st := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: capped(106)}}, t0, nil)
 	c := st.Checks[0]
-	if len(c.Items) != 99 || c.Hidden != 7 || !c.Capped() || c.Total() != 106 {
-		t.Errorf("check: %d items, hidden %d, total %d", len(c.Items), c.Hidden, c.Total())
+	if len(c.Items) != 99 || !c.Capped() || c.Total != 106 || len(c.Keys) != 106 || c.SetTotal() != 106 {
+		t.Fatalf("check: %d items, total %d, %d keys", len(c.Items), c.Total, len(c.Keys))
+	}
+	if c.Digest != result.DigestOfKeys(c.Keys) || c.SetDigest() != c.Digest {
+		t.Errorf("digest %s", c.Digest)
 	}
 	for _, it := range c.Items {
 		if strings.Contains(it.Subject, "more not shown") {
 			t.Errorf("the marker is stored as an item")
 		}
 	}
+	b, _ := Marshal(st)
+	if strings.Contains(string(b), "item-00105") || strings.Contains(string(b), "item-00099") {
+		t.Errorf("a subject that was cut is stored:\n%s", b)
+	}
+	// A list that was not cut has no set in the file, and the set methods
+	// derive it from the items.
+	un := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: items(3)}}, t0, nil).Checks[0]
+	if un.Capped() || un.Total != 0 || un.Keys != nil || un.Digest != "" || un.SetTotal() != 3 {
+		t.Errorf("uncapped check: %+v", un)
+	}
+	keys, ok := un.SetKeys()
+	if !ok || len(keys) != 3 || un.SetDigest() != result.DigestOfKeys(keys) {
+		t.Errorf("keys %v %v", keys, ok)
+	}
 }
 
 func TestValidateAcceptsWhatFromResultsProduces(t *testing.T) {
 	st := FromResults([]result.Result{
-		{CheckID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low, Evidence: append(items(99), marker(7, 100))},
+		{CheckID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low, Evidence: capped(106)},
 		{CheckID: "c.d", Kind: "k", Status: result.Skipped, Severity: result.Info},
 	}, t0, nil)
 	b, err := Marshal(st)
@@ -812,13 +839,70 @@ func TestRunAtIsStoredInUTC(t *testing.T) {
 	}
 }
 
-func TestMergedResultsAddUpTheirHiddenCounts(t *testing.T) {
+func TestMergedResultsUniteTheirSets(t *testing.T) {
+	one := capped(130)
+	two := capped(150)
 	st := FromResults([]result.Result{
-		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: append(items(99), marker(7, 100))},
-		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: append(items(99), marker(3, 100))},
+		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: one},
+		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: two},
+		{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: []result.Evidence{{Subject: "extra"}}},
 	}, t0, nil)
-	if got := st.Checks[0].Hidden; got != 10 {
-		t.Errorf("Hidden = %d, want 10", got)
+	c := st.Checks[0]
+	// item-00000..item-00149 and "extra": the first list is a subset of the second.
+	if c.Total != 151 || len(c.Keys) != 151 || c.Digest != result.DigestOfKeys(c.Keys) {
+		t.Fatalf("total %d, %d keys", c.Total, len(c.Keys))
+	}
+	if err := validate(st); err != nil {
+		t.Errorf("merged state invalid: %v", err)
+	}
+}
+
+func TestMergedResultsOfSetsTooLargeToListKeepADigest(t *testing.T) {
+	big := func(prefix string, n int) []result.Evidence {
+		all := make([]result.Evidence, n)
+		for i := range all {
+			all[i] = result.Evidence{Subject: fmt.Sprintf("%s%06d", prefix, i)}
+		}
+		return append(append([]result.Evidence(nil), all[:99]...), result.Evidence{Subject: "(m)", Set: result.NewEvidenceSet(all)})
+	}
+	build := func(second []result.Evidence) Check {
+		st := FromResults([]result.Result{
+			{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: big("x", result.MaxKeys+10)},
+			{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: second},
+		}, t0, nil)
+		if err := validate(st); err != nil {
+			t.Fatalf("invalid: %v", err)
+		}
+		return st.Checks[0]
+	}
+	a := build(big("y", 150))
+	if a.Total != result.MaxKeys+10+150 || a.Keys != nil || len(a.Digest) != 64 {
+		t.Fatalf("%+v", a)
+	}
+	if again := build(big("y", 150)); again.Digest != a.Digest {
+		t.Error("the digest of the same input changed")
+	}
+	if other := build(big("z", 150)); other.Digest == a.Digest {
+		t.Error("a different second list gives the same digest")
+	}
+}
+
+func TestAListThatWasNotCutByTheProbeIsCutHere(t *testing.T) {
+	n := maxItems + 500
+	ev := make([]result.Evidence, n)
+	for i := range ev {
+		ev[i] = result.Evidence{Subject: fmt.Sprintf("s%05d", n-i)} // unsorted
+	}
+	st := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: ev}}, t0, nil)
+	c := st.Checks[0]
+	if len(c.Items) != displayItems || c.Total != n || len(c.Keys) != n || c.Items[0].Subject != "s00001" {
+		t.Fatalf("%d items, total %d, %d keys, first %q", len(c.Items), c.Total, len(c.Keys), c.Items[0].Subject)
+	}
+	if ev[0].Subject != fmt.Sprintf("s%05d", n) {
+		t.Error("the caller's slice was reordered")
+	}
+	if err := validate(st); err != nil {
+		t.Errorf("invalid: %v", err)
 	}
 }
 

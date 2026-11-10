@@ -60,8 +60,10 @@ func fullInput() Input {
 				{Kind: diff.StatusChange, CheckID: "updates.security_pending", CheckKind: "security_updates", Severity: result.High, From: result.Pass, To: result.Error, Alert: true},
 				{Kind: diff.StatusChange, CheckID: "ssh.authorized_keys", CheckKind: "authorized_keys", Severity: result.High, From: result.Pass, To: result.Warn, Alert: true},
 				{Kind: diff.Fixed, CheckID: "disk.usage", CheckKind: "disk_usage", Severity: result.Medium, From: result.Fail, To: result.Pass},
-				{Kind: diff.CountChange, CheckID: "docker.exposure", CheckKind: "docker_exposure", Severity: result.High, From: result.Fail, To: result.Fail, OldTotal: 104, NewTotal: 108, Alert: true},
 				{Kind: diff.HiddenNew, CheckID: "docker.exposure", CheckKind: "docker_exposure", Severity: result.High, From: result.Fail, To: result.Fail, HiddenNew: 2, Alert: true},
+				{Kind: diff.HiddenNew, CheckID: "ssh.authorized_keys", CheckKind: "authorized_keys", Severity: result.High, From: result.Warn, To: result.Warn, HiddenNew: 1, Alert: true},
+				{Kind: diff.HiddenGone, CheckID: "network.listeners", CheckKind: "listeners", Severity: result.Medium, From: result.Fail, To: result.Fail, HiddenGone: 3},
+				{Kind: diff.SetChanged, CheckID: "network.listeners", CheckKind: "listeners", Severity: result.Medium, From: result.Fail, To: result.Fail, OldTotal: 12000, NewTotal: 12001, Alert: true},
 				{Kind: diff.SeverityChange, CheckID: "disk.usage", CheckKind: "disk_usage", Severity: result.High, From: result.Fail, To: result.Fail, FromSeverity: result.Medium, ToSeverity: result.High, Alert: true},
 				{Kind: diff.CheckAdded, CheckID: "fail2ban.sshd_jail", CheckKind: "fail2ban_jail", Severity: result.High, To: result.Pass},
 				{Kind: diff.CheckRemoved, CheckID: "old.check", CheckKind: "k", Severity: result.Low, From: result.Fail},
@@ -223,8 +225,8 @@ func TestJSONIsValidAndCarriesTheCleanedText(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &back); err != nil {
 		t.Fatalf("not valid JSON: %v", err)
 	}
-	if back.SchemaVersion != SchemaVersion || len(back.Results) != 7 || len(back.Changes) != 11 {
-		t.Errorf("round trip: %+v", back)
+	if back.SchemaVersion != SchemaVersion || len(back.Results) != 7 || len(back.Changes) != 13 {
+		t.Errorf("round trip: %d results, %d changes", len(back.Results), len(back.Changes))
 	}
 	if strings.Contains(out, "<script>") || strings.Contains(out, "<script") && false {
 		t.Errorf("raw tag in JSON")

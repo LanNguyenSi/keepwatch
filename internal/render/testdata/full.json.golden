@@ -79,17 +79,6 @@
       "alert": false
     },
     {
-      "kind": "count_change",
-      "check_id": "docker.exposure",
-      "check_kind": "docker_exposure",
-      "severity": "high",
-      "from": "fail",
-      "to": "fail",
-      "old_total": 104,
-      "new_total": 108,
-      "alert": true
-    },
-    {
       "kind": "hidden_new",
       "check_id": "docker.exposure",
       "check_kind": "docker_exposure",
@@ -97,6 +86,37 @@
       "from": "fail",
       "to": "fail",
       "hidden_new": 2,
+      "alert": true
+    },
+    {
+      "kind": "hidden_new",
+      "check_id": "ssh.authorized_keys",
+      "check_kind": "authorized_keys",
+      "severity": "high",
+      "from": "warn",
+      "to": "warn",
+      "hidden_new": 1,
+      "alert": true
+    },
+    {
+      "kind": "hidden_gone",
+      "check_id": "network.listeners",
+      "check_kind": "listeners",
+      "severity": "medium",
+      "from": "fail",
+      "to": "fail",
+      "hidden_gone": 3,
+      "alert": false
+    },
+    {
+      "kind": "set_changed",
+      "check_id": "network.listeners",
+      "check_kind": "listeners",
+      "severity": "medium",
+      "from": "fail",
+      "to": "fail",
+      "old_total": 12000,
+      "new_total": 12001,
       "alert": true
     },
     {

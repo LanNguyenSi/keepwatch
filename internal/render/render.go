@@ -77,10 +77,12 @@ func changeText(c viewChange) string {
 		return "new item"
 	case "subject_gone":
 		return "item gone"
-	case "count_change":
-		return fmt.Sprintf("item count %d -> %d", c.OldTotal, c.NewTotal)
 	case "hidden_new":
-		return fmt.Sprintf("%d new %s not shown (above the cutoff of a capped list)", c.HiddenNew, plural(c.HiddenNew, "item", "items"))
+		return fmt.Sprintf("%d new %s not listed (the check lists only some of its items)", c.HiddenNew, plural(c.HiddenNew, "item", "items"))
+	case "hidden_gone":
+		return fmt.Sprintf("%d %s gone, not listed (the check lists only some of its items)", c.HiddenGone, plural(c.HiddenGone, "item", "items"))
+	case "set_changed":
+		return fmt.Sprintf("the items changed (%d -> %d; too many to compare one by one)", c.OldTotal, c.NewTotal)
 	case "severity_change":
 		return fmt.Sprintf("severity %s -> %s (status %s)", c.FromSeverity, c.ToSeverity, c.To)
 	}

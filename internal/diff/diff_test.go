@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -27,10 +28,67 @@ func sev(c state.Check, s result.Severity) state.Check {
 	c.Severity = s
 	return c
 }
-func capped(c state.Check, hidden int) state.Check { c.Hidden = hidden; return c }
+
+// cutAt is the display cap of the probes: a list of more than this many items
+// is cut to cutAt-1 and a marker.
+const cutAt = 100
+
+// listed returns the evidence list a probe returns for names, built the way
+// the probes' limitEvidence does it: sorted by subject, and when there are
+// more than cutAt items the first cutAt-1 and the marker that carries the set
+// of all of them. A name ending in "!" is an item an exception covers, as the
+// engine marks it: only among the items that are listed.
+func listed(names ...string) []result.Evidence {
+	type item struct {
+		name string
+		ex   bool
+	}
+	var all []item
+	var raw []result.Evidence
+	for _, n := range names {
+		ex := strings.HasSuffix(n, "!")
+		n = strings.TrimSuffix(n, "!")
+		all = append(all, item{n, ex})
+		raw = append(raw, result.Evidence{Subject: n})
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].name < all[j].name })
+	shown := all
+	if len(all) > cutAt {
+		shown = all[:cutAt-1]
+	}
+	var out []result.Evidence
+	for _, it := range shown {
+		out = append(out, result.Evidence{Subject: it.name, Excepted: it.ex})
+	}
+	if len(all) > cutAt {
+		out = append(out, result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", len(all)-(cutAt-1)), Set: result.NewEvidenceSet(raw)})
+	}
+	return out
+}
+
+// big builds a check as the state package builds it from a probe's result:
+// capped when names has more than cutAt items. clean is the display cleaner
+// (nil leaves subjects as they are).
+func big(clean func(string) string, id string, st result.Status, names ...string) state.Check {
+	r := result.Result{CheckID: id, Kind: "k", Status: st, Severity: result.High, Evidence: listed(names...)}
+	return state.FromResults([]result.Result{r}, time.Unix(0, 0), clean).Checks[0]
+}
+
+// bigN is big for the generated names of many.
+func bigN(id string, st result.Status, names ...string) state.Check {
+	return big(nil, id, st, names...)
+}
 
 func run(cs ...state.Check) *state.State {
 	return &state.State{SchemaVersion: state.SchemaVersion, RunAt: time.Unix(0, 0).UTC(), Checks: cs}
+}
+
+func reverse(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[len(in)-1-i] = s
+	}
+	return out
 }
 
 func many(prefix string, n int) []string {
@@ -50,7 +108,9 @@ func show(c Change) string {
 		s += " " + c.Subject
 	case HiddenNew:
 		s += fmt.Sprintf(" %d", c.HiddenNew)
-	case CountChange:
+	case HiddenGone:
+		s += fmt.Sprintf(" %d", c.HiddenGone)
+	case SetChanged:
 		s += fmt.Sprintf(" %d>%d", c.OldTotal, c.NewTotal)
 	case SeverityChange:
 		s += fmt.Sprintf(" %s>%s (%s)", c.FromSeverity, c.ToSeverity, c.To)
@@ -142,38 +202,37 @@ func TestCompute(t *testing.T) {
 			cur:  run(chk("b", result.Pass), chk("new", result.Fail, "x"), chk("a", result.Fail, "y")),
 			want: []string{"fixed b fail>pass", "check_added new ->fail ALERT", "new_failure a pass>fail ALERT", "check_removed old1 fail->", "check_removed old2 pass->"}},
 
-		// Evidence cap (the marker item). The hidden count itself is never a subject.
-		{name: "capped, hidden count unchanged", prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), stillFailing: []string{"a"}},
-		{name: "capped, hidden count grows: no spurious subject, total change",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 6)),
-			want: []string{"count_change a 104>105 ALERT"}, stillFailing: []string{"a"}},
-		{name: "capped, hidden count shrinks",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 3)),
-			want: []string{"count_change a 104>102"}, stillFailing: []string{"a"}},
-		{name: "capped on both sides, the window shifts: only the total",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)),
-			cur:  run(capped(chk("a", result.Fail, append([]string{"a-new"}, many("s", 98)...)...), 6)),
-			want: []string{"count_change a 104>105 ALERT"}, stillFailing: []string{"a"}},
-		{name: "capped on both sides, window shifts, total equal: silent",
-			prev:         run(capped(chk("a", result.Fail, many("s", 99)...), 5)),
-			cur:          run(capped(chk("a", result.Fail, append([]string{"a-new"}, many("s", 98)...)...), 5)),
-			stillFailing: []string{"a"}},
-		{name: "previous complete, now capped: new subjects reported, gone ones not",
-			prev: run(chk("a", result.Fail, "s-000", "s-001", "old")),
-			cur:  run(capped(chk("a", result.Fail, "s-000", "s-001", "zz-new"), 40)),
-			want: []string{"subject_new a zz-new ALERT", "count_change a 3>43 ALERT"}, stillFailing: []string{"a"}},
-		{name: "previous capped, now complete: gone subjects reported, new ones not",
-			prev: run(capped(chk("a", result.Fail, "s-000", "s-001", "old"), 40)),
-			cur:  run(chk("a", result.Fail, "s-000", "s-001", "other")),
-			want: []string{"subject_gone a old", "count_change a 43>3"}, stillFailing: []string{"a"}},
-		{name: "capped warn of other kind: bigger total is not an alert",
-			prev: run(capped(chk("a", result.Warn, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Warn, many("s", 99)...), 9)),
-			want: []string{"count_change a 104>108"}, stillWarning: []string{"a"}},
-		{name: "capped authorized_keys warn: bigger total alerts",
-			prev: run(capped(ak(result.Warn, many("s", 99)...), 5)), cur: run(capped(ak(result.Warn, many("s", 99)...), 9)),
-			want: []string{"count_change keys 104>108 ALERT"}, stillWarning: []string{"keys"}},
-		{name: "capped error: nothing per item", prev: run(capped(chk("a", result.Error, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Error, many("t", 99)...), 9))},
-		{name: "pass to capped fail", prev: run(chk("a", result.Pass)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 9)), want: []string{"new_failure a pass>fail ALERT"}},
+		// Evidence cap: the list is cut, the set is complete. The count of the
+		// hidden items never makes a subject.
+		{name: "capped, nothing changed", prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 104)...)), stillFailing: []string{"a"}},
+		{name: "capped, order of the input does not matter",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, reverse(many("s", 104))...)), stillFailing: []string{"a"}},
+		{name: "capped, one new item above the cut",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 105)...)),
+			want: []string{"hidden_new a 1 ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, items gone above the cut",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 102)...)),
+			want: []string{"hidden_gone a 2"}, stillFailing: []string{"a"}},
+		{name: "capped, a new item sorts into the listed part: named, and pushes one out of the window",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append([]string{"a-new"}, many("s", 104)...)...)),
+			want: []string{"subject_new a a-new ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, one in and one out, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append([]string{"a-new"}, many("s", 103)...)...)),
+			want: []string{"subject_new a a-new ALERT", "hidden_gone a 1"}, stillFailing: []string{"a"}},
+		{name: "capped, a listed item swapped for a hidden one, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append(many("s", 104)[1:], "zz-new")...)),
+			want: []string{"subject_gone a s-000", "hidden_new a 1 ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, a hidden item swapped for another hidden one, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append(many("s", 103), "zz-new")...)),
+			want: []string{"hidden_new a 1 ALERT", "hidden_gone a 1"}, stillFailing: []string{"a"}},
+		{name: "capped warn of other kind: a new hidden item is reported, not alerted",
+			prev: run(bigN("a", result.Warn, many("s", 104)...)), cur: run(bigN("a", result.Warn, many("s", 109)...)),
+			want: []string{"hidden_new a 5"}, stillWarning: []string{"a"}},
+		{name: "capped authorized_keys warn: a new hidden item alerts",
+			prev: run(kind(bigN("keys", result.Warn, many("s", 104)...), AuthorizedKeysKind)), cur: run(kind(bigN("keys", result.Warn, many("s", 109)...), AuthorizedKeysKind)),
+			want: []string{"hidden_new keys 5 ALERT"}, stillWarning: []string{"keys"}},
+		{name: "capped error: nothing per item", prev: run(bigN("a", result.Error, many("s", 150)...)), cur: run(bigN("a", result.Error, many("t", 150)...))},
+		{name: "pass to capped fail", prev: run(chk("a", result.Pass)), cur: run(bigN("a", result.Fail, many("s", 150)...)), want: []string{"new_failure a pass>fail ALERT"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
