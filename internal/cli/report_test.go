@@ -235,3 +235,17 @@ func TestReportWeeklyNotifyNeedsNtfyInTheConfiguration(t *testing.T) {
 		t.Errorf("exit %d stderr %q", code, errb)
 	}
 }
+
+func TestReportWeeklyShowsAPendingDeliveryFailure(t *testing.T) {
+	n := newFakeNtfy(t)
+	f := weekFixture(t, n)
+	n.answer(500, 500)
+	f.next(goodHost().AddResult(sshdArgv, res("port 22\npasswordauthentication yes\n", 0)).AddResult(svcArgv, res("inactive\n", 3)))
+	if code, _, _ := f.check("--notify"); code != ExitDelivery {
+		t.Fatalf("exit %d", code)
+	}
+	_, out, _ := f.report("--weekly")
+	if !strings.Contains(out, "Last delivery failed: the notification of an earlier run could not be delivered at") || !strings.Contains(out, "HTTP 500") {
+		t.Errorf("digest:\n%s", out)
+	}
+}

@@ -145,7 +145,7 @@ func TestFileRulesAreThoseOfTheStateFile(t *testing.T) {
 		os.WriteFile(target, good, 0o600)
 		os.Symlink(target, filepath.Join(dir, FileName))
 		lr, err := s.Load()
-		if err != nil || !strings.Contains(lr.Problem, "symlink") || len(lr.File.Runs) != 0 {
+		if err != nil || !strings.Contains(lr.Problem, "is a symlink, it is not followed") || len(lr.File.Runs) != 0 {
 			t.Errorf("%+v %v", lr, err)
 		}
 		// The write replaces the link, it does not write through it.
@@ -200,7 +200,7 @@ func TestFileRulesAreThoseOfTheStateFile(t *testing.T) {
 		f.Truncate(MaxFileSize + 1)
 		f.Close()
 		os.Chmod(filepath.Join(dir, FileName), 0o600)
-		if lr, err := s.Load(); err != nil || !strings.Contains(lr.Problem, "larger than the limit") {
+		if lr, err := s.Load(); err != nil || !strings.Contains(lr.Problem, "bytes, larger than the limit") {
 			t.Errorf("%+v %v", lr, err)
 		}
 	})
@@ -224,6 +224,22 @@ func TestFileRulesAreThoseOfTheStateFile(t *testing.T) {
 		}
 		if _, err := s.Append(run(0, 0)); err == nil {
 			t.Error("append into a writable directory")
+		}
+	})
+	t.Run("directory swapped while it is opened", func(t *testing.T) {
+		s, dir := newStore(t)
+		os.WriteFile(filepath.Join(dir, FileName), good, 0o600)
+		s.dirChecked = func() {
+			os.Rename(dir, dir+".old")
+			os.Mkdir(dir, 0o700)
+		}
+		if _, err := s.Load(); err == nil || !strings.Contains(err.Error(), "changed while it was being opened") {
+			t.Errorf("load: %v", err)
+		}
+		os.RemoveAll(dir)
+		os.Rename(dir+".old", dir)
+		if _, err := s.Append(run(0, 0)); err == nil || !strings.Contains(err.Error(), "changed while it was being opened") {
+			t.Errorf("append: %v", err)
 		}
 	})
 	t.Run("directory of a foreign owner", func(t *testing.T) {

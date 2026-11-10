@@ -612,3 +612,21 @@ func TestNotifyTimeoutIsAFailureTooAndNeverLeaksTheTopic(t *testing.T) {
 		t.Errorf("delivery %+v", d)
 	}
 }
+
+func TestNotifyRecordedReasonIsShortAndRedacted(t *testing.T) {
+	// A server that answers with a long error text that holds a secret.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		io.WriteString(w, `{"code":40301,"http":403,"error":"password=hunter2 `+strings.Repeat("y", 400)+`"}`)
+	}))
+	t.Cleanup(srv.Close)
+	f := newFixture(t, goodHost(), "notify:\n  ntfy:\n    url: "+srv.URL+"\n    topic: alerts\n")
+	code, _, errb := f.check("--notify")
+	if code != ExitDelivery || strings.Contains(errb, "hunter2") {
+		t.Fatalf("exit %d stderr %q", code, errb)
+	}
+	d := f.delivery()
+	if d == nil || strings.Contains(d.Reason, "hunter2") || !strings.HasSuffix(d.Reason, "...") || len([]rune(d.Reason)) != maxReasonRunes+3 {
+		t.Errorf("reason %q (%d runes)", d.Reason, len([]rune(d.Reason)))
+	}
+}

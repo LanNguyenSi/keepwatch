@@ -210,6 +210,7 @@ func TestTooManyRequestsHonoursRetryAfterWithinTheCap(t *testing.T) {
 		{"at the cap", "30", 30 * time.Second, 2},
 		{"above the cap", "31", 0, 1},
 		{"a day", "86400", 0, 1},
+		{"a number that overflows a duration", "10000000000", 0, 1},
 		{"nonsense", "soon", 2 * time.Second, 2},
 		{"negative", "-5", 2 * time.Second, 2},
 		{"absent", "", 2 * time.Second, 2},
@@ -385,7 +386,7 @@ func TestHeaderInjectionIsNotPossible(t *testing.T) {
 		Title:    "alert\r\nX-Evil: 1\r\nPriority: 1\nContent-Length: 0\u0000 ä",
 		Body:     "x",
 		Priority: 3,
-		Tags:     []string{"ok", "bad\r\nX-Evil: 1", "has space", "", "a,b", strings.Repeat("a", 33), "t1", "t2", "t3", "t4"},
+		Tags:     []string{"ok", "bad\r\nX-Evil: 1", "has space", "", "a,b", strings.Repeat("a", 33), "t1", "t2", "t3", "t4", "t5", "t6"},
 	}
 	if err := n.Send(context.Background(), m); err != nil {
 		t.Fatal(err)

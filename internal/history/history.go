@@ -142,6 +142,9 @@ type Store struct {
 	dir     string
 	ownerOf func(fs.FileInfo) (int, error)
 	getuid  func() int
+	// dirChecked runs after the directory was examined and before it is
+	// opened; tests swap the directory there.
+	dirChecked func()
 }
 
 // Option customises a Store; production callers use none.
@@ -157,7 +160,7 @@ func Open(dir string, opts ...Option) (*Store, error) {
 	if !filepath.IsAbs(c) || c == string(filepath.Separator) {
 		return nil, fmt.Errorf("state_dir %q: must be an absolute path other than /", dir)
 	}
-	s := &Store{dir: c, ownerOf: defaultOwnerOf, getuid: os.Getuid}
+	s := &Store{dir: c, ownerOf: defaultOwnerOf, getuid: os.Getuid, dirChecked: func() {}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -208,6 +211,7 @@ func (s *Store) openDir() (*os.Root, error) {
 	if err := s.checkDirInfo(fi); err != nil {
 		return nil, err
 	}
+	s.dirChecked()
 	root, err := os.OpenRoot(s.dir)
 	if err != nil {
 		return nil, err

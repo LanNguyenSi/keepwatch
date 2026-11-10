@@ -573,3 +573,43 @@ func TestDigestCappedCheckCountsTheWholeSet(t *testing.T) {
 		t.Errorf("body:\n%s", n.Body)
 	}
 }
+
+func TestDigestListsAtMostTwentyFiveChangesAndTwentyFindings(t *testing.T) {
+	in := digestInput()
+	in.State.Checks = nil
+	for i := 0; i < 30; i++ {
+		in.State.Checks = append(in.State.Checks, state.Check{ID: fmt.Sprintf("c.%02d", i), Kind: "k", Status: result.Fail, Severity: result.Low})
+	}
+	in.Runs = nil
+	for i := 0; i < 30; i++ {
+		in.Runs = append(in.Runs, history.Run{RunAt: genTime.Add(-time.Duration(i+1) * time.Hour), Changes: []history.Change{
+			{Kind: "fixed", CheckID: fmt.Sprintf("r%02d", i), Severity: "low", From: "fail", To: "pass"}}})
+	}
+	n := BuildDigest(in, true, nil)
+	if got := strings.Count(n.Body, "fixed (was failing)"); got != maxDigestChanges {
+		t.Errorf("%d change lines, want %d:\n%s", got, maxDigestChanges, n.Body)
+	}
+	if got := strings.Count(n.Body, "- FAIL "); got != maxDigestOpen {
+		t.Errorf("%d findings, want %d", got, maxDigestOpen)
+	}
+	if !strings.Contains(n.Body, "and 10 more.") || !strings.Contains(n.Body, "and 5 more (older).") || strings.Contains(n.Body, "not shown") {
+		t.Errorf("body:\n%s", n.Body)
+	}
+	// Newest first: r00 is the newest, r24 the last one listed.
+	if !strings.Contains(n.Body, "` r24 `") || strings.Contains(n.Body, "` r25 `") {
+		t.Errorf("the wrong end was cut:\n%s", n.Body)
+	}
+}
+
+func TestDigestSortsEqualSeveritiesById(t *testing.T) {
+	in := DigestInput{GeneratedAt: genTime, Host: "h", State: &state.State{SchemaVersion: state.SchemaVersion, RunAt: genTime, Checks: []state.Check{
+		{ID: "b.check", Kind: "k", Status: result.Fail, Severity: result.High},
+		{ID: "a.check", Kind: "k", Status: result.Fail, Severity: result.High},
+		{ID: "z.check", Kind: "k", Status: result.Fail, Severity: result.Critical},
+	}}}
+	body := BuildDigest(in, false, nil).Body
+	z, a, b := strings.Index(body, "z.check"), strings.Index(body, "a.check"), strings.Index(body, "b.check")
+	if !(z < a && a < b) {
+		t.Errorf("order z=%d a=%d b=%d:\n%s", z, a, b, body)
+	}
+}
