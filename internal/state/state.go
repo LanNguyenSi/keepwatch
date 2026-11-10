@@ -47,9 +47,16 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
-// SchemaVersion is the version of the state file format. A file with another
-// version is not read.
-const SchemaVersion = 1
+// SchemaVersion is the version of the state file format keepwatch writes.
+//
+// Version 2 added the sort cutoff of a capped check (Check.Cutoff) and the
+// Exact mark of an item. A version 1 file is still read: it has neither, so
+// the diff treats every capped list in it as one whose cutoff is unknown (the
+// behaviour version 1 had). Any other version is not read.
+const SchemaVersion = 2
+
+// oldestSchemaVersion is the oldest version that is still read.
+const oldestSchemaVersion = 1
 
 // FileName is the name of the state file inside the state directory.
 const FileName = "state.json"
@@ -90,6 +97,16 @@ type Check struct {
 	// Hidden is the number of items the probe left out because of its
 	// evidence cap; 0 when the list is complete.
 	Hidden int `json:"hidden,omitempty"`
+	// Cutoff is where a capped list was cut: the raw subject of its last
+	// listed item. The probes list the first items in byte order of the raw
+	// subject, so an item that sorts before the cutoff was listed if it
+	// existed, and one that sorts after it may have been hidden. The diff
+	// uses this to see a new item in a capped list. It is nil when the
+	// list is complete, or when the cutoff is not known: it is stored only
+	// when that last subject is exactly the display subject that is stored
+	// anyway (valid UTF-8, nothing escaped, redacted or cut), so it adds no
+	// text that could hold a secret. A hash would not do: it keeps no order.
+	Cutoff *string `json:"cutoff,omitempty"`
 }
 
 // Item is one evidence item.
@@ -102,6 +119,10 @@ type Item struct {
 	Subject string `json:"subject"`
 	// Excepted is true when an exception covers the item.
 	Excepted bool `json:"excepted,omitempty"`
+	// Exact is true when Subject is the raw subject, byte for byte: nothing
+	// was escaped, redacted or cut. Only then can the diff place the item
+	// relative to a Cutoff.
+	Exact bool `json:"exact,omitempty"`
 }
 
 // Capped reports whether the probe left items out.
@@ -194,12 +215,45 @@ func FromResults(rs []result.Result, now time.Time, clean func(string) string) *
 			}
 		}
 		c := &st.Checks[i]
+		switch {
+		case dup && (hidden > 0 || c.Hidden > 0):
+			// A capped list merged with other items has no single cutoff.
+			c.Cutoff = nil
+		case hidden > 0:
+			c.Cutoff = cutoffOf(items, clean)
+		}
 		c.Hidden += hidden
 		for _, ev := range items {
 			addItem(c, ev, clean)
 		}
 	}
 	return st
+}
+
+// cutoffOf returns the cutoff of a capped list: the raw subject of its last
+// item, or nil when that cannot be stored safely. The probes sort their list
+// by raw subject before they cut it; a list that is not in that order is not
+// trusted. A subject is stored only when it is exactly its display text (see
+// Check.Cutoff).
+func cutoffOf(items []result.Evidence, clean func(string) string) *string {
+	if len(items) == 0 {
+		return nil
+	}
+	for i := 1; i < len(items); i++ {
+		if items[i-1].Subject > items[i].Subject {
+			return nil
+		}
+	}
+	last := items[len(items)-1].Subject
+	if !isExact(last, clean) {
+		return nil
+	}
+	return &last
+}
+
+// isExact reports whether the display text of subject is subject itself.
+func isExact(subject string, clean func(string) string) bool {
+	return utf8.ValidString(subject) && utf8.RuneCountInString(subject) <= displayRunes && clean(subject) == subject
 }
 
 func rankOfSeverity(s result.Severity) int {
@@ -221,7 +275,10 @@ func addItem(c *Check, ev result.Evidence, clean func(string) string) {
 			return
 		}
 	}
-	c.Items = append(c.Items, Item{Key: key, Subject: truncate(clean(ev.Subject), displayRunes), Excepted: ev.Excepted})
+	c.Items = append(c.Items, Item{
+		Key: key, Subject: truncate(clean(ev.Subject), displayRunes), Excepted: ev.Excepted,
+		Exact: isExact(ev.Subject, clean),
+	})
 }
 
 func truncate(s string, runes int) string {
@@ -250,8 +307,18 @@ func parse(b []byte) (*State, error) {
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, problemf("not a valid state file: data after the JSON document")
 	}
-	if s.SchemaVersion != SchemaVersion {
-		return nil, problemf("schema version %d, this keepwatch reads version %d", s.SchemaVersion, SchemaVersion)
+	if s.SchemaVersion < oldestSchemaVersion || s.SchemaVersion > SchemaVersion {
+		return nil, problemf("schema version %d, this keepwatch reads versions %d to %d", s.SchemaVersion, oldestSchemaVersion, SchemaVersion)
+	}
+	if s.SchemaVersion < 2 {
+		// The cutoff and the exact mark do not exist in version 1: whatever
+		// such a file claims about them is not trusted.
+		for i := range s.Checks {
+			s.Checks[i].Cutoff = nil
+			for j := range s.Checks[i].Items {
+				s.Checks[i].Items[j].Exact = false
+			}
+		}
 	}
 	if err := validate(&s); err != nil {
 		return nil, err
@@ -290,6 +357,9 @@ func validate(s *State) error {
 		}
 		if c.Hidden < 0 || c.Hidden > maxHidden {
 			return problemf("%s: invalid hidden count", where)
+		}
+		if c.Cutoff != nil && (c.Hidden == 0 || len(*c.Cutoff) > maxSubjectLen) {
+			return problemf("%s: invalid cutoff", where)
 		}
 		if len(c.Items) > maxItems {
 			return problemf("%s: %d items, at most %d are accepted", where, len(c.Items), maxItems)

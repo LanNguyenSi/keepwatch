@@ -50,6 +50,8 @@ func show(c Change) string {
 		s += " " + c.Subject
 	case CountChange:
 		s += fmt.Sprintf(" %d>%d", c.OldTotal, c.NewTotal)
+	case SeverityChange:
+		s += fmt.Sprintf(" %s>%s (%s)", c.FromSeverity, c.ToSeverity, c.To)
 	case CheckAdded:
 		s += " ->" + string(c.To)
 	case CheckRemoved:

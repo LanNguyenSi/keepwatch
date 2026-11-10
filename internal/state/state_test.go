@@ -149,32 +149,35 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 	}
 	g := string(good)
 	cases := map[string]string{
-		"empty file":        "",
-		"truncated":         g[:len(g)/2],
-		"garbage":           "\x00\x01 not json",
-		"not an object":     "[1,2,3]",
-		"data after json":   g + "{}",
-		"unknown field":     strings.Replace(g, `"run_at"`, `"extra": 1, "run_at"`, 1),
-		"wrong schema":      strings.Replace(g, `"schema_version": 1`, `"schema_version": 2`, 1),
-		"no schema":         strings.Replace(g, `"schema_version": 1,`, ``, 1),
-		"bad status":        strings.Replace(g, `"status": "fail"`, `"status": "bogus"`, 1),
-		"bad severity":      strings.Replace(g, `"severity": "high"`, `"severity": "extreme"`, 1),
-		"empty id":          strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
-		"duplicate id":      strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
-		"bad key":           strings.Replace(g, SubjectKey("passwordauthentication"), "xyz", 1),
-		"negative hidden":   strings.Replace(g, `"items": [`, `"hidden": -3, "items": [`, 1),
-		"no checks":         `{"schema_version": 1, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
-		"null checks":       `{"schema_version": 1, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
-		"wrong type":        strings.Replace(g, `"status": "fail"`, `"status": 7`, 1),
-		"huge item count":   hugeItems(),
-		"too many checks":   manyChecks(maxChecks + 1),
-		"id too long":       strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "`+strings.Repeat("a", maxIDLen+1)+`"`, 1),
-		"kind too long":     strings.Replace(g, `"kind": "service_active"`, `"kind": "`+strings.Repeat("k", maxIDLen+1)+`"`, 1),
-		"hidden too big":    strings.Replace(g, `"items": [`, fmt.Sprintf(`"hidden": %d, "items": [`, maxHidden+1), 1),
-		"duplicate key":     strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, SubjectKey("a")), 1),
-		"subject too long":  strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "`+strings.Repeat("s", maxSubjectLen+1)+`"`, 1),
-		"oversize":          strings.Repeat(" ", MaxFileSize+1),
-		"valid then spaces": g + strings.Repeat(" ", MaxFileSize),
+		"empty file":            "",
+		"truncated":             g[:len(g)/2],
+		"garbage":               "\x00\x01 not json",
+		"not an object":         "[1,2,3]",
+		"data after json":       g + "{}",
+		"unknown field":         strings.Replace(g, `"run_at"`, `"extra": 1, "run_at"`, 1),
+		"wrong schema":          strings.Replace(g, `"schema_version": 2`, `"schema_version": 3`, 1),
+		"schema zero":           strings.Replace(g, `"schema_version": 2`, `"schema_version": 0`, 1),
+		"no schema":             strings.Replace(g, `"schema_version": 2,`, ``, 1),
+		"cutoff without hidden": strings.Replace(g, `"items": [`, `"cutoff": "a", "items": [`, 1),
+		"cutoff too long":       strings.Replace(g, `"items": [`, `"hidden": 3, "cutoff": "`+strings.Repeat("c", maxSubjectLen+1)+`", "items": [`, 1),
+		"bad status":            strings.Replace(g, `"status": "fail"`, `"status": "bogus"`, 1),
+		"bad severity":          strings.Replace(g, `"severity": "high"`, `"severity": "extreme"`, 1),
+		"empty id":              strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
+		"duplicate id":          strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
+		"bad key":               strings.Replace(g, SubjectKey("passwordauthentication"), "xyz", 1),
+		"negative hidden":       strings.Replace(g, `"items": [`, `"hidden": -3, "items": [`, 1),
+		"no checks":             `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
+		"null checks":           `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
+		"wrong type":            strings.Replace(g, `"status": "fail"`, `"status": 7`, 1),
+		"huge item count":       hugeItems(),
+		"too many checks":       manyChecks(maxChecks + 1),
+		"id too long":           strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "`+strings.Repeat("a", maxIDLen+1)+`"`, 1),
+		"kind too long":         strings.Replace(g, `"kind": "service_active"`, `"kind": "`+strings.Repeat("k", maxIDLen+1)+`"`, 1),
+		"hidden too big":        strings.Replace(g, `"items": [`, fmt.Sprintf(`"hidden": %d, "items": [`, maxHidden+1), 1),
+		"duplicate key":         strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, SubjectKey("a")), 1),
+		"subject too long":      strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "`+strings.Repeat("s", maxSubjectLen+1)+`"`, 1),
+		"oversize":              strings.Repeat(" ", MaxFileSize+1),
+		"valid then spaces":     g + strings.Repeat(" ", MaxFileSize),
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -198,7 +201,7 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 
 func manyChecks(n int) string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":1,"run_at":"2026-11-10T12:00:00Z","checks":[`)
+	sb.WriteString(`{"schema_version":2,"run_at":"2026-11-10T12:00:00Z","checks":[`)
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -211,7 +214,7 @@ func manyChecks(n int) string {
 
 func hugeItems() string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":1,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
+	sb.WriteString(`{"schema_version":2,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
 	for i := 0; i < maxItems+1; i++ {
 		if i > 0 {
 			sb.WriteString(",")

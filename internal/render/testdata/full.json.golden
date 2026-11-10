@@ -90,6 +90,17 @@
       "alert": true
     },
     {
+      "kind": "severity_change",
+      "check_id": "disk.usage",
+      "check_kind": "disk_usage",
+      "severity": "high",
+      "from": "fail",
+      "to": "fail",
+      "from_severity": "medium",
+      "to_severity": "high",
+      "alert": true
+    },
+    {
       "kind": "check_added",
       "check_id": "fail2ban.sshd_jail",
       "check_kind": "fail2ban_jail",

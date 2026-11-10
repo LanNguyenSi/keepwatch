@@ -79,6 +79,8 @@ func changeText(c viewChange) string {
 		return "item gone"
 	case "count_change":
 		return fmt.Sprintf("item count %d -> %d", c.OldTotal, c.NewTotal)
+	case "severity_change":
+		return fmt.Sprintf("severity %s -> %s (status %s)", c.FromSeverity, c.ToSeverity, c.To)
 	}
 	return c.Kind
 }

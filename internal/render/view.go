@@ -123,7 +123,10 @@ type viewChange struct {
 	Subject   string `json:"subject,omitempty"`
 	OldTotal  int    `json:"old_total,omitempty"`
 	NewTotal  int    `json:"new_total,omitempty"`
-	Alert     bool   `json:"alert"`
+	// FromSeverity and ToSeverity are set for a severity_change only.
+	FromSeverity string `json:"from_severity,omitempty"`
+	ToSeverity   string `json:"to_severity,omitempty"`
+	Alert        bool   `json:"alert"`
 }
 
 type viewRef struct {
@@ -182,6 +185,7 @@ func buildView(in Input, red *redact.Redactor) view {
 				Kind: c(string(ch.Kind)), CheckID: c(ch.CheckID), CheckKind: c(ch.CheckKind), Severity: c(string(ch.Severity)),
 				From: c(string(ch.From)), To: c(string(ch.To)), Subject: c(ch.Subject),
 				OldTotal: ch.OldTotal, NewTotal: ch.NewTotal, Alert: ch.Alert,
+				FromSeverity: c(string(ch.FromSeverity)), ToSeverity: c(string(ch.ToSeverity)),
 			})
 		}
 		for _, r := range in.Diff.StillFailing {

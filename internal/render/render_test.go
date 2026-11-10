@@ -61,6 +61,7 @@ func fullInput() Input {
 				{Kind: diff.StatusChange, CheckID: "ssh.authorized_keys", CheckKind: "authorized_keys", Severity: result.High, From: result.Pass, To: result.Warn, Alert: true},
 				{Kind: diff.Fixed, CheckID: "disk.usage", CheckKind: "disk_usage", Severity: result.Medium, From: result.Fail, To: result.Pass},
 				{Kind: diff.CountChange, CheckID: "docker.exposure", CheckKind: "docker_exposure", Severity: result.High, From: result.Fail, To: result.Fail, OldTotal: 104, NewTotal: 108, Alert: true},
+				{Kind: diff.SeverityChange, CheckID: "disk.usage", CheckKind: "disk_usage", Severity: result.High, From: result.Fail, To: result.Fail, FromSeverity: result.Medium, ToSeverity: result.High, Alert: true},
 				{Kind: diff.CheckAdded, CheckID: "fail2ban.sshd_jail", CheckKind: "fail2ban_jail", Severity: result.High, To: result.Pass},
 				{Kind: diff.CheckRemoved, CheckID: "old.check", CheckKind: "k", Severity: result.Low, From: result.Fail},
 			},
@@ -221,7 +222,7 @@ func TestJSONIsValidAndCarriesTheCleanedText(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &back); err != nil {
 		t.Fatalf("not valid JSON: %v", err)
 	}
-	if back.SchemaVersion != SchemaVersion || len(back.Results) != 7 || len(back.Changes) != 9 {
+	if back.SchemaVersion != SchemaVersion || len(back.Results) != 7 || len(back.Changes) != 10 {
 		t.Errorf("round trip: %+v", back)
 	}
 	if strings.Contains(out, "<script>") || strings.Contains(out, "<script") && false {
