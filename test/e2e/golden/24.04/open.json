@@ -84,7 +84,7 @@
             "kind": "sshd_effective",
             "severity": "high",
             "status": "fail",
-            "summary": "sshd permitrootlogin is yes, expected no or prohibit-password [REDACTED] without-password"
+            "summary": "sshd permitrootlogin is yes, expected no or prohibit-password or without-password"
           },
           {
             "check_id": "ssh.keyboard_interactive_authentication",
