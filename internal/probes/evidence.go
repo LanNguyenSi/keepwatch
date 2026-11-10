@@ -23,16 +23,24 @@ const maxEvidence = 100
 // would let an exception for the visible items hide the rest. The marker's
 // subject changes with the count, so no exception matches it by accident, and
 // the check stays failed.
+//
+// The marker also carries the complete set of the list (result.EvidenceSet),
+// computed over all items before the cut. Without it the items that were left
+// out are gone, and two runs of a capped check could not be compared (see the
+// diff package). Every probe that can list more than maxEvidence items must
+// go through this function; nothing else may cut a list.
 func limitEvidence(items []result.Evidence) ([]result.Evidence, int) {
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
 	if len(items) <= maxEvidence {
 		return items, 0
 	}
 	hidden := len(items) - (maxEvidence - 1)
+	set := result.NewEvidenceSet(items)
 	out := append([]result.Evidence(nil), items[:maxEvidence-1]...)
 	out = append(out, result.Evidence{
 		Subject: fmt.Sprintf("(%d more not shown)", hidden),
 		Detail:  fmt.Sprintf("%d further items are not listed, the limit is %d items", hidden, maxEvidence),
+		Set:     set,
 	})
 	return out, hidden
 }

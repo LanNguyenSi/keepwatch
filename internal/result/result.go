@@ -58,12 +58,24 @@ func ParseSeverity(s string) (Severity, error) {
 // "tcp/0.0.0.0:8080", "passwordauthentication" or "fail2ban.service"). It
 // is what an exception's match compares against, exactly. Detail is free
 // text derived from host output and must be treated as untrusted.
+//
+// Set is non-nil only on the marker item that ends a capped list (see the
+// probes' limitEvidence): it describes the complete list the items before it
+// are a prefix of. It rides on the marker because the marker stays in
+// Result.Evidence when the engine applies exceptions (which marks items and
+// may swap in the warnings list, whose own marker then comes along), so no
+// other package has to carry it. It is not part of any output: a host cannot
+// set it, and nothing prints it.
 type Evidence struct {
-	Subject         string `json:"subject"`
-	Detail          string `json:"detail"`
-	Excepted        bool   `json:"excepted"`
-	ExceptionReason string `json:"exception_reason,omitempty"`
+	Subject         string       `json:"subject"`
+	Detail          string       `json:"detail"`
+	Excepted        bool         `json:"excepted"`
+	ExceptionReason string       `json:"exception_reason,omitempty"`
+	Set             *EvidenceSet `json:"-"`
 }
+
+// IsMarker reports whether e is the marker item of a capped list.
+func (e Evidence) IsMarker() bool { return e.Set != nil }
 
 // Result is the outcome of one check.
 //

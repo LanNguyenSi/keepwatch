@@ -724,6 +724,7 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 		if len(o.Evidence) != 100 || !strings.HasSuffix(o.Evidence[99].Subject, "more not shown)") {
 			t.Fatalf("%d items, last %+v", len(o.Evidence), o.Evidence[len(o.Evidence)-1])
 		}
+		wantCapped(t, o.Evidence, 150)
 		wantSummary(t, o, "and 51 more")
 	})
 	t.Run("many garbage lines", func(t *testing.T) {
@@ -733,6 +734,7 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 		if len(o.Evidence) != 100 {
 			t.Fatalf("%d items", len(o.Evidence))
 		}
+		wantCapped(t, o.Evidence, 5000)
 	})
 	t.Run("garbage in one account does not hide an unexpected key in another", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: strings.Repeat("garbage\n", 5000), bobAK: ed.line + "\n"})

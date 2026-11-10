@@ -140,7 +140,7 @@ func TestCutoffSurvivesSaveAndLoad(t *testing.T) {
 // anything it claims about them is ignored, so a capped list in it is treated
 // like one whose cutoff is unknown.
 func TestStateFileOfVersion1IsReadWithoutCutoffs(t *testing.T) {
-	key := SubjectKey("a")
+	key := result.SubjectKey("a")
 	v1 := fmt.Sprintf(`{"schema_version": 1, "run_at": "2026-11-10T12:00:00Z", "checks": [
 	  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": 3, "cutoff": "a",
 	   "items": [{"key": %q, "subject": "a", "exact": true}]}]}`, key)
@@ -181,7 +181,7 @@ func TestStateFileOfAnotherVersionIsNotRead(t *testing.T) {
 // corrupted or forged file: it is rejected, and the run starts a new baseline.
 func TestCutoffMustBeTheSubjectOfAnExactItem(t *testing.T) {
 	item := func(subject string, exact bool) string {
-		return fmt.Sprintf(`{"key": %q, "subject": %q, "exact": %v}`, SubjectKey(subject), subject, exact)
+		return fmt.Sprintf(`{"key": %q, "subject": %q, "exact": %v}`, result.SubjectKey(subject), subject, exact)
 	}
 	file := func(cutoff string, hidden int, items ...string) string {
 		return fmt.Sprintf(`{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": [
@@ -218,7 +218,7 @@ func TestCutoffMustBeTheSubjectOfAnExactItem(t *testing.T) {
 func TestLoadTurnsABadCutoffIntoAProblem(t *testing.T) {
 	body := fmt.Sprintf(`{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": [
 	  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": 3, "cutoff": "zzz",
-	   "items": [{"key": %q, "subject": "a", "exact": true}]}]}`, SubjectKey("a"))
+	   "items": [{"key": %q, "subject": "a", "exact": true}]}]}`, result.SubjectKey("a"))
 	s, dir := newStore(t)
 	mustSave(t, s, sample())
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {

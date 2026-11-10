@@ -622,13 +622,17 @@ func TestDockerBoundsAndChunks(t *testing.T) {
 		ids := idsN(150)
 		r := newRunner().AddResult(dockerPs, psOut(ids))
 		for i := 0; i < 150; i += 25 {
-			r.AddResult(inspectArgv(ids[i:i+25]...), inline(inspectDoc(ids[i:i+25], func(_ int, c map[string]any) { hostConfig(c)["Privileged"] = true }), 0))
+			r.AddResult(inspectArgv(ids[i:i+25]...), inline(inspectDoc(ids[i:i+25], func(_ int, c map[string]any) {
+				hostConfig(c)["Privileged"] = true
+				c["Name"] = "/n" + c["Id"].(string)[48:] // distinct across the chunks
+			}), 0))
 		}
 		o := exec(dockerProbe(t), r, probestest.FakeFS{})
 		wantStatus(t, o, result.Fail)
 		if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(51 more not shown)" {
 			t.Fatalf("%d items, last %+v", len(o.Evidence), o.Evidence[len(o.Evidence)-1])
 		}
+		wantCapped(t, o.Evidence, 150)
 		wantSummary(t, o, "and 51 more")
 	})
 }

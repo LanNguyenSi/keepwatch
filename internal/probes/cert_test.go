@@ -296,6 +296,7 @@ func TestCertExpiryManyFiles(t *testing.T) {
 	if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(51 more not shown)" {
 		t.Fatalf("%d items", len(o.Evidence))
 	}
+	wantCapped(t, o.Evidence, 150)
 	wantSummary(t, o, "and 51 more")
 
 	thousand := map[string]string{}

@@ -202,3 +202,26 @@ func TestPlausibleOutputIsNotTrusted(t *testing.T) {
 		wantStatus(t, exec(lp, r, nil, rule("tcp", 22, "*")), result.Error)
 	}
 }
+
+// wantCapped checks a capped evidence list: it ends in a marker that carries
+// the complete set, the set has total distinct members, lists them all, and
+// every item before the marker is a member.
+func wantCapped(t *testing.T, ev []result.Evidence, total int) {
+	t.Helper()
+	if len(ev) == 0 || !ev[len(ev)-1].IsMarker() {
+		t.Fatalf("the list does not end in a marker with a set: %+v", ev)
+	}
+	set := ev[len(ev)-1].Set
+	if set.Total != total || len(set.Keys) != total || set.Digest != result.DigestOfKeys(set.Keys) {
+		t.Fatalf("set total %d, %d keys (want %d), digest %q", set.Total, len(set.Keys), total, set.Digest)
+	}
+	member := map[string]bool{}
+	for _, k := range set.Keys {
+		member[k] = true
+	}
+	for _, e := range ev[:len(ev)-1] {
+		if e.IsMarker() || !member[result.SubjectKey(e.Subject)] {
+			t.Fatalf("item %q is not a member of the set", e.Subject)
+		}
+	}
+}

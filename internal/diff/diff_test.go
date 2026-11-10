@@ -17,7 +17,7 @@ func chk(id string, st result.Status, items ...string) state.Check {
 	for _, name := range items {
 		ex := strings.HasSuffix(name, "!")
 		name = strings.TrimSuffix(name, "!")
-		c.Items = append(c.Items, state.Item{Key: state.SubjectKey(name), Subject: name, Excepted: ex})
+		c.Items = append(c.Items, state.Item{Key: result.SubjectKey(name), Subject: name, Excepted: ex})
 	}
 	return c
 }
@@ -124,9 +124,9 @@ func TestCompute(t *testing.T) {
 		{name: "a subject that becomes excepted is gone", prev: run(chk("a", result.Fail, "x", "y")), cur: run(chk("a", result.Fail, "x", "y!")), want: []string{"subject_gone a y"}, stillFailing: []string{"a"}},
 		{name: "a subject that stops being excepted is new", prev: run(chk("a", result.Fail, "x", "y!")), cur: run(chk("a", result.Fail, "x", "y")), want: []string{"subject_new a y ALERT"}, stillFailing: []string{"a"}},
 		{name: "the same display text under another key is a new subject",
-			prev: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{{Key: state.SubjectKey("web"), Subject: "web"}}}),
+			prev: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{{Key: result.SubjectKey("web"), Subject: "web"}}}),
 			cur: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{
-				{Key: state.SubjectKey("web"), Subject: "web"}, {Key: state.SubjectKey("web\x01"), Subject: "web"}}}),
+				{Key: result.SubjectKey("web"), Subject: "web"}, {Key: result.SubjectKey("web\x01"), Subject: "web"}}}),
 			want: []string{"subject_new a web ALERT"}, stillFailing: []string{"a"}},
 
 		{name: "new in the catalog, failing", prev: run(chk("a", result.Pass)), cur: run(chk("a", result.Pass), chk("b", result.Fail, "x")), want: []string{"check_added b ->fail ALERT"}},

@@ -16,6 +16,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
+	"github.com/LanNguyenSi/keepwatch/internal/result"
 	"github.com/LanNguyenSi/keepwatch/internal/state"
 )
 
@@ -556,7 +557,7 @@ func TestCheckStateKeysComeFromTheRawSubject(t *testing.T) {
 	f.check()
 	st := f.loadState()
 	c := st.Find("t.listeners")
-	if len(c.Items) != 1 || c.Items[0].Key != state.SubjectKey("tcp/0.0.0.0:8080") {
+	if len(c.Items) != 1 || c.Items[0].Key != result.SubjectKey("tcp/0.0.0.0:8080") {
 		t.Fatalf("state %+v", c)
 	}
 }

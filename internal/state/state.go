@@ -34,8 +34,6 @@ package state
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,12 +140,6 @@ func (s *State) Find(id string) *Check {
 		}
 	}
 	return nil
-}
-
-// SubjectKey returns the key of a raw subject.
-func SubjectKey(subject string) string {
-	sum := sha256.Sum256([]byte(subject))
-	return hex.EncodeToString(sum[:])
 }
 
 var (
@@ -271,7 +263,7 @@ func rankOfSeverity(s result.Severity) int {
 // addItem adds an evidence item, or folds it into the item with the same key:
 // the item counts as excepted only if every occurrence is.
 func addItem(c *Check, ev result.Evidence, clean func(string) string) {
-	key := SubjectKey(ev.Subject)
+	key := result.SubjectKey(ev.Subject)
 	for i := range c.Items {
 		if c.Items[i].Key == key {
 			c.Items[i].Excepted = c.Items[i].Excepted && ev.Excepted

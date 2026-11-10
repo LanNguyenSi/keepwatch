@@ -102,7 +102,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	c := lr.State.Find("ssh.password_authentication")
 	if c == nil || c.Status != result.Fail || c.Severity != result.High || len(c.Items) != 1 ||
-		c.Items[0].Key != SubjectKey("passwordauthentication") || c.Items[0].Subject != "passwordauthentication" {
+		c.Items[0].Key != result.SubjectKey("passwordauthentication") || c.Items[0].Subject != "passwordauthentication" {
 		t.Errorf("loaded check %+v", c)
 	}
 	// Evidence detail text is not part of the state.
@@ -164,7 +164,7 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 		"bad severity":          strings.Replace(g, `"severity": "high"`, `"severity": "extreme"`, 1),
 		"empty id":              strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
 		"duplicate id":          strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
-		"bad key":               strings.Replace(g, SubjectKey("passwordauthentication"), "xyz", 1),
+		"bad key":               strings.Replace(g, result.SubjectKey("passwordauthentication"), "xyz", 1),
 		"negative hidden":       strings.Replace(g, `"items": [`, `"hidden": -3, "items": [`, 1),
 		"no checks":             `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
 		"null checks":           `{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
@@ -174,7 +174,7 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 		"id too long":           strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "`+strings.Repeat("a", maxIDLen+1)+`"`, 1),
 		"kind too long":         strings.Replace(g, `"kind": "service_active"`, `"kind": "`+strings.Repeat("k", maxIDLen+1)+`"`, 1),
 		"hidden too big":        strings.Replace(g, `"items": [`, fmt.Sprintf(`"hidden": %d, "items": [`, maxHidden+1), 1),
-		"duplicate key":         strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, SubjectKey("a")), 1),
+		"duplicate key":         strings.Replace(g, `"items": []`, fmt.Sprintf(`"items": [{"key":"%[1]s","subject":"a"},{"key":"%[1]s","subject":"b"}]`, result.SubjectKey("a")), 1),
 		"subject too long":      strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "`+strings.Repeat("s", maxSubjectLen+1)+`"`, 1),
 		"oversize":              strings.Repeat(" ", MaxFileSize+1),
 		"valid then spaces":     g + strings.Repeat(" ", MaxFileSize),
@@ -492,7 +492,7 @@ func TestSaveRefusesAStateTooLargeToReadBack(t *testing.T) {
 	s, dir := newStore(t)
 	big := &State{SchemaVersion: SchemaVersion, RunAt: t0, Checks: []Check{{ID: "a.b", Kind: "k", Status: result.Fail, Severity: result.Low}}}
 	for i := 0; i < 30000; i++ {
-		big.Checks[0].Items = append(big.Checks[0].Items, Item{Key: SubjectKey(fmt.Sprint(i)), Subject: strings.Repeat("x", 200)})
+		big.Checks[0].Items = append(big.Checks[0].Items, Item{Key: result.SubjectKey(fmt.Sprint(i)), Subject: strings.Repeat("x", 200)})
 	}
 	if err := s.Save(big); err == nil || !strings.Contains(err.Error(), "larger than the limit") {
 		t.Fatalf("Save error = %v", err)
@@ -528,7 +528,7 @@ func TestFromResults(t *testing.T) {
 	if c == nil || len(c.Items) != 2 {
 		t.Fatalf("check %+v", c)
 	}
-	if c.Items[0].Key != SubjectKey(hostile) {
+	if c.Items[0].Key != result.SubjectKey(hostile) {
 		t.Errorf("the key must come from the raw subject")
 	}
 	if strings.Contains(c.Items[0].Subject, "hunter2") || strings.Contains(c.Items[0].Subject, "\x1b") {

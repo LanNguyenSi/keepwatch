@@ -41,3 +41,19 @@ func TestResultJSONShape(t *testing.T) {
 		t.Errorf("empty result: %s", b)
 	}
 }
+
+func TestEvidenceSetIsNotSerialized(t *testing.T) {
+	r := Result{Evidence: []Evidence{{Subject: "(1 more not shown)", Set: NewEvidenceSet([]Evidence{{Subject: "x"}})}}}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"Set", "set", "Keys", "keys", "Digest", "digest", SubjectKey("x")} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("%s contains %q", b, leak)
+		}
+	}
+	if !r.Evidence[0].IsMarker() || (Evidence{Subject: "(1 more not shown)"}).IsMarker() {
+		t.Error("IsMarker must follow the set, not the text")
+	}
+}
