@@ -655,6 +655,17 @@ func TestAuthorizedKeysSshdProblems(t *testing.T) {
 			}
 		}
 	})
+	t.Run("sshd -T fails and more than 100 findings are confirmed: the set is kept", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 150; i++ {
+			k := wire("ssh-ed25519", pk32(fmt.Sprintf("key%03d", i)))
+			b.WriteString("ssh-ed25519 " + base64.StdEncoding.EncodeToString(k) + "\n")
+		}
+		many := keyHost(t, v, map[string]string{aliceAK: b.String()})
+		o := execKeys(keysProbe(t), newRunner().AddError(sshdArgv, execx.ErrTimeout), many, exp)
+		wantStatus(t, o, result.Error)
+		wantCapped(t, o.Evidence, o.Set, 150)
+	})
 	t.Run("sshd -T fails and nothing is wrong in the default files", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: ed.line + "\n"})
 		o := execKeys(keysProbe(t), newRunner().Add(sshdArgv, v+"/sshd_T_no_privsep_dir"), fsys, exp)
@@ -724,7 +735,21 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 		if len(o.Evidence) != 100 || !strings.HasSuffix(o.Evidence[99].Subject, "more not shown)") {
 			t.Fatalf("%d items, last %+v", len(o.Evidence), o.Evidence[len(o.Evidence)-1])
 		}
+		wantCapped(t, o.Evidence, o.Set, 150)
 		wantSummary(t, o, "and 51 more")
+	})
+	t.Run("an unexpected key next to many missing expected keys: the warnings have their own set", func(t *testing.T) {
+		fsys := keyHost(t, v, map[string]string{aliceAK: ed.line + "\n"})
+		var expected []string
+		for i := 0; i < 130; i++ {
+			expected = append(expected, fmt.Sprintf("SHA256:missing%03d", i))
+		}
+		o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": expected})
+		wantStatus(t, o, result.Fail)
+		if o.Set != nil || len(o.Evidence) != 1 {
+			t.Fatalf("one unexpected key is not a cut list: %d items, set %v", len(o.Evidence), o.Set != nil)
+		}
+		wantCapped(t, o.Warnings, o.WarningsSet, 130)
 	})
 	t.Run("many garbage lines", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: strings.Repeat("garbage\n", 5000) + ed.line + "\n"})
@@ -733,6 +758,7 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 		if len(o.Evidence) != 100 {
 			t.Fatalf("%d items", len(o.Evidence))
 		}
+		wantCapped(t, o.Evidence, o.Set, 5000)
 	})
 	t.Run("garbage in one account does not hide an unexpected key in another", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: strings.Repeat("garbage\n", 5000), bobAK: ed.line + "\n"})

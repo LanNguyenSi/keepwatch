@@ -6,15 +6,17 @@ state: changes since the previous run at 2026-11-10T06:00:00Z
 warnings:
   - state file /var/lib/keepwatch/state.json was not used: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
 
-changes (11):
+changes (13):
   ! ssh.password_authentication (high): now failing (was pass)
   ! network.listeners (medium): new item: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
     network.listeners (medium): item gone: tcp/0.0.0.0:7000
   ! updates.security_pending (high): pass -> error
   ! ssh.authorized_keys (high): pass -> warn
     disk.usage (medium): fixed (was failing)
-  ! docker.exposure (high): item count 104 -> 108
-  ! docker.exposure (high): 2 new items not shown (above the cutoff of a capped list)
+  ! docker.exposure (high): 2 new items not listed (the check lists only some of its items)
+  ! ssh.authorized_keys (high): 1 new item not listed (the check lists only some of its items)
+    network.listeners (medium): 3 items gone, not listed (the check lists only some of its items)
+  ! network.listeners (medium): the items changed (12000 -> 12001; too many to compare one by one)
   ! disk.usage (high): severity medium -> high (status fail)
     fail2ban.sshd_jail (high): new check, status pass
     old.check (low): check removed (was fail)

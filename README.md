@@ -273,7 +273,9 @@ with no file found at all the check is `skipped`.
 At most 100 evidence items come back from a check, sorted by subject; when
 there are more, the last item is a marker "(N more not shown)" and the summary
 says "and N more". The marker keeps an exception for the shown items from
-hiding the rest.
+hiding the rest. The complete list is kept next to it as a set of keys so that the
+comparison with the previous run sees every item, not only the shown ones (see
+"The comparison with the last run").
 
 Under `checks.<id>` in the configuration, `enabled: false` skips a check,
 `severity` replaces the catalog severity, and `params` are merged over the
@@ -319,6 +321,11 @@ result as the new "previous run".
 | `--format` | `text` (default), `json` or `markdown` |
 | `--no-state` | only check: the state of the last run is neither read nor written, and the report has no comparison |
 | `--fail-on SEVERITY` | lowest severity that makes the exit code 1: `info`, `low`, `medium` (default), `high`, `critical` |
+
+The JSON report carries `schema_version` 2. Version 2 added the change kinds
+`hidden_gone` and `set_changed` (with the fields `hidden_gone`, `old_total` and
+`new_total`) and no longer produces `count_change`, which version 1 reports could
+hold.
 
 ### Exit codes
 
@@ -367,15 +374,15 @@ Per check the report lists, in the order of the checks:
   can have crossed it;
 - `check_added` and `check_removed`: the catalog gained or lost the check;
 - for a check that is `fail` (or `warn`) in both runs: `subject_new` and
-  `subject_gone` for items that appeared or disappeared, and `count_change` when
-  the check lists a capped number of items (see below), and `hidden_new` for new
-  items that a capped list does not name (see below);
+  `subject_gone` for items that appeared or disappeared, `hidden_new` and
+  `hidden_gone` for items that did but that the check does not list, and
+  `set_changed` for a list too long to compare item by item (see below);
 - the checks that keep failing or warning unchanged ("still failing", "still
   warning").
 
 A change is marked as an alert (worth a notification) when a check starts to
 fail or to be in `error`, when a new check is failing or in `error`, when a
-failing check has a new item (named or counted, `hidden_new`) or a larger item total, when a failing check or one
+failing check has a new item (named, or counted as `hidden_new`) or a changed list that is too long to compare (`set_changed`), when a failing check or one
 in `error` gets a higher severity, and when an `authorized_keys` check starts to
 warn, is new and warns, or has a new warn item.
 Everything else (fixed, gone items, a status change to `skipped`, `excepted` or
@@ -387,54 +394,59 @@ Two rules keep the comparison honest:
   evidence is never compared item by item; the change of status is reported once.
 - A check that has more than 100 items lists the first 99 sorted by subject and a
   marker "(N more not shown)". The marker is not an item: a change of N never
-  produces new or gone subjects. The state keeps where the list was cut (the
-  subject of the last listed item, the "cutoff"), so a capped list is compared
-  as far as it can be: with a capped previous run, an item that is listed now
-  and sorts before the previous cutoff would have been listed before, so it is
-  `subject_new` (an alert) even when the total is the same; with a capped
-  current run, a previous item that is not listed now and sorts before the
-  current cutoff is `subject_gone`. Above the cutoff nothing is said about
-  single items, because an item that is listed now may have been hidden before
-  and one that is no longer listed may only be hidden now; there the totals are
-  compared instead (`count_change`, an alert when the total grew). When the
-  check is capped in both runs, the arithmetic still shows new items above the
-  cutoff: let G be the number of items of the previous run that were listed (at
-  or before the previous cutoff) and are gone now, and D the current total minus
-  the previous total. G + D is at least the number of new items, so when it is
-  larger than the number of `subject_new` entries for the check, the surplus N
-  is reported as one `hidden_new` change with the count N, an alert like
-  `subject_new`. For example, a listener below the cutoff stops and a new one
-  starts above it: `subject_gone` for the first and `hidden_new` 1 for the
-  second, although the total is the same. The limit: only the previous run is
-  known, so an item that appeared and went away again between two runs is
-  invisible, and so is a new hidden item that replaces an equally hidden one
-  that went away. `hidden_new` needs a cutoff in both runs; a state file that
-  holds none (an older version) falls back to the totals. The cutoff
-  is stored only when it is exactly the (cleaned) subject that the state holds
-  anyway; a subject that had to be escaped, redacted or cut for display has no
-  cutoff and no place in the order, and counts as "above the cutoff". A state
-  file of an older version has no cutoffs, so its capped lists are compared by
-  total only until the next run has written them. Known gaps of this
-  comparison, to be closed by comparing the complete set of item keys: a new
-  item whose subject had to be escaped or redacted is never placed, so when it
-  replaces an item that was already hidden it is not reported; `hidden_new` is
-  not computed when the list was capped before and is complete now; and a new
-  excepted item can make `hidden_new` count one item too many.
+  produces new or gone subjects. Besides the 99 items the state keeps the
+  complete list as a set of keys (the SHA-256 of each subject as the check
+  produced it, sorted, without duplicates) and a digest of that list, so two runs are compared as sets and not
+  by what happened to be listed. The failing set of a check is its keys without
+  the keys of the items an exception covers. A list that is not cut is its own
+  set, so a cut and a complete list compare like any other pair:
+  - Both sets have at most 10,000 keys: the difference is exact. A key that is
+    new in the failing set is `subject_new` (an alert) when its subject is among
+    the items listed, and otherwise counted in one `hidden_new` change with the
+    exact number (also an alert); a key that left it is `subject_gone` or counted
+    in one `hidden_gone` (no alert). For example, a listener below the cut stops
+    and a new one starts above it: `subject_gone` for the first and `hidden_new` 1
+    for the second, although the total is the same. A subject that the report
+    has to escape, redact or cut for display is still compared by the subject the
+    check produced, not by its display text (see below for which checks keep the
+    subject as it is).
+  - A set has more than 10,000 keys: its keys are not stored, only its total and
+    the digest. Equal digests mean the same list. Different digests are one
+    `set_changed` change with both totals, an alert: that something changed is
+    certain, which items is not told.
+  So the limits are: the report names up to 99 items, counts exactly up to
+  10,000, and detects any change above that. An item that appeared and went away
+  between two runs is invisible, as it is for any comparison of two runs. An
+  exception only marks the items that are listed; an excepted item that falls out
+  of the listed part (because new items sort before it) is a failing item again
+  and is reported as new.
 
-Items are compared by the SHA-256 of their raw subject, so two subjects that
-look the same after cleaning (they differ in a control character, say) are still
-two items.
+Items are compared by the SHA-256 of the subject the check produced. For the
+listeners (address and port), the authorized key fingerprints, the container
+names and ids of `docker_exposure` and the package names of `security_updates`
+that is the raw subject, so two subjects that look the same after the report
+cleans them (they differ in a control character, say) are still two items. The
+checks that name a path, a mount point or a free text clean the subject before
+it becomes one (non-printable characters become `?`, long names are cut):
+`cert_expiry` (file path), `disk_usage` (mount point), the TCP findings of
+`docker_exposure` and the path, pattern and line warnings of `authorized_keys`
+(its other warnings, such as an expected user or key not found, keep the raw text).
+There, two names that differ only in a control character, or only after the cut,
+are one item, and a change between them is not seen.
 
 ### State
 
 The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
-with `schema_version` (2; a file of version 1 is still read), the time of the run
-and, per check, its id, kind, status, severity and failing items (hash and
-cleaned, redacted subject, and a mark if that subject is the raw one). For a
-check whose list was cut it also holds the cutoff described above, which must be the
-subject of one of that check's stored items, otherwise the file is not used. It holds no
-evidence detail text and no summaries, and nothing from a subject that is not
-already in it as displayed.
+with `schema_version` (3; files of version 1 and 2 are not read), the time of the
+run and, per check, its id, kind, status, severity and items (hash and cleaned,
+redacted subject, and whether an exception covers it). For a check whose list was
+cut it also holds the total, the sorted key list (up to 10,000 keys) and the
+digest described above; the stored keys must be sorted, unique, hash-sized, match
+the digest and include every stored item, otherwise the file is not used. It holds
+no evidence detail text and no summaries, and nothing from a subject that is not
+already in it as displayed. A key set costs 72 bytes per key in the file; the
+largest state keepwatch can write (every one of the 18 checks capped, full and
+with the longest subjects) is 15.3 MB, so the limit below is 16 MiB.
 
 keepwatch runs as root and the state decides what the operator is told, so it is
 checked:
@@ -444,7 +456,7 @@ checked:
   a symlink) owned by root or the running user that group and other cannot write
   to. Ancestors above it are not examined (known limit): they must be root-owned.
 - The state file is opened without following links and checked on the open
-  descriptor: a regular file of at most 4 MiB, owned by root or the running user,
+  descriptor: a regular file of at most 16 MiB, owned by root or the running user,
   not writable by group or other.
 - It is written atomically: a temporary file in the same directory (created
   exclusively, mode 0600), flushed, renamed over `state.json`, then the directory
@@ -455,7 +467,8 @@ Recovery. A missing state file is a first run: a baseline, no changes are
 reported. A state file that is a symlink, foreign-owned, group- or
 other-writable, too large, truncated, not valid JSON, of another schema version
 or invalid is reported as a warning (stderr and in the report) and the run is a
-new baseline; it is never an abort and never a silent "nothing changed". The
+new baseline (this includes a file of an older schema version, which has no key
+sets to compare with: the first run after an upgrade is a baseline); it is never an abort and never a silent "nothing changed". The
 file is replaced at the end of the run, so nothing needs repairing; to start from
 scratch, delete `state.json`. A state directory that cannot be trusted (or a
 state that cannot be saved) is different: the report is still printed, state is

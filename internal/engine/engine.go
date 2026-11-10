@@ -189,6 +189,7 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 	for _, pc := range p.checks {
 		r := result.Result{CheckID: pc.entry.ID, Kind: pc.entry.Kind, Severity: pc.severity, Evidence: []result.Evidence{}}
 		var warnings []result.Evidence
+		var warningsSet *result.EvidenceSet
 		switch {
 		case !pc.enabled:
 			r.Status, r.Summary = result.Skipped, "disabled in the configuration"
@@ -200,9 +201,15 @@ func (p *Plan) Run(ctx context.Context) []result.Result {
 			if o.Evidence != nil {
 				r.Evidence = o.Evidence
 			}
-			warnings = o.Warnings
+			r.Set = o.Set
+			warnings, warningsSet = o.Warnings, o.WarningsSet
 		}
+		before := r.Status
 		applyExceptions(&r, active, warnings)
+		if before == result.Fail && r.Status == result.Warn {
+			// The warnings replaced the evidence, and so did their set.
+			r.Set = warningsSet
+		}
 		out = append(out, r)
 	}
 	for _, e := range expired {

@@ -190,9 +190,9 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(causes) > maxPartialSubjects {
 			causes = append(causes[:maxPartialSubjects], fmt.Sprintf("and %d more problems", len(causes)-maxPartialSubjects))
 		}
-		shown, _ := limitEvidence(fails)
+		shown, _, set := limitEvidence(fails)
 		o := partialError(causes, fails)
-		o.Evidence = shown
+		o.Evidence, o.Set = shown, set
 		return o
 	}
 	if read == 0 {
@@ -200,19 +200,20 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 	}
 	switch {
 	case len(fails) > 0:
-		shown, hidden := limitEvidence(fails)
+		shown, hidden, set := limitEvidence(fails)
 		s := fmt.Sprintf("%d certificate(s) expire within %s or are expired: %s", len(fails), daysText(c.fail), subjectList(shown, 5))
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; %d more within %s", len(warns), daysText(c.warn))
 		}
-		shownWarns, _ := limitEvidence(warns)
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
+		shownWarns, _, warnSet := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Set: set, Warnings: shownWarns, WarningsSet: warnSet}
 	case len(warns) > 0:
-		shown, hidden := limitEvidence(warns)
+		shown, hidden, set := limitEvidence(warns)
 		return Outcome{
 			Status:   result.Warn,
 			Summary:  fmt.Sprintf("%d certificate(s) expire within %s: %s", len(warns), daysText(c.warn), subjectList(shown, 5)) + moreNote(hidden),
 			Evidence: shown,
+			Set:      set,
 		}
 	}
 	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d certificate(s) valid for at least %s; soonest: %s, %s", read, daysText(c.warn), clean(soonestPath, 100), daysLeft(soonest))}

@@ -5,9 +5,11 @@
 // snapshot per check: id, kind, status, severity and the failing items, each
 // identified by the SHA-256 of its raw subject (what the diff compares) and a
 // cleaned, redacted subject for display. For a check whose list the probe cut
-// it also holds the sort cutoff (see Check.Cutoff). It deliberately holds no
-// evidence detail text and no summary: that text comes from host output and is
-// only needed for the report of the run that produced it.
+// it also holds the complete set of the item keys (see Check.Keys), so that two
+// runs are compared as sets and not by what happened to be listed. It
+// deliberately holds no evidence detail text and no summary: that text comes
+// from host output and is only needed for the report of the run that produced
+// it.
 //
 // keepwatch runs as root and the state decides what an operator is told, so
 // the file and its directory are not trusted blindly:
@@ -25,7 +27,9 @@
 //     foreign-owned, too large, truncated, not valid JSON, of another schema
 //     version or semantically invalid is reported as a problem and treated as
 //     no previous state: the run is a new baseline, never an abort and never
-//     a silent "nothing changed".
+//     a silent "nothing changed". Files of an older schema version are in
+//     that group: they lack the key sets, and a comparison without them would
+//     be a guess.
 //   - A write goes to a temporary file in the same directory (created with
 //     O_EXCL and O_NOFOLLOW, mode 0600), is flushed to disk, renamed over the
 //     state file, and the directory is flushed too. A failure at any step
@@ -41,6 +45,8 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -48,23 +54,28 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
-// SchemaVersion is the version of the state file format keepwatch writes.
+// SchemaVersion is the version of the state file format keepwatch writes and
+// the only one it reads.
 //
-// Version 2 added the sort cutoff of a capped check (Check.Cutoff) and the
-// Exact mark of an item. A version 1 file is still read: it has neither, so
-// the diff treats every capped list in it as one whose cutoff is unknown (the
-// behaviour version 1 had). Any other version is not read.
-const SchemaVersion = 2
-
-// oldestSchemaVersion is the oldest version that is still read.
-const oldestSchemaVersion = 1
+// Version 3 replaced the sort cutoff and the exact mark of version 2 with the
+// complete key set of a capped check (Check.Total, Check.Keys, Check.Digest).
+// Files of version 1 and 2 cannot be compared with it and are not read.
+const SchemaVersion = 3
 
 // FileName is the name of the state file inside the state directory.
 const FileName = "state.json"
 
-// MaxFileSize bounds the state file that is read. A real state is a few
-// kilobytes: 18 checks with at most 100 failing items each.
-const MaxFileSize = 4 << 20
+// MaxFileSize bounds the state file that is read and written.
+//
+// The size is dominated by key sets. A key costs 72 bytes in the indented file
+// (64 hex characters, quotes, a comma, a newline and four spaces of indent), a
+// check lists at most result.MaxKeys = 10000 keys, so one capped check takes at
+// most 720,000 bytes. Only the kinds that cap their evidence can have a set (six
+// of the 18 checks of the base catalog). Were all 18 capped and full, each with
+// 99 display items of the longest escaped subject, the state would be 15.3 MB,
+// so 16 MiB holds even that; a test builds that worst case and checks it
+// against this constant.
+const MaxFileSize = 16 << 20
 
 // Limits applied when a state file is read, so a hostile or corrupt file
 // cannot make the diff do unbounded work.
@@ -73,10 +84,12 @@ const (
 	maxItems      = 1000
 	maxIDLen      = 200
 	maxSubjectLen = 2048
-	maxHidden     = 1 << 30
+	maxTotal      = 1 << 40
 	displayRunes  = 200
-	markerSubject = `^\((\d+) more not shown\)$`
-	markerDetail  = `^(\d+) further items are not listed, the limit is (\d+) items$`
+	// displayItems is how many items a list keeps for display when it has to
+	// be cut here (a probe that returned more than maxItems items without
+	// cutting them itself).
+	displayItems = 99
 )
 
 // State is the snapshot of one run.
@@ -92,24 +105,22 @@ type Check struct {
 	Kind     string          `json:"kind"`
 	Status   result.Status   `json:"status"`
 	Severity result.Severity `json:"severity"`
-	// Items are the evidence items of the check, without the marker item
-	// that says more were left out.
+	// Items are the evidence items of the check that are listed, without the
+	// marker item that says more were left out. For a check whose list is
+	// complete they are all its items; for a capped one they are a prefix of
+	// the list, for display and for naming what changed.
 	Items []Item `json:"items"`
-	// Hidden is the number of items the probe left out because of its
-	// evidence cap; 0 when the list is complete.
-	Hidden int `json:"hidden,omitempty"`
-	// Cutoff is where a capped list was cut: the raw subject of its last
-	// listed item. The probes list the first items in byte order of the raw
-	// subject, so an item that sorts before the cutoff was listed if it
-	// existed, and one that sorts after it may have been hidden. The diff
-	// uses this to see a new item in a capped list. It is nil when the
-	// list is complete, or when the cutoff is not known: it is stored only
-	// when that last subject is exactly the display subject that is stored
-	// anyway (valid UTF-8, nothing escaped, redacted or cut), so it adds no
-	// text that could hold a secret. A hash would not do: it keeps no order.
-	// A stored cutoff must equal the subject of one exact item of the
-	// check, otherwise the file is invalid.
-	Cutoff *string `json:"cutoff,omitempty"`
+	// Total, Keys and Digest describe the complete list of a check whose
+	// probe cut it, and are zero, nil and empty for any other check. Total is
+	// the number of distinct items before the cut. Keys is the sorted list of
+	// all their keys when Total is at most result.MaxKeys, and empty above
+	// that. Digest is the digest of the complete sorted key list (see
+	// result.EvidenceSet). The listed items are members of the set. A
+	// comparison of two runs uses the keys when it has them and the digest
+	// when it has not.
+	Total  int      `json:"total,omitempty"`
+	Keys   []string `json:"keys,omitempty"`
+	Digest string   `json:"digest,omitempty"`
 }
 
 // Item is one evidence item.
@@ -122,17 +133,44 @@ type Item struct {
 	Subject string `json:"subject"`
 	// Excepted is true when an exception covers the item.
 	Excepted bool `json:"excepted,omitempty"`
-	// Exact is true when Subject is the raw subject, byte for byte: nothing
-	// was escaped, redacted or cut. Only then can the diff place the item
-	// relative to a Cutoff.
-	Exact bool `json:"exact,omitempty"`
 }
 
-// Capped reports whether the probe left items out.
-func (c *Check) Capped() bool { return c.Hidden > 0 }
+// Capped reports whether the probe cut the list.
+func (c *Check) Capped() bool { return c.Digest != "" }
 
-// Total is the number of items the check had before the cap.
-func (c *Check) Total() int { return len(c.Items) + c.Hidden }
+// SetTotal is the number of distinct items of the check, before any cut.
+func (c *Check) SetTotal() int {
+	if c.Capped() {
+		return c.Total
+	}
+	return len(c.Items)
+}
+
+// SetKeys returns the sorted key list of all the items of the check, and false
+// when the check has too many to list (only the digest is known). The result
+// must not be modified. The keys of excepted items are in it: an exception
+// does not remove an item from the list, only from the failing ones.
+func (c *Check) SetKeys() ([]string, bool) {
+	if c.Capped() {
+		return c.Keys, c.Total <= result.MaxKeys
+	}
+	keys := make([]string, 0, len(c.Items))
+	for _, it := range c.Items {
+		keys = append(keys, it.Key)
+	}
+	sort.Strings(keys)
+	return slices.Compact(keys), true
+}
+
+// SetDigest returns the digest of the complete key list: the stored one for a
+// capped check, computed for any other.
+func (c *Check) SetDigest() string {
+	if c.Capped() {
+		return c.Digest
+	}
+	keys, _ := c.SetKeys()
+	return result.DigestOfKeys(keys)
+}
 
 // Find returns the check with the given id, or nil.
 func (s *State) Find(id string) *Check {
@@ -144,43 +182,7 @@ func (s *State) Find(id string) *Check {
 	return nil
 }
 
-// SubjectKey returns the key of a raw subject.
-func SubjectKey(subject string) string {
-	sum := sha256.Sum256([]byte(subject))
-	return hex.EncodeToString(sum[:])
-}
-
-var (
-	markerSubjectRe = regexp.MustCompile(markerSubject)
-	markerDetailRe  = regexp.MustCompile(markerDetail)
-	keyRe           = regexp.MustCompile(`^[0-9a-f]{64}$`)
-)
-
-// splitMarker separates the cap marker that the probes append when they left
-// items out. The marker is recognised only when it is the last item and its
-// subject, its detail and the item count all agree with the text and the
-// numbers the probes write, so a subject that merely looks like the marker
-// (for example a container name chosen by a local user) stays an ordinary
-// item: such an item would have to come with a detail of exactly the marker's
-// wording, in the last place of a list of exactly the announced length.
-func splitMarker(ev []result.Evidence) ([]result.Evidence, int) {
-	if len(ev) == 0 {
-		return ev, 0
-	}
-	last := ev[len(ev)-1]
-	sm := markerSubjectRe.FindStringSubmatch(last.Subject)
-	dm := markerDetailRe.FindStringSubmatch(last.Detail)
-	if sm == nil || dm == nil || last.Excepted {
-		return ev, 0
-	}
-	hidden, err1 := strconv.Atoi(sm[1])
-	hidden2, err2 := strconv.Atoi(dm[1])
-	limit, err3 := strconv.Atoi(dm[2])
-	if err1 != nil || err2 != nil || err3 != nil || hidden <= 0 || hidden > maxHidden || hidden != hidden2 || limit != len(ev) {
-		return ev, 0
-	}
-	return ev[:len(ev)-1], hidden
-}
+var keyRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // statusRank orders statuses from least to most severe, for merging results
 // that share a check id.
@@ -194,20 +196,36 @@ var statusRank = map[result.Status]int{
 //
 // Results that share a check id (the engine reports one exception_expired
 // result per expired exception) are merged into one check: the most severe
-// status, the highest severity and the union of the items.
+// status, the highest severity and the union of the items. If any of them is
+// capped, the merged check carries the union of their sets.
 func FromResults(rs []result.Result, now time.Time, clean func(string) string) *State {
 	if clean == nil {
 		clean = func(s string) string { return s }
 	}
+	// part is what one result contributes to a check.
+	type part struct {
+		items []result.Evidence
+		set   *result.EvidenceSet // nil when the result was not capped
+	}
 	st := &State{SchemaVersion: SchemaVersion, RunAt: now.UTC().Truncate(time.Second)}
 	index := map[string]int{}
+	var parts [][]part // per check
 	for _, r := range rs {
-		items, hidden := splitMarker(r.Evidence)
+		items, set := r.Listed(), r.Set
+		if set == nil && len(items) > maxItems {
+			// A probe that did not cut its list: cut it here, so that the
+			// state stays valid and the whole list is still compared.
+			set = result.NewEvidenceSet(items)
+			items = append([]result.Evidence(nil), items...)
+			sort.SliceStable(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
+			items = items[:displayItems]
+		}
 		i, dup := index[r.CheckID]
 		if !dup {
 			i = len(st.Checks)
 			index[r.CheckID] = i
 			st.Checks = append(st.Checks, Check{ID: r.CheckID, Kind: r.Kind, Status: r.Status, Severity: r.Severity, Items: []Item{}})
+			parts = append(parts, nil)
 		} else {
 			c := &st.Checks[i]
 			if statusRank[r.Status] > statusRank[c.Status] {
@@ -217,46 +235,64 @@ func FromResults(rs []result.Result, now time.Time, clean func(string) string) *
 				c.Severity = r.Severity
 			}
 		}
+		parts[i] = append(parts[i], part{items, set})
 		c := &st.Checks[i]
-		switch {
-		case dup && (hidden > 0 || c.Hidden > 0):
-			// A capped list merged with other items has no single cutoff.
-			c.Cutoff = nil
-		case hidden > 0:
-			c.Cutoff = cutoffOf(items, clean)
-		}
-		c.Hidden += hidden
 		for _, ev := range items {
 			addItem(c, ev, clean)
 		}
 	}
+	for i, ps := range parts {
+		var sets []*result.EvidenceSet
+		capped := false
+		for _, p := range ps {
+			capped = capped || p.set != nil
+		}
+		if !capped {
+			continue
+		}
+		for _, p := range ps {
+			if p.set == nil {
+				p.set = result.NewEvidenceSet(p.items)
+			}
+			sets = append(sets, p.set)
+		}
+		set := unionSets(sets)
+		c := &st.Checks[i]
+		c.Total, c.Keys, c.Digest = set.Total, set.Keys, set.Digest
+	}
 	return st
 }
 
-// cutoffOf returns the cutoff of a capped list: the raw subject of its last
-// item, or nil when that cannot be stored safely. The probes sort their list
-// by raw subject before they cut it; a list that is not in that order is not
-// trusted. A subject is stored only when it is exactly its display text (see
-// Check.Cutoff).
-func cutoffOf(items []result.Evidence, clean func(string) string) *string {
-	if len(items) == 0 {
-		return nil
+// unionSets returns the set of the union of the lists that sets describe. When
+// every set lists its keys the union is exact. When one does not, the union
+// cannot be formed; the result then keeps the sum of the totals and a digest
+// over the parts' digests, which changes whenever a part changes.
+func unionSets(sets []*result.EvidenceSet) *result.EvidenceSet {
+	if len(sets) == 1 {
+		return sets[0]
 	}
-	for i := 1; i < len(items); i++ {
-		if items[i-1].Subject > items[i].Subject {
-			return nil
+	var keys []string
+	complete := true
+	for _, s := range sets {
+		if !s.Complete() {
+			complete = false
+			break
+		}
+		keys = append(keys, s.Keys...)
+	}
+	if complete {
+		if u, ok := result.SetOfKeys(keys); ok {
+			return u
 		}
 	}
-	last := items[len(items)-1].Subject
-	if !isExact(last, clean) {
-		return nil
+	h := sha256.New()
+	_, _ = io.WriteString(h, "merged\n")
+	total := 0
+	for _, s := range sets {
+		total += s.Total
+		_, _ = io.WriteString(h, s.Digest+"\n")
 	}
-	return &last
-}
-
-// isExact reports whether the display text of subject is subject itself.
-func isExact(subject string, clean func(string) string) bool {
-	return utf8.ValidString(subject) && utf8.RuneCountInString(subject) <= displayRunes && clean(subject) == subject
+	return &result.EvidenceSet{Total: total, Digest: hex.EncodeToString(h.Sum(nil))}
 }
 
 func rankOfSeverity(s result.Severity) int {
@@ -271,17 +307,14 @@ func rankOfSeverity(s result.Severity) int {
 // addItem adds an evidence item, or folds it into the item with the same key:
 // the item counts as excepted only if every occurrence is.
 func addItem(c *Check, ev result.Evidence, clean func(string) string) {
-	key := SubjectKey(ev.Subject)
+	key := result.SubjectKey(ev.Subject)
 	for i := range c.Items {
 		if c.Items[i].Key == key {
 			c.Items[i].Excepted = c.Items[i].Excepted && ev.Excepted
 			return
 		}
 	}
-	c.Items = append(c.Items, Item{
-		Key: key, Subject: truncate(clean(ev.Subject), displayRunes), Excepted: ev.Excepted,
-		Exact: isExact(ev.Subject, clean),
-	})
+	c.Items = append(c.Items, Item{Key: key, Subject: truncate(clean(ev.Subject), displayRunes), Excepted: ev.Excepted})
 }
 
 func truncate(s string, runes int) string {
@@ -301,6 +334,17 @@ func problemf(format string, a ...any) error { return &problem{fmt.Sprintf(forma
 
 // parse decodes and validates a state file's content.
 func parse(b []byte) (*State, error) {
+	// The version is read first and on its own, so that a file of another
+	// version is named as that and not as a file with unknown fields.
+	var head struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil {
+		return nil, problemf("not a valid state file: %v", err)
+	}
+	if head.SchemaVersion != SchemaVersion {
+		return nil, problemf("schema version %d, this keepwatch reads version %d only", head.SchemaVersion, SchemaVersion)
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var s State
@@ -309,19 +353,6 @@ func parse(b []byte) (*State, error) {
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, problemf("not a valid state file: data after the JSON document")
-	}
-	if s.SchemaVersion < oldestSchemaVersion || s.SchemaVersion > SchemaVersion {
-		return nil, problemf("schema version %d, this keepwatch reads versions %d to %d", s.SchemaVersion, oldestSchemaVersion, SchemaVersion)
-	}
-	if s.SchemaVersion < 2 {
-		// The cutoff and the exact mark do not exist in version 1: whatever
-		// such a file claims about them is not trusted.
-		for i := range s.Checks {
-			s.Checks[i].Cutoff = nil
-			for j := range s.Checks[i].Items {
-				s.Checks[i].Items[j].Exact = false
-			}
-		}
 	}
 	if err := validate(&s); err != nil {
 		return nil, err
@@ -358,17 +389,8 @@ func validate(s *State) error {
 		if _, err := result.ParseSeverity(string(c.Severity)); err != nil {
 			return problemf("%s: %v", where, err)
 		}
-		if c.Hidden < 0 || c.Hidden > maxHidden {
-			return problemf("%s: invalid hidden count", where)
-		}
-		if c.Cutoff != nil && (c.Hidden == 0 || len(*c.Cutoff) > maxSubjectLen) {
-			return problemf("%s: invalid cutoff", where)
-		}
 		if len(c.Items) > maxItems {
 			return problemf("%s: %d items, at most %d are accepted", where, len(c.Items), maxItems)
-		}
-		if c.Cutoff != nil && !hasExactItem(c.Items, *c.Cutoff) {
-			return problemf("%s: the cutoff is not the subject of an item", where)
 		}
 		keys := map[string]bool{}
 		for j, it := range c.Items {
@@ -380,20 +402,52 @@ func validate(s *State) error {
 				return problemf("%s.items[%d]: invalid subject", where, j)
 			}
 		}
+		if err := validateSet(c, where); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// hasExactItem reports whether one of the items is stored with the given raw
-// subject. A cutoff is the subject of the last listed item, so a stored cutoff
-// that names no item is a corrupted or forged file.
-func hasExactItem(items []Item, subject string) bool {
-	for _, it := range items {
-		if it.Exact && it.Subject == subject {
-			return true
+// validateSet checks the key set of a check. A check has none, or all of
+// Total, Digest and (when Total is at most result.MaxKeys) Keys, and they
+// agree with each other and with the listed items.
+func validateSet(c *Check, where string) error {
+	if c.Total == 0 && c.Digest == "" && len(c.Keys) == 0 {
+		return nil
+	}
+	if c.Total < 1 || c.Total > maxTotal {
+		return problemf("%s: invalid total", where)
+	}
+	if !keyRe.MatchString(c.Digest) {
+		return problemf("%s: invalid digest", where)
+	}
+	if c.Total > result.MaxKeys {
+		if len(c.Keys) != 0 {
+			return problemf("%s: %d keys listed for a total of %d, more than %d are not listed", where, len(c.Keys), c.Total, result.MaxKeys)
+		}
+		return nil
+	}
+	if len(c.Keys) != c.Total {
+		return problemf("%s: %d keys for a total of %d", where, len(c.Keys), c.Total)
+	}
+	for j, k := range c.Keys {
+		if !keyRe.MatchString(k) {
+			return problemf("%s.keys[%d]: invalid key", where, j)
+		}
+		if j > 0 && c.Keys[j-1] >= k {
+			return problemf("%s.keys[%d]: keys are not sorted and unique", where, j)
 		}
 	}
-	return false
+	if result.DigestOfKeys(c.Keys) != c.Digest {
+		return problemf("%s: the digest does not match the keys", where)
+	}
+	for j, it := range c.Items {
+		if _, ok := slices.BinarySearch(c.Keys, it.Key); !ok {
+			return problemf("%s.items[%d]: the item is not in the key set", where, j)
+		}
+	}
+	return nil
 }
 
 // Marshal encodes a state the way Save writes it.

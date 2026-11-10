@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ func chk(id string, st result.Status, items ...string) state.Check {
 	for _, name := range items {
 		ex := strings.HasSuffix(name, "!")
 		name = strings.TrimSuffix(name, "!")
-		c.Items = append(c.Items, state.Item{Key: state.SubjectKey(name), Subject: name, Excepted: ex})
+		c.Items = append(c.Items, state.Item{Key: result.SubjectKey(name), Subject: name, Excepted: ex})
 	}
 	return c
 }
@@ -27,10 +28,69 @@ func sev(c state.Check, s result.Severity) state.Check {
 	c.Severity = s
 	return c
 }
-func capped(c state.Check, hidden int) state.Check { c.Hidden = hidden; return c }
+
+// cutAt is the display cap of the probes: a list of more than this many items
+// is cut to cutAt-1 and a marker.
+const cutAt = 100
+
+// listed returns the evidence list a probe returns for names, built the way
+// the probes' limitEvidence does it: sorted by subject, and when there are
+// more than cutAt items the first cutAt-1 and the marker that carries the set
+// of all of them. A name ending in "!" is an item an exception covers, as the
+// engine marks it: only among the items that are listed.
+func listed(names ...string) ([]result.Evidence, *result.EvidenceSet) {
+	type item struct {
+		name string
+		ex   bool
+	}
+	var all []item
+	var raw []result.Evidence
+	for _, n := range names {
+		ex := strings.HasSuffix(n, "!")
+		n = strings.TrimSuffix(n, "!")
+		all = append(all, item{n, ex})
+		raw = append(raw, result.Evidence{Subject: n})
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].name < all[j].name })
+	shown := all
+	if len(all) > cutAt {
+		shown = all[:cutAt-1]
+	}
+	var out []result.Evidence
+	for _, it := range shown {
+		out = append(out, result.Evidence{Subject: it.name, Excepted: it.ex})
+	}
+	if len(all) > cutAt {
+		out = append(out, result.Evidence{Subject: fmt.Sprintf("(%d more not shown)", len(all)-(cutAt-1))})
+		return out, result.NewEvidenceSet(raw)
+	}
+	return out, nil
+}
+
+// big builds a check as the state package builds it from a probe's result:
+// capped when names has more than cutAt items. clean is the display cleaner
+// (nil leaves subjects as they are).
+func big(clean func(string) string, id string, st result.Status, names ...string) state.Check {
+	ev, set := listed(names...)
+	r := result.Result{CheckID: id, Kind: "k", Status: st, Severity: result.High, Evidence: ev, Set: set}
+	return state.FromResults([]result.Result{r}, time.Unix(0, 0), clean).Checks[0]
+}
+
+// bigN is big for the generated names of many.
+func bigN(id string, st result.Status, names ...string) state.Check {
+	return big(nil, id, st, names...)
+}
 
 func run(cs ...state.Check) *state.State {
 	return &state.State{SchemaVersion: state.SchemaVersion, RunAt: time.Unix(0, 0).UTC(), Checks: cs}
+}
+
+func reverse(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[len(in)-1-i] = s
+	}
+	return out
 }
 
 func many(prefix string, n int) []string {
@@ -50,7 +110,9 @@ func show(c Change) string {
 		s += " " + c.Subject
 	case HiddenNew:
 		s += fmt.Sprintf(" %d", c.HiddenNew)
-	case CountChange:
+	case HiddenGone:
+		s += fmt.Sprintf(" %d", c.HiddenGone)
+	case SetChanged:
 		s += fmt.Sprintf(" %d>%d", c.OldTotal, c.NewTotal)
 	case SeverityChange:
 		s += fmt.Sprintf(" %s>%s (%s)", c.FromSeverity, c.ToSeverity, c.To)
@@ -124,9 +186,9 @@ func TestCompute(t *testing.T) {
 		{name: "a subject that becomes excepted is gone", prev: run(chk("a", result.Fail, "x", "y")), cur: run(chk("a", result.Fail, "x", "y!")), want: []string{"subject_gone a y"}, stillFailing: []string{"a"}},
 		{name: "a subject that stops being excepted is new", prev: run(chk("a", result.Fail, "x", "y!")), cur: run(chk("a", result.Fail, "x", "y")), want: []string{"subject_new a y ALERT"}, stillFailing: []string{"a"}},
 		{name: "the same display text under another key is a new subject",
-			prev: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{{Key: state.SubjectKey("web"), Subject: "web"}}}),
+			prev: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{{Key: result.SubjectKey("web"), Subject: "web"}}}),
 			cur: run(state.Check{ID: "a", Kind: "k", Status: result.Fail, Severity: result.High, Items: []state.Item{
-				{Key: state.SubjectKey("web"), Subject: "web"}, {Key: state.SubjectKey("web\x01"), Subject: "web"}}}),
+				{Key: result.SubjectKey("web"), Subject: "web"}, {Key: result.SubjectKey("web\x01"), Subject: "web"}}}),
 			want: []string{"subject_new a web ALERT"}, stillFailing: []string{"a"}},
 
 		{name: "new in the catalog, failing", prev: run(chk("a", result.Pass)), cur: run(chk("a", result.Pass), chk("b", result.Fail, "x")), want: []string{"check_added b ->fail ALERT"}},
@@ -142,38 +204,37 @@ func TestCompute(t *testing.T) {
 			cur:  run(chk("b", result.Pass), chk("new", result.Fail, "x"), chk("a", result.Fail, "y")),
 			want: []string{"fixed b fail>pass", "check_added new ->fail ALERT", "new_failure a pass>fail ALERT", "check_removed old1 fail->", "check_removed old2 pass->"}},
 
-		// Evidence cap (the marker item). The hidden count itself is never a subject.
-		{name: "capped, hidden count unchanged", prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), stillFailing: []string{"a"}},
-		{name: "capped, hidden count grows: no spurious subject, total change",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 6)),
-			want: []string{"count_change a 104>105 ALERT"}, stillFailing: []string{"a"}},
-		{name: "capped, hidden count shrinks",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 3)),
-			want: []string{"count_change a 104>102"}, stillFailing: []string{"a"}},
-		{name: "capped on both sides, the window shifts: only the total",
-			prev: run(capped(chk("a", result.Fail, many("s", 99)...), 5)),
-			cur:  run(capped(chk("a", result.Fail, append([]string{"a-new"}, many("s", 98)...)...), 6)),
-			want: []string{"count_change a 104>105 ALERT"}, stillFailing: []string{"a"}},
-		{name: "capped on both sides, window shifts, total equal: silent",
-			prev:         run(capped(chk("a", result.Fail, many("s", 99)...), 5)),
-			cur:          run(capped(chk("a", result.Fail, append([]string{"a-new"}, many("s", 98)...)...), 5)),
-			stillFailing: []string{"a"}},
-		{name: "previous complete, now capped: new subjects reported, gone ones not",
-			prev: run(chk("a", result.Fail, "s-000", "s-001", "old")),
-			cur:  run(capped(chk("a", result.Fail, "s-000", "s-001", "zz-new"), 40)),
-			want: []string{"subject_new a zz-new ALERT", "count_change a 3>43 ALERT"}, stillFailing: []string{"a"}},
-		{name: "previous capped, now complete: gone subjects reported, new ones not",
-			prev: run(capped(chk("a", result.Fail, "s-000", "s-001", "old"), 40)),
-			cur:  run(chk("a", result.Fail, "s-000", "s-001", "other")),
-			want: []string{"subject_gone a old", "count_change a 43>3"}, stillFailing: []string{"a"}},
-		{name: "capped warn of other kind: bigger total is not an alert",
-			prev: run(capped(chk("a", result.Warn, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Warn, many("s", 99)...), 9)),
-			want: []string{"count_change a 104>108"}, stillWarning: []string{"a"}},
-		{name: "capped authorized_keys warn: bigger total alerts",
-			prev: run(capped(ak(result.Warn, many("s", 99)...), 5)), cur: run(capped(ak(result.Warn, many("s", 99)...), 9)),
-			want: []string{"count_change keys 104>108 ALERT"}, stillWarning: []string{"keys"}},
-		{name: "capped error: nothing per item", prev: run(capped(chk("a", result.Error, many("s", 99)...), 5)), cur: run(capped(chk("a", result.Error, many("t", 99)...), 9))},
-		{name: "pass to capped fail", prev: run(chk("a", result.Pass)), cur: run(capped(chk("a", result.Fail, many("s", 99)...), 9)), want: []string{"new_failure a pass>fail ALERT"}},
+		// Evidence cap: the list is cut, the set is complete. The count of the
+		// hidden items never makes a subject.
+		{name: "capped, nothing changed", prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 104)...)), stillFailing: []string{"a"}},
+		{name: "capped, order of the input does not matter",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, reverse(many("s", 104))...)), stillFailing: []string{"a"}},
+		{name: "capped, one new item above the cut",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 105)...)),
+			want: []string{"hidden_new a 1 ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, items gone above the cut",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, many("s", 102)...)),
+			want: []string{"hidden_gone a 2"}, stillFailing: []string{"a"}},
+		{name: "capped, a new item sorts into the listed part: named, and pushes one out of the window",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append([]string{"a-new"}, many("s", 104)...)...)),
+			want: []string{"subject_new a a-new ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, one in and one out, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append([]string{"a-new"}, many("s", 103)...)...)),
+			want: []string{"subject_new a a-new ALERT", "hidden_gone a 1"}, stillFailing: []string{"a"}},
+		{name: "capped, a listed item swapped for a hidden one, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append(many("s", 104)[1:], "zz-new")...)),
+			want: []string{"subject_gone a s-000", "hidden_new a 1 ALERT"}, stillFailing: []string{"a"}},
+		{name: "capped, a hidden item swapped for another hidden one, same total",
+			prev: run(bigN("a", result.Fail, many("s", 104)...)), cur: run(bigN("a", result.Fail, append(many("s", 103), "zz-new")...)),
+			want: []string{"hidden_new a 1 ALERT", "hidden_gone a 1"}, stillFailing: []string{"a"}},
+		{name: "capped warn of other kind: a new hidden item is reported, not alerted",
+			prev: run(bigN("a", result.Warn, many("s", 104)...)), cur: run(bigN("a", result.Warn, many("s", 109)...)),
+			want: []string{"hidden_new a 5"}, stillWarning: []string{"a"}},
+		{name: "capped authorized_keys warn: a new hidden item alerts",
+			prev: run(kind(bigN("keys", result.Warn, many("s", 104)...), AuthorizedKeysKind)), cur: run(kind(bigN("keys", result.Warn, many("s", 109)...), AuthorizedKeysKind)),
+			want: []string{"hidden_new keys 5 ALERT"}, stillWarning: []string{"keys"}},
+		{name: "capped error: nothing per item", prev: run(bigN("a", result.Error, many("s", 150)...)), cur: run(bigN("a", result.Error, many("t", 150)...))},
+		{name: "pass to capped fail", prev: run(chk("a", result.Pass)), cur: run(bigN("a", result.Fail, many("s", 150)...)), want: []string{"new_failure a pass>fail ALERT"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,6 +263,71 @@ func TestCompute(t *testing.T) {
 				t.Errorf("still warning = %v, want %v", refs(rep.StillWarning), tc.stillWarning)
 			}
 		})
+	}
+}
+
+func TestSeverityChange(t *testing.T) {
+	ak := func(st result.Status, s result.Severity, items ...string) state.Check {
+		return sev(kind(chk("a", st, items...), AuthorizedKeysKind), s)
+	}
+	tests := []struct {
+		name         string
+		prev, cur    state.Check
+		want         []string
+		stillFailing bool
+	}{
+		{name: "fail, higher: alert", prev: sev(chk("a", result.Fail, "x"), result.Low), cur: sev(chk("a", result.Fail, "x"), result.Critical),
+			want: []string{"severity_change a low>critical (fail) ALERT"}, stillFailing: true},
+		{name: "fail, lower: no alert", prev: sev(chk("a", result.Fail, "x"), result.Critical), cur: sev(chk("a", result.Fail, "x"), result.Low),
+			want: []string{"severity_change a critical>low (fail)"}, stillFailing: true},
+		{name: "fail, one step", prev: sev(chk("a", result.Fail, "x"), result.Medium), cur: sev(chk("a", result.Fail, "x"), result.High),
+			want: []string{"severity_change a medium>high (fail) ALERT"}, stillFailing: true},
+		{name: "fail, unchanged", prev: sev(chk("a", result.Fail, "x"), result.High), cur: sev(chk("a", result.Fail, "x"), result.High), stillFailing: true},
+		{name: "fail, higher, and a new item", prev: sev(chk("a", result.Fail, "x"), result.Low), cur: sev(chk("a", result.Fail, "x", "y"), result.High),
+			want: []string{"severity_change a low>high (fail) ALERT", "subject_new a y ALERT"}, stillFailing: true},
+		{name: "error, higher: alert", prev: sev(chk("a", result.Error), result.Low), cur: sev(chk("a", result.Error), result.High),
+			want: []string{"severity_change a low>high (error) ALERT"}},
+		{name: "error, lower: no alert", prev: sev(chk("a", result.Error), result.High), cur: sev(chk("a", result.Error), result.Low),
+			want: []string{"severity_change a high>low (error)"}},
+		{name: "warn of another kind, higher: reported, no alert", prev: sev(chk("a", result.Warn, "w"), result.Low), cur: sev(chk("a", result.Warn, "w"), result.High),
+			want: []string{"severity_change a low>high (warn)"}},
+		{name: "authorized_keys warn, higher: alert", prev: ak(result.Warn, result.Low, "w"), cur: ak(result.Warn, result.High, "w"),
+			want: []string{"severity_change a low>high (warn) ALERT"}},
+		{name: "pass: not reported", prev: sev(chk("a", result.Pass), result.Low), cur: sev(chk("a", result.Pass), result.High)},
+		{name: "skipped: not reported", prev: sev(chk("a", result.Skipped), result.Low), cur: sev(chk("a", result.Skipped), result.High)},
+		{name: "excepted: not reported", prev: sev(chk("a", result.Excepted, "x!"), result.Low), cur: sev(chk("a", result.Excepted, "x!"), result.High)},
+		{name: "a changed status is one status change, not two", prev: sev(chk("a", result.Pass), result.Low), cur: sev(chk("a", result.Fail, "x"), result.High),
+			want: []string{"new_failure a pass>fail ALERT"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Compute(run(tc.prev), run(tc.cur))
+			var got []string
+			for _, c := range rep.Changes {
+				got = append(got, show(c))
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("changes:\n got %q\nwant %q", got, tc.want)
+			}
+			if tc.stillFailing != (len(rep.StillFailing) == 1) {
+				t.Errorf("still failing = %v", rep.StillFailing)
+			}
+		})
+	}
+}
+
+func TestSeverityChangeIsAnAlertAtTheNewSeverity(t *testing.T) {
+	rep := Compute(run(sev(chk("a", result.Fail, "x"), result.Low)), run(sev(chk("a", result.Fail, "x"), result.High)))
+	if len(rep.Alerts(result.Medium)) != 1 {
+		t.Errorf("a failure that rose from low to high should alert at medium: %+v", rep.Changes)
+	}
+	rep = Compute(run(sev(chk("a", result.Fail, "x"), result.High)), run(sev(chk("a", result.Fail, "x"), result.Low)))
+	if len(rep.Alerts(result.Info)) != 0 {
+		t.Errorf("a failure that fell in severity should not alert: %+v", rep.Alerts(result.Info))
+	}
+	c := rep.Changes[0]
+	if c.Kind != SeverityChange || c.Severity != result.Low || c.FromSeverity != result.High || c.ToSeverity != result.Low {
+		t.Errorf("change %+v", c)
 	}
 }
 

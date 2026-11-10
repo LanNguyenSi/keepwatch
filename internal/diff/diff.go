@@ -9,9 +9,9 @@
 //     (check_removed);
 //   - a severity change of a check whose status did not change and is fail,
 //     warn or error (severity_change);
-//   - for a check that is fail or warn in both runs: items that are new
-//     (subject_new) or gone (subject_gone), and a change of the item count
-//     when the probe capped its list (count_change);
+//   - for a check that is fail or warn in both runs: the items that are new
+//     (subject_new, hidden_new) or gone (subject_gone, hidden_gone), and, for
+//     a list too long to compare item by item, set_changed;
 //   - the checks that keep failing, or keep warning, unchanged
 //     (Report.StillFailing, Report.StillWarning).
 //
@@ -19,34 +19,37 @@
 // so the evidence it kept is not compared. A check that is or was in error
 // yields its status change once and never a per-item change.
 //
-// A probe that has more items than its cap lists only the first ones, sorted
-// by raw subject, and says how many it left out (state.Check.Hidden). The
-// state also keeps where it cut the list (state.Check.Cutoff, the raw subject
-// of the last listed item) and, per item, whether its stored subject is the
-// raw one (state.Item.Exact). That is enough to tell, for part of the list:
+// Items are compared as sets, never through what happened to be listed. The
+// failing set of a check is the set of the keys of all its items (the SHA-256
+// of the raw subject) without the keys of the items an exception covers. A
+// probe that has more items than it lists keeps the complete key set of its
+// list (state.Check.Keys) next to the items it lists, and a list that was not
+// cut is its own set, so a capped and a complete list compare like any other
+// pair. Per check:
 //
-//   - with a capped previous run, an item that is listed now and sorts before
-//     the previous cutoff would have been listed before if it had existed, so
-//     it is new (subject_new, an alert as usual); an item that sorts after
-//     the cutoff may have been hidden before, so nothing is said about it;
-//   - with a capped current run, an item of the previous run that is not
-//     listed now and sorts before the current cutoff is gone (subject_gone);
-//     one that sorts after it may only be hidden now.
+//   - both sets are complete (at most result.MaxKeys keys each): the
+//     difference is exact. A key that is new in the failing set is reported
+//     as subject_new when its subject is among the items listed (in the
+//     current run, or in the previous one for an item an exception stopped
+//     covering) and otherwise counted into one hidden_new with the exact
+//     number; a key that left the failing set is reported as subject_gone
+//     under the same rule, or counted into one hidden_gone;
+//   - a set has more than result.MaxKeys keys, so its keys are not stored:
+//     the digests of the complete key lists are compared. Equal digests mean
+//     the same list, and only a changed exception shows (named as above).
+//     Different digests are one set_changed change with both totals: that
+//     something changed is certain, what is not. A change of an excepted
+//     item cannot be told apart from any other there, so it is reported too.
 //
-// When the cutoff or the item is not known (an older state file, a subject
-// that was escaped, redacted or cut for display) the item counts as above the
-// cutoff: nothing is said about it. In every capped case the totals are
-// compared too, and a larger total is reported as count_change. The hidden
-// count itself never produces subject changes.
-//
-// When a check is capped in both runs, the arithmetic can still show new items
-// that the lists do not name: the items of the previous run that were listed
-// and are gone now, plus the growth of the total, minus the new items that
-// were named, is a number of new items above the cutoff. That number is
-// reported as one hidden_new change, an alert like subject_new. Only the
-// previous run is known: an item that appeared and went away between two runs
-// is invisible, and so is a new hidden item that replaces an equally hidden
-// one that went away.
+// With these rules every change of the failing set shows up as change
+// entries, and a failing set that gained a member (a key not in the previous
+// failing set) is an alert, whatever the lists look like: the arithmetic does
+// not depend on where a list was cut, on whether a subject was escaped or
+// redacted for display, or on the totals before and after. The tests check
+// this against a model on random sets. A set that only lost members is
+// reported, without an alert, like any other fix; for a list too long to
+// compare, where the direction is not known, set_changed is an alert. The
+// hidden count of a list never produces changes by itself.
 //
 // Which changes are worth an alert is decided here (Change.Alert); the exit
 // code of `keepwatch check` does not depend on the diff, only on the current
@@ -72,11 +75,14 @@ const (
 	CheckRemoved Kind = "check_removed"
 	SubjectNew   Kind = "subject_new"
 	SubjectGone  Kind = "subject_gone"
-	CountChange  Kind = "count_change"
-	// HiddenNew is a number of new items that keepwatch cannot name: the
-	// arithmetic of two capped lists says they exist, but they sit above
-	// the cutoff, where the list does not show them (see Change.HiddenNew).
+	// HiddenNew is a number of new failing items that keepwatch cannot name
+	// because they are not among the items listed (see Change.HiddenNew).
 	HiddenNew Kind = "hidden_new"
+	// HiddenGone is the same for items that left the failing set.
+	HiddenGone Kind = "hidden_gone"
+	// SetChanged says that a list too long to compare item by item changed
+	// (see Change.OldTotal).
+	SetChanged Kind = "set_changed"
 	// SeverityChange is a changed severity of a check whose status is the
 	// same in both runs (and fail, warn or error).
 	SeverityChange Kind = "severity_change"
@@ -100,15 +106,18 @@ type Change struct {
 	From, To result.Status
 	// Subject is the display subject of an item change.
 	Subject string
-	// OldTotal and NewTotal are the item totals of a count_change.
+	// OldTotal and NewTotal are the item totals of a set_changed.
 	OldTotal, NewTotal int
 	// HiddenNew is the number of new items of a hidden_new change.
 	HiddenNew int
+	// HiddenGone is the number of gone items of a hidden_gone change.
+	HiddenGone int
 	// FromSeverity and ToSeverity are the severities of a severity_change.
 	FromSeverity, ToSeverity result.Severity
 	// Alert is true for a change worth waking someone for: a check that
 	// started failing, started to be in error, or is new and failing; a new
-	// failing item; a bigger item total of a failing check; a higher
+	// failing item (named or counted) or a changed set too long to compare
+	// item by item; a higher
 	// severity of a check that is failing or in error; and, for an
 	// authorized_keys check, a warn that is new or has new items.
 	Alert bool
@@ -251,127 +260,142 @@ func severityChange(p, c *state.Check) (Change, bool) {
 	}, true
 }
 
+// side is one run of a check, as the comparison of its items sees it.
+type side struct {
+	check *state.Check
+	// keys is the sorted list of all item keys, nil when the list is too
+	// long to be stored (complete is false then).
+	keys     []string
+	complete bool
+	total    int
+	// display maps the key of every listed item to the item; excepted holds
+	// the keys of the listed items an exception covers. Both are small.
+	display  map[string]state.Item
+	excepted map[string]bool
+}
+
+func sideOf(c *state.Check) side {
+	s := side{check: c, total: c.SetTotal(), display: make(map[string]state.Item, len(c.Items)), excepted: map[string]bool{}}
+	s.keys, s.complete = c.SetKeys()
+	for _, it := range c.Items {
+		s.display[it.Key] = it
+		if it.Excepted {
+			s.excepted[it.Key] = true
+		}
+	}
+	return s
+}
+
 // itemChanges compares the items of a check that has the same status, fail
 // or warn, in both runs.
 func itemChanges(p, c *state.Check) []Change {
 	base := Change{CheckID: c.ID, CheckKind: c.Kind, Severity: c.Severity, From: p.Status, To: c.Status}
 	alert := alertWorthy(c.Kind, c.Status)
-	// Excepted items do not fail: an item that becomes excepted is gone
-	// from the failing set, one that stops being excepted is new in it.
-	prevSet, prevAll := failing(p), keys(p)
-	curSet, curAll := failing(c), keys(c)
+	ps, cs := sideOf(p), sideOf(c)
 
-	var out []Change
-	newItems := 0 // listed items that the previous run did not have at all
-	for _, it := range c.Items {
-		if it.Excepted || prevSet[it.Key] {
-			continue
+	var named []Change
+	hiddenNew, hiddenGone := 0, 0
+	// consider decides what a key's presence in the two lists means. An
+	// excepted item is in its list but not in the failing set: an item that
+	// becomes excepted has left the failing set, one that stops being
+	// excepted is new in it.
+	consider := func(key string, inPrev, inCur bool) {
+		failPrev := inPrev && !ps.excepted[key]
+		failCur := inCur && !cs.excepted[key]
+		switch {
+		case failCur && !failPrev:
+			ch := base
+			ch.Kind, ch.Alert = SubjectNew, alert
+			if it, ok := cs.display[key]; ok {
+				ch.Subject = it.Subject
+			} else if it, ok := ps.display[key]; ok {
+				ch.Subject = it.Subject
+			} else {
+				hiddenNew++
+				return
+			}
+			named = append(named, ch)
+		case failPrev && !failCur:
+			ch := base
+			ch.Kind = SubjectGone
+			if it, ok := ps.display[key]; ok {
+				ch.Subject = it.Subject
+			} else if it, ok := cs.display[key]; ok {
+				ch.Subject = it.Subject
+			} else {
+				hiddenGone++
+				return
+			}
+			named = append(named, ch)
 		}
-		// An item the previous run did not list is new only if that run
-		// would have listed it.
-		if !prevAll[it.Key] && !wasVisible(p, it) {
-			continue
-		}
-		if !prevAll[it.Key] {
-			newItems++
-		}
-		ch := base
-		ch.Kind, ch.Subject, ch.Alert = SubjectNew, it.Subject, alert
-		out = append(out, ch)
 	}
-	for _, it := range p.Items {
-		if it.Excepted || curSet[it.Key] {
-			continue
+
+	setChanged := false
+	switch {
+	case ps.complete && cs.complete:
+		i, j := 0, 0
+		for i < len(ps.keys) || j < len(cs.keys) {
+			switch {
+			case j == len(cs.keys) || (i < len(ps.keys) && ps.keys[i] < cs.keys[j]):
+				consider(ps.keys[i], true, false)
+				i++
+			case i == len(ps.keys) || cs.keys[j] < ps.keys[i]:
+				consider(cs.keys[j], false, true)
+				j++
+			default:
+				consider(ps.keys[i], true, true)
+				i++
+				j++
+			}
 		}
-		// Likewise an item that is not listed now is gone only if this run
-		// would have listed it.
-		if !curAll[it.Key] && !wasVisible(c, it) {
-			continue
+	case ps.total == cs.total && p.SetDigest() == c.SetDigest():
+		// The same list: only an exception can differ, and the items it
+		// covers are listed.
+		for _, k := range sortedKeys(ps.display, cs.display) {
+			consider(k, true, true)
 		}
-		ch := base
-		ch.Kind, ch.Subject = SubjectGone, it.Subject
-		out = append(out, ch)
+	default:
+		setChanged = true
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind == SubjectNew
+
+	sort.SliceStable(named, func(i, j int) bool {
+		if named[i].Kind != named[j].Kind {
+			return named[i].Kind == SubjectNew
 		}
-		return out[i].Subject < out[j].Subject
+		return named[i].Subject < named[j].Subject
 	})
-	if n := hiddenNew(p, c, newItems, curAll); n > 0 {
+	out := named
+	if hiddenNew > 0 {
 		ch := base
-		ch.Kind, ch.HiddenNew, ch.Alert = HiddenNew, n, alert
+		ch.Kind, ch.HiddenNew, ch.Alert = HiddenNew, hiddenNew, alert
 		out = append(out, ch)
 	}
-	if (p.Capped() || c.Capped()) && p.Total() != c.Total() {
+	if hiddenGone > 0 {
 		ch := base
-		ch.Kind, ch.OldTotal, ch.NewTotal = CountChange, p.Total(), c.Total()
-		ch.Alert = alert && c.Total() > p.Total()
+		ch.Kind, ch.HiddenGone = HiddenGone, hiddenGone
+		out = append(out, ch)
+	}
+	if setChanged {
+		ch := base
+		ch.Kind, ch.OldTotal, ch.NewTotal, ch.Alert = SetChanged, ps.total, cs.total, alert
 		out = append(out, ch)
 	}
 	return out
 }
 
-// hiddenNew returns how many new items a check has that the diff cannot name.
-// It applies to a check that is capped in both runs and has a cutoff in both.
-// Let G be the number of items of the previous run that were listed (placed at
-// or before the previous cutoff, stored exactly), are not in the current
-// items although this run would have listed them (at or before the current
-// cutoff), and so are really gone; and D the current total minus the previous
-// one. The current total is the previous one plus the new items minus all
-// gone ones, and at least G items are gone, so at least G+D items are new.
-// newItems of them are named (subject_new, items the previous run did not
-// have at all); the surplus is new items above the cutoff, where the list
-// does not show them. It is zero when the surplus is not positive.
-//
-// The limit: only the previous run is known. An item that appeared and
-// disappeared between two runs is in neither, and an item that is new but
-// hidden while an equal number of hidden items is gone cannot be seen at all.
-func hiddenNew(p, c *state.Check, newItems int, curAll map[string]bool) int {
-	if !p.Capped() || !c.Capped() || p.Cutoff == nil || c.Cutoff == nil {
-		return 0
+// sortedKeys returns the keys of both maps, sorted and without duplicates.
+func sortedKeys(a, b map[string]state.Item) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for k := range a {
+		set[k] = true
 	}
-	gone := 0
-	for _, it := range p.Items {
-		if !curAll[it.Key] && wasVisible(p, it) && wasVisible(c, it) {
-			gone++
-		}
+	for k := range b {
+		set[k] = true
 	}
-	if n := gone + c.Total() - p.Total() - newItems; n > 0 {
-		return n
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
 	}
-	return 0
-}
-
-// wasVisible reports whether run r, in which item it is not listed, would have
-// listed it had it existed: the list of r is complete, or the item sorts at or
-// before the cutoff of r (the cutoff is the last item listed, so everything up
-// to it was). An item that cannot be placed (no cutoff, or a
-// subject that is not stored as it was) is not known to be visible.
-func wasVisible(r *state.Check, it state.Item) bool {
-	if !r.Capped() {
-		return true
-	}
-	return r.Cutoff != nil && it.Exact && it.Subject <= *r.Cutoff
-}
-
-// keys returns the keys of all items of c, excepted ones too.
-func keys(c *state.Check) map[string]bool {
-	m := make(map[string]bool, len(c.Items))
-	for _, it := range c.Items {
-		m[it.Key] = true
-	}
-	return m
-}
-
-// failing returns the keys of the items of c that are not excepted. Items of
-// a warn check are never excepted (an exception removes failures only).
-func failing(c *state.Check) map[string]bool {
-	m := make(map[string]bool, len(c.Items))
-	for _, it := range c.Items {
-		if !it.Excepted {
-			m[it.Key] = true
-		}
-	}
-	return m
+	sort.Strings(out)
+	return out
 }

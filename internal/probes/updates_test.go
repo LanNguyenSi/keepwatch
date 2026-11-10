@@ -342,6 +342,7 @@ func TestSecurityUpdatesEvidenceIsLimited(t *testing.T) {
 	if last.Subject != "(51 more not shown)" || o.Evidence[98].Subject != "pkg-098" {
 		t.Fatalf("last %+v, previous %+v", last, o.Evidence[98])
 	}
+	wantCapped(t, o.Evidence, o.Set, 150)
 	wantSummary(t, o, "150 pending security update(s)")
 	wantSummary(t, o, "and 51 more")
 }

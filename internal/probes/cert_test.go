@@ -285,6 +285,48 @@ func TestCertExpiryFiles(t *testing.T) {
 	})
 }
 
+// Failing and warning certificates are cut on their own, and each list has its
+// own set.
+func TestCertExpiryCutListsKeepTheirSets(t *testing.T) {
+	files := map[string]string{}
+	soon, later := pemCert(t, "x", t0.Add(days(1))), pemCert(t, "y", t0.Add(days(20)))
+	for i := 0; i < 130; i++ {
+		files[fmt.Sprintf("/opt/w%03d.pem", i)] = later
+	}
+	probe := func() probes.Probe { return certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}) }
+
+	o := execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Warn)
+	wantCapped(t, o.Evidence, o.Set, 130)
+
+	files["/opt/f1.pem"], files["/opt/f2.pem"] = soon, soon
+	o = execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Fail)
+	if o.Set != nil || len(o.Evidence) != 2 {
+		t.Fatalf("two failing certificates are not a cut list: %d items, set %v", len(o.Evidence), o.Set != nil)
+	}
+	wantCapped(t, o.Warnings, o.WarningsSet, 130)
+
+	for i := 0; i < 120; i++ {
+		files[fmt.Sprintf("/opt/f%03d.pem", i+10)] = soon
+	}
+	o = execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Fail)
+	wantCapped(t, o.Evidence, o.Set, 122)
+	wantCapped(t, o.Warnings, o.WarningsSet, 130)
+}
+
+func TestCertExpiryPartialResultWithACutListHasASet(t *testing.T) {
+	files := map[string]string{"/opt/zz-broken.pem": "this is not a certificate"}
+	soon := pemCert(t, "x", t0.Add(days(1)))
+	for i := 0; i < 130; i++ {
+		files[fmt.Sprintf("/opt/c%03d.pem", i)] = soon
+	}
+	o := execCert(certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}), certFS(files))
+	wantStatus(t, o, result.Error)
+	wantCapped(t, o.Evidence, o.Set, 130)
+}
+
 func TestCertExpiryManyFiles(t *testing.T) {
 	files := map[string]string{}
 	one := pemCert(t, "x", t0.Add(days(1)))
@@ -296,6 +338,7 @@ func TestCertExpiryManyFiles(t *testing.T) {
 	if len(o.Evidence) != 100 || o.Evidence[99].Subject != "(51 more not shown)" {
 		t.Fatalf("%d items", len(o.Evidence))
 	}
+	wantCapped(t, o.Evidence, o.Set, 150)
 	wantSummary(t, o, "and 51 more")
 
 	thousand := map[string]string{}

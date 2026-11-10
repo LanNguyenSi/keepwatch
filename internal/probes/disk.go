@@ -149,26 +149,27 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 		if len(causes) > maxPartialSubjects {
 			causes = append(causes[:maxPartialSubjects], fmt.Sprintf("and %d more mounts could not be read", len(causes)-maxPartialSubjects))
 		}
-		shown, _ := limitEvidence(fails)
+		shown, _, set := limitEvidence(fails)
 		o := partialError(causes, fails)
-		o.Evidence = shown
+		o.Evidence, o.Set = shown, set
 		return o
 	}
 	switch {
 	case len(fails) > 0:
-		shown, hidden := limitEvidence(fails)
+		shown, hidden, set := limitEvidence(fails)
 		s := fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(fails), len(wanted), d.fail, subjectList(shown, 5))
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; %d more at or above %d%%", len(warns), d.warn)
 		}
-		shownWarns, _ := limitEvidence(warns)
-		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Warnings: shownWarns}
+		shownWarns, _, warnSet := limitEvidence(warns)
+		return Outcome{Status: result.Fail, Summary: s + moreNote(hidden), Evidence: shown, Set: set, Warnings: shownWarns, WarningsSet: warnSet}
 	case len(warns) > 0:
-		shown, hidden := limitEvidence(warns)
+		shown, hidden, set := limitEvidence(warns)
 		return Outcome{
 			Status:   result.Warn,
 			Summary:  fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(warns), len(wanted), d.warn, subjectList(shown, 5)) + moreNote(hidden),
 			Evidence: shown,
+			Set:      set,
 		}
 	}
 	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d file system(s) below %d%%", len(wanted), d.warn)}

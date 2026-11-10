@@ -48,7 +48,12 @@ func ParseFormat(s string) (Format, error) {
 }
 
 // SchemaVersion is the version of the JSON report format.
-const SchemaVersion = 1
+//
+// Version 2: the change kinds hidden_gone and set_changed and the field
+// hidden_gone are new, and count_change is no longer produced (version 1
+// reports could hold it). The fields hidden_new, old_total and new_total keep
+// their meaning, except that old_total and new_total now belong to set_changed.
+const SchemaVersion = 2
 
 // StateInfo says how the run related to the stored state.
 type StateInfo struct {
@@ -121,10 +126,13 @@ type viewChange struct {
 	From      string `json:"from,omitempty"`
 	To        string `json:"to,omitempty"`
 	Subject   string `json:"subject,omitempty"`
-	OldTotal  int    `json:"old_total,omitempty"`
-	NewTotal  int    `json:"new_total,omitempty"`
-	// HiddenNew is set for a hidden_new change only.
-	HiddenNew int `json:"hidden_new,omitempty"`
+	// OldTotal and NewTotal are set for a set_changed change only.
+	OldTotal int `json:"old_total,omitempty"`
+	NewTotal int `json:"new_total,omitempty"`
+	// HiddenNew is set for a hidden_new change only, HiddenGone for a
+	// hidden_gone change only.
+	HiddenNew  int `json:"hidden_new,omitempty"`
+	HiddenGone int `json:"hidden_gone,omitempty"`
 	// FromSeverity and ToSeverity are set for a severity_change only.
 	FromSeverity string `json:"from_severity,omitempty"`
 	ToSeverity   string `json:"to_severity,omitempty"`
@@ -186,7 +194,7 @@ func buildView(in Input, red *redact.Redactor) view {
 			v.Changes = append(v.Changes, viewChange{
 				Kind: c(string(ch.Kind)), CheckID: c(ch.CheckID), CheckKind: c(ch.CheckKind), Severity: c(string(ch.Severity)),
 				From: c(string(ch.From)), To: c(string(ch.To)), Subject: c(ch.Subject),
-				OldTotal: ch.OldTotal, NewTotal: ch.NewTotal, HiddenNew: ch.HiddenNew, Alert: ch.Alert,
+				OldTotal: ch.OldTotal, NewTotal: ch.NewTotal, HiddenNew: ch.HiddenNew, HiddenGone: ch.HiddenGone, Alert: ch.Alert,
 				FromSeverity: c(string(ch.FromSeverity)), ToSeverity: c(string(ch.ToSeverity)),
 			})
 		}

@@ -82,4 +82,22 @@ type Result struct {
 	// ExceptionReasons lists the reasons of the exceptions that were
 	// applied to this check; it is empty unless one applied.
 	ExceptionReasons []string `json:"exception_reasons,omitempty"`
+	// Set describes the complete list that Evidence is a prefix of, and is
+	// non-nil only when the probe cut that list (see EvidenceSet). When it is
+	// non-nil the last item of Evidence is the marker that says how many items
+	// are not shown, and the items before it are the ones that are listed.
+	// This is how the marker is told from an item: by the set, which no host
+	// output can produce, never by its text. It always describes the list
+	// that is in Evidence: when the engine replaces the failing items by the
+	// warnings, the set of the warnings replaces this one. It is not part of
+	// any output.
+	Set *EvidenceSet `json:"-"`
+}
+
+// Listed returns the evidence items without the marker of a cut list.
+func (r Result) Listed() []Evidence {
+	if r.Set != nil && len(r.Evidence) > 0 {
+		return r.Evidence[:len(r.Evidence)-1]
+	}
+	return r.Evidence
 }
