@@ -68,7 +68,7 @@ func trustedPathFrom(fsys FS, trusted, p string, kind PathKind, owner func(uid i
 		last := i == len(prefixes)-1
 		switch {
 		case info.IsSymlink():
-			return fmt.Errorf("%s is a symbolic link, somebody who can change it can redirect the path", q)
+			return &linkError{path: q}
 		case !last && !info.IsDir():
 			return fmt.Errorf("%s is not a directory", q)
 		case last && kind == KindFile && !info.IsRegular():
@@ -86,3 +86,18 @@ func trustedPathFrom(fsys FS, trusted, p string, kind PathKind, owner func(uid i
 
 // IsMissing reports whether err from TrustedPath is a missing component.
 func IsMissing(err error) bool { return errors.Is(err, fs.ErrNotExist) }
+
+// linkError is the error of TrustedPath for a component that is a symbolic
+// link.
+type linkError struct{ path string }
+
+func (e *linkError) Error() string {
+	return e.path + " is a symbolic link, somebody who can change it can redirect the path"
+}
+
+// IsSymlink reports whether err from TrustedPath is a component that is a
+// symbolic link.
+func IsSymlink(err error) bool {
+	var l *linkError
+	return errors.As(err, &l)
+}

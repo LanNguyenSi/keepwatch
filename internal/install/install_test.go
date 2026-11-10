@@ -29,8 +29,12 @@ type rig struct {
 	noConfig bool
 }
 
+// newRig is a host where install has everything it needs: the binary of
+// NewMemFS and a root-owned configuration directory with the main file.
 func newRig() *rig {
 	r := &rig{fs: installtest.NewMemFS(), sd: installtest.NewSystemd(), out: &bytes.Buffer{}}
+	r.fs.AddDir("/etc/keepwatch", 0o750, 0)
+	r.fs.AddFile(cfgPath, 0o640, 0, "{}\n")
 	r.deps = install.Deps{FS: r.fs, Runner: r.sd.Runner, Geteuid: func() int { return r.uid }, Out: r.out}
 	return r
 }
@@ -90,7 +94,7 @@ func TestFirstInstall(t *testing.T) {
 		t.Fatalf("Install: %v\n%s", err, r.out)
 	}
 	wantLines(t, "writes", r.fs.Log, []string{
-		"mkdir /etc/keepwatch", "mkdir /var/lib/keepwatch",
+		"mkdir /var/lib/keepwatch",
 		"write " + unitPath(install.CheckService), "write " + unitPath(install.ReportService),
 		"write " + unitPath(install.CheckTimer), "write " + unitPath(install.ReportTimer),
 	})
@@ -98,9 +102,6 @@ func TestFirstInstall(t *testing.T) {
 		"systemctl daemon-reload",
 		"systemctl enable --now keepwatch-check.timer keepwatch-report.timer",
 	})
-	if m := r.fs.Mode("/etc/keepwatch"); m != fs.ModeDir|0o750 {
-		t.Errorf("config dir mode = %v, want 0750", m)
-	}
 	if m := r.fs.Mode(stateDir); m != fs.ModeDir|0o700 {
 		t.Errorf("state dir mode = %v, want 0700", m)
 	}
@@ -206,7 +207,7 @@ func TestInstallDryRunChangesNothing(t *testing.T) {
 		t.Errorf("dry run ran: %v", m)
 	}
 	for _, want := range []string{
-		"would create directory /etc/keepwatch (mode 0750)", "would create directory /var/lib/keepwatch (mode 0700)",
+		"would create directory /var/lib/keepwatch (mode 0700)",
 		"would create " + unitPath(install.CheckService), "would create " + unitPath(install.ReportTimer),
 		"would run systemctl daemon-reload", "would run systemctl enable --now keepwatch-check.timer keepwatch-report.timer",
 	} {
@@ -361,24 +362,41 @@ func TestInstallRefusesAnUntrustedUnitDirectory(t *testing.T) {
 	}
 }
 
-// A directory install has just created is opened and checked again before
-// anything depends on it.
+// While state_dir is missing only its parent can be checked. The directory
+// install has just created is checked itself before anything depends on it:
+// whatever is at the name then (here, what somebody put there in between) must
+// pass the placement check, or the install stops before a unit is written.
 func TestInstallChecksTheDirectoriesItCreated(t *testing.T) {
-	for _, dir := range []string{"/etc/keepwatch", stateDir} {
+	swaps := map[string]struct {
+		swap func(r *rig, p string)
+		want string
+	}{
+		"owned by a user":   {func(r *rig, p string) { r.fs.AddDir(p, 0o700, 1000) }, "owned by uid 1000"},
+		"writable by group": {func(r *rig, p string) { r.fs.AddDir(p, 0o770, 0) }, "writable by group or other"},
+		"a symbolic link":   {func(r *rig, p string) { r.fs.AddSymlink(p, "/etc") }, "symbolic link"},
+	}
+	for name, c := range swaps {
 		r := newRig()
-		r.fs.FailOpenDir[dir] = errors.New(dir + ": cannot be trusted after it was created")
+		r.fs.AfterMkdir = func(p string) { c.swap(r, p) }
 		err := r.install(t, install.InstallOptions{ConfigFound: true})
-		if !errors.Is(err, install.ErrFailed) || !strings.Contains(err.Error(), "cannot be trusted after it was created") {
-			t.Errorf("%s: err = %v, want ErrFailed", dir, err)
+		if !errors.Is(err, install.ErrFailed) || !strings.Contains(err.Error(), "after creating "+stateDir) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want ErrFailed naming %q", name, err, c.want)
 		}
 		if len(r.sd.Mutations()) != 0 {
-			t.Errorf("%s: systemctl ran after the failure: %v", dir, r.sd.Mutations())
+			t.Errorf("%s: systemctl ran after the failure: %v", name, r.sd.Mutations())
 		}
 		for _, n := range install.UnitNames {
 			if r.fs.Exists(unitPath(n)) {
-				t.Errorf("%s: %s was written although a directory it needs cannot be trusted", dir, n)
+				t.Errorf("%s: %s was written although the directory it needs cannot be trusted", name, n)
 			}
 		}
+	}
+	// The directory as install makes it passes, and is created exactly once.
+	r := newRig()
+	made := 0
+	r.fs.AfterMkdir = func(string) { made++ }
+	if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil || made != 1 {
+		t.Errorf("err = %v, %d directories created, want none and 1", err, made)
 	}
 }
 

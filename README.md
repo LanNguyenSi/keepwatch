@@ -144,7 +144,9 @@ More rules, all reported with `file:line`:
   checked on the open file descriptor itself. The directories holding
   the main file, `conf.d` and the token file must be real directories
   owned by root or the running user and not writable by group or
-  other; deeper ancestor directories are not checked (known limit).
+  other; deeper ancestor directories are not checked by the loader
+  (known limit of a run by hand; `install` and `doctor` walk every
+  ancestor, see [Where the paths must lie](#where-the-paths-must-lie)).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
   http only for loopback; no credentials, query or fragment; a URL port must
   be 1-65535). It is the address of the server, not of the topic: see
@@ -539,7 +541,9 @@ checked:
 - `state_dir` is cleaned with `filepath.Clean` and must be absolute. It is created
   with mode 0700 if it does not exist; otherwise it must be a real directory (not
   a symlink) owned by root or the running user that group and other cannot write
-  to. Ancestors above it are not examined (known limit): they must be root-owned.
+  to. Ancestors above it are not examined by `check` itself (known limit of a run by
+  hand): they must be root-owned. `install` and `doctor` do examine them, see
+  [Where the paths must lie](#where-the-paths-must-lie).
 - The state file is opened without following links and checked on the open
   descriptor: a regular file of at most 16 MiB, owned by root or the running user,
   not writable by group or other.
@@ -838,29 +842,70 @@ configured in the configuration file that `install` reads, both commands get
 [Notifications](#notifications): a run without `--notify` consumes the alerts it
 finds and nobody is told, and a run with `--notify` and no `notify.ntfy` exits 3.
 So after adding `notify.ntfy` run `install` again (it updates the two services;
-`doctor` reports a problem while they lack `--notify`). It creates the
-directory of the configuration file (`/etc/keepwatch`, mode 0750) and `state_dir`
-(mode 0700) if they are missing, runs `systemctl daemon-reload` and
+`doctor` reports a problem while they lack `--notify`). It creates `state_dir`
+(mode 0700) if it is missing, runs `systemctl daemon-reload` and
 `systemctl enable --now` for both timers, and restarts a timer whose schedule
 changed. The units run the binary that ran `install` (its path is written into
 them), so install it where it stays, for example `/usr/local/bin`.
 
-The services run that binary as root, so `install` refuses (exit 2) a binary that
-anybody but root could change: every component of its path, from `/`, must be
-looked at with `lstat` and be no symbolic link, be owned by root and not be
-writable by group or other, and the file itself must be a regular file. The message
-says which component failed and how to fix it, for example `install -o root -g root
--m 0755 keepwatch /usr/local/bin/` and then `/usr/local/bin/keepwatch install`.
-`doctor` applies the same rule to the `ExecStart` program of the installed units.
-Limits: POSIX ACLs, file capabilities and bind mounts over a checked directory are
-not examined.
-
-It reads `state_dir` and whether `notify.ntfy` is set from the configuration file. A
-missing file is refused (exit 2, also with `--dry-run`, nothing written) with the hint to
+It reads `state_dir`, whether `notify.ntfy` is set and its `token_file` from the
+configuration file. A
+missing file is refused (exit 2, also with `--dry-run` and `--print`, nothing written) with the hint to
 create it with `keepwatch init` first, because every scheduled run would exit 3; so is an
 invalid one, for the same reason.
 `ReadWritePaths` in the units is that directory, so after changing `state_dir`
 run `install` again (`doctor` tells when the two differ).
+
+#### Where the paths must lie
+
+The services are root processes in a sandbox. Every path they depend on must be one
+that the sandbox shows them and one that nobody but root can rename, replace or
+redirect; otherwise a scheduled run fails without telling anybody, or reads what
+somebody else put there. `install` checks one list of paths with one rule and refuses
+(exit 2, nothing written) when a path does not pass. `doctor` checks the same list
+with the same rule, for what the installed units say, and prints the same message as
+a problem.
+
+| Path | Must be | May be missing |
+|---|---|---|
+| the keepwatch binary (`ExecStart`) | a regular file | no |
+| the directory of the configuration file, and the file (`--config`) | a directory, a regular file | no |
+| `conf.d` next to the configuration file | a directory | yes; checked when it is there |
+| the directory of `notify.ntfy.token_file`, and the file | a directory, a regular file | only when `token_file` is not configured |
+| `state_dir` (`ReadWritePaths`) | a directory | yes: then its parent directory is checked, `install` creates `state_dir` there and checks it again |
+
+The rule, for each path:
+
+1. It must not lie where the sandbox hides it or where a reboot empties it. None of
+   them may lie under `/tmp` or `/var/tmp` (`PrivateTmp=yes`: the services have their
+   own, empty ones), under `/dev` (`PrivateDevices=yes`) or under `/usr/lib/modules`
+   and `/lib/modules` (`ProtectKernelModules=yes`), and `state_dir` not under `/run`, `/var/run`,
+   `/var/lock` or `/dev/shm` either: they are empty after a reboot, and a service
+   whose `ReadWritePaths` names a missing directory does not start (status
+   226/NAMESPACE). A configuration file or a token file under `/run` is fine. This
+   list is tied to the hardening options by a test: an option cannot be added, changed
+   or removed without the list being judged again.
+2. Every component of the path, from `/` down to the path itself, is looked at with
+   `lstat` and must be no symbolic link, be owned by root and not be writable by
+   group or other. So a configuration below `/home/someone` is refused even when the
+   directory that holds it is root's: the owner of `/home/someone` can rename it away,
+   and every run exits 3 from then on.
+
+Symbolic links are refused in every component, also the harmless ones of the
+system: give the real path. `/var/run` is `/run`, `/var/lock` is `/run/lock`, and on
+a merged `/usr` the directories `/bin`, `/sbin` and `/lib` are `/usr/bin`,
+`/usr/sbin` and `/usr/lib`; `realpath PATH` prints the path with every link
+resolved. `install` and `doctor` never resolve a link for this check: the path written
+into a unit, the one in the configuration and the one that was checked are the same text. (The binary
+needs no care here, its path comes from the kernel already resolved.)
+
+The message names the path, the component that failed and the fix, for a binary for
+example `install -o root -g root -m 0755 keepwatch /usr/local/bin/` and then
+`/usr/local/bin/keepwatch install`. What lies under a path that already has a
+problem is not reported a second time.
+Limits: POSIX ACLs, file capabilities and bind mounts over a checked directory are
+not examined. The walk shows who can change a path now; it does not notice a change
+later, and a unit that fails tells nobody (`doctor` shows the failed last run).
 
 `install` is idempotent: with nothing to change it prints `already installed,
 nothing to change` and touches nothing (it still makes sure the timers are
@@ -868,6 +913,9 @@ enabled and active, and enables them if they are not). `--dry-run` lists the
 directories, files and `systemctl` commands, and changes nothing (it asks
 systemd read-only, and works without root). `--print` writes the four unit files
 to stdout, each after a `# ===== name =====` line, and does nothing else; it wins over `--dry-run`.
+Both refuse what `install` refuses about the configuration and the paths, with the
+same message, so a unit file that is printed is one `install` would write; neither
+creates anything, a missing `state_dir` included.
 
 | Flag | Grammar |
 |---|---|
@@ -879,11 +927,8 @@ Anything else is a usage error (exit 2): a second unit, a fraction, a space or
 newline in a value, `%`, a quote. The same goes for every path that is written
 into a unit (the binary, the configuration file, `state_dir`): they must be
 clean absolute paths of the characters `A-Z a-z 0-9 . _ - + @ /`, so no value can
-add a line, an option or a systemd specifier. None of the three may lie
-under `/tmp`, `/var/tmp` or `/dev` (the services have their own empty `/tmp` and
-`/dev`, so a service would not find the file or the directory), and `state_dir` not
-under `/run`, `/var/run` or `/dev/shm` either (they are empty after a reboot, and a
-service whose `ReadWritePaths` names a missing directory does not start).
+add a line, an option or a systemd specifier. Where they may lie is the rule
+[above](#where-the-paths-must-lie).
 
 What `install` does to the files it writes:
 
@@ -899,16 +944,17 @@ What `install` does to the files it writes:
   without following links), written, flushed, set to mode 0644, renamed over the
   name, and the directory flushed. The target name is never opened for writing,
   so a link there could not redirect a write.
-- The unit directory, the configuration directory and `state_dir` must be real
-  directories (not symbolic links) that group and other cannot write to and that
-  root or the running user owns; otherwise `install` refuses. An existing
-  directory is left as it is (mode included). Ancestors above these directories
-  are not examined: they must be root-owned.
+- The unit directory must be a real directory (not a symbolic link) that group and
+  other cannot write to and that root or the running user owns; otherwise `install`
+  refuses. The configuration directory and `state_dir` fall under the stricter rule
+  [above](#where-the-paths-must-lie). An existing directory is left as it is (mode
+  included).
 
 Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
 failed after work had started (a `systemctl` command, a write; what was done is
 printed and a second run continues), 2 refused or usage error (not root, systemd
-not running, bad flag, a file that is not keepwatch's, a missing or invalid configuration;
+not running, bad flag, a file that is not keepwatch's, a missing or invalid configuration,
+a path that does not lie where it must;
 nothing was changed, except that `uninstall --purge` exits 2 after doing what it
 could when it refuses a configuration it cannot prove is keepwatch's), 3 internal error.
 
@@ -996,23 +1042,46 @@ finding, `ok`, `warn` or `PROBLEM`, and a summary. It changes nothing except one
 probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
 (warnings are allowed), 1 at least one problem, 2 usage error, 3 internal error.
 
+`doctor` judges the installed units by what they say, not by what it assumes. Which
+configuration it examines:
+
+- Without `--config`: the file the installed check service is given (the `--config`
+  of its `ExecStart`), because that is what the scheduled runs load. Only when no
+  service of keepwatch is installed is it the default path,
+  `/etc/keepwatch/keepwatch.yaml`. So an invalid configuration behind the units is a
+  problem even when the file at the default path is fine.
+- With `--config FILE`: that file, for example to look at a configuration before
+  `install --config FILE`. An installed service that runs with another file is then a
+  problem (exit 1) that names both files: the other areas of the report are about
+  `FILE` and say nothing about what the scheduled runs will do, so the report must not
+  come out clean. That service is still judged by its own file (it loads, its paths
+  pass, `ReadWritePaths` and `--notify` agree with it). Run `doctor` without `--config`
+  for the report about the installed units.
+- The two services are meant to run with one file. If a hand edit made them differ,
+  the check service decides and the other one is a problem in the same way.
+
+A `--config` in a unit that is not a clean absolute path is a problem and is never
+loaded.
+
 | Area | What it checks | Level |
 |---|---|---|
 | user | running as root | not root: problem (the checks would fail or see less) |
-| config | the configuration loads (file and line of each error) and agrees with the catalog (unknown check ids, bad parameters) | invalid: problem |
+| config | the configuration loads (file and line of each error) and agrees with the catalog (unknown check ids, bad parameters); the configuration file, its directory, `conf.d` and `notify.ntfy.token_file` lie [where the paths must lie](#where-the-paths-must-lie) | invalid, or a path that does not pass: problem, with the message `install` refuses with |
 | catalog | the embedded catalog is valid | |
 | programs | for every enabled check, the programs it needs are found the way the checks will find them (the fixed directories `/usr/sbin:/usr/bin:/sbin:/bin`, the same trust rules). A check that is switched off needs nothing | not installed: warn, naming the checks that will be `skipped` (`reboot_required` still reads its marker file, `firewall_default` is skipped only without `nft`, `iptables` and `ip6tables`, `docker_exposure` is an error if a daemon is configured); refused by the execution layer, or `nft` missing with only one of `iptables` and `ip6tables`: problem (the check would be an `error`) |
 | ssh | `/run/sshd` exists when an `sshd` check is enabled. Ubuntu 24.04 starts `ssh.service` (which creates it) only at the first login when `ssh.socket` is used, and until then `sshd -T` fails and the five ssh checks are `error` | missing: problem, with the cause and `systemctl start ssh` as the remedy (keepwatch does not create it) |
 | notify | a notification channel is configured | none: warn |
 | units, notify | the installed services carry `--notify` exactly when `notify.ntfy` is configured | configured but a service lacks `--notify`: problem (each of its runs consumes the alerts, a loss); `--notify` but not configured: problem (every run exits 3) |
-| state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed, or under a path the sandbox hides: problem (the services do not start, status 226/NAMESPACE) |
-| units | the four unit files are installed with the marker; the `ExecStart` program exists and only root can change it or anything above it; `ReadWritePaths` equals `state_dir`; the unit's `--config` exists and is not under a hidden path; `--config` matches | missing, foreign, a program anybody else can change (or that is missing), or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
+| state | `state_dir` lies [where the paths must lie](#where-the-paths-must-lie) (its parent directory while it is missing); then it is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable. A `state_dir` whose path does not pass is not probed: nothing is written through a path that somebody else can redirect | a path that does not pass (under a path the sandbox hides or a reboot empties, or one somebody but root can change), unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed: problem (the services do not start, status 226/NAMESPACE) |
+| units | the four unit files are installed with the marker; the `ExecStart` program lies [where the paths must lie](#where-the-paths-must-lie) (it exists, the sandbox shows it, only root can change it or anything above it); `ReadWritePaths` equals `state_dir` of the configuration the unit runs with; each service runs with the configuration that was examined | missing, foreign, a program that does not pass, `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd), no `--config`, or another `--config` than the one examined: problem |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
 | last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output; exit 3, 4 and 226 are named); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
 
 `--send-test` runs all the checks above and then sends one short test message
-through `notify.ntfy` (the same notifier `check --notify` uses, with its timeout and
-one retry). The finding `send-test` is `ok` when the message was delivered, and a
+through `notify.ntfy` of the configuration that was examined (the same notifier
+`check --notify` uses, with its timeout and one retry). A delivered test message
+shows that the server accepts the token; that the scheduled run can read the token
+file is what the placement of `token_file` is checked for. The finding `send-test` is `ok` when the message was delivered, and a
 problem (exit 1) with the delivery error when it was not, when `notify.ntfy` is not
 configured or when the configuration is not valid. The error never holds the topic or the
 token; it may hold the address of the server ("no answer: dial tcp 127.0.0.1:80: connection

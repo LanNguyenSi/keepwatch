@@ -1,8 +1,11 @@
 // Package doctor diagnoses whether keepwatch will work on this host: whether
 // the configuration and the catalog are valid, whether the programs the
 // enabled checks need can be run, whether the state directory is usable, and
-// whether the scheduled run is installed and active. It changes nothing on the
-// host except one short-lived probe file inside the state directory.
+// whether the scheduled run is installed and active. It judges the installed
+// units by what they say (the program, the --config and the ReadWritePaths of
+// their ExecStart), and where a path lies by the placement check of install.
+// It changes nothing on the host except one short-lived probe file inside the
+// state directory.
 //
 // The rule for every finding: doctor must not be green when a check would not
 // work. A program that the execution layer would refuse counts as a problem
@@ -80,7 +83,9 @@ type StateProber func(dir string) StateStatus
 
 // Deps are the things doctor needs from the outside.
 type Deps struct {
-	// ConfigPath is the main configuration file; empty means the default.
+	// ConfigPath is the configuration file given to doctor with --config.
+	// Empty means none was given: doctor then examines the file the installed
+	// services run with, and the default path when none is installed.
 	ConfigPath string
 	// LoadConfig loads the configuration; nil means config.Load.
 	LoadConfig func(path string) (*config.Config, error)
@@ -107,6 +112,9 @@ type Deps struct {
 // Report is the outcome of a doctor run.
 type Report struct {
 	Findings []Finding
+	// ConfigPath is the configuration file the run examined: the one given,
+	// else the one the installed check service runs with, else the default.
+	ConfigPath string
 }
 
 // Problems counts the findings of level Problem.
@@ -147,6 +155,14 @@ func (p reporter) add(l Level, area, format string, a ...any) {
 }
 
 // Run performs all checks.
+//
+// doctor judges what the scheduled run will do, so the configuration it
+// examines is the one the installed services are given (the --config of their
+// ExecStart), not an assumption of its own: without Deps.ConfigPath that is the
+// file of the installed check service, and the default path only when no
+// service is installed. With Deps.ConfigPath that file is examined, and every
+// installed service that runs with another one is a problem and is judged by
+// its own file as well.
 func Run(ctx context.Context, d Deps) Report {
 	var rep Report
 	out := reporter{&rep}
@@ -160,34 +176,21 @@ func Run(ctx context.Context, d Deps) Report {
 		out.add(Problem, "user", "not running as root: sshd -T, ss -p, fail2ban-client, docker and the apt simulation need root, so the checks would fail or see less when run by this user")
 	}
 
-	path := d.ConfigPath
-	if path == "" {
-		path = config.DefaultPath
-	}
-	path = filepath.Clean(path)
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	load := d.LoadConfig
-	if load == nil {
-		load = func(p string) (*config.Config, error) { return config.Load(p) }
-	}
-	cfg, err := load(path)
-	if err != nil {
-		var errs config.Errors
-		if errors.As(err, &errs) {
-			for _, e := range errs {
-				out.add(Problem, "config", "%s", e.Error())
-			}
-		} else {
-			out.add(Problem, "config", "%v", err)
-		}
-	} else {
+	units, unitsErr := d.readUnits()
+	path, source := d.configPath(units)
+	rep.ConfigPath = path
+	main := d.judge(path)
+	cfg := main.cfg
+	if cfg != nil {
 		out.add(OK, "config", "%s is valid (+%d conf.d files)", cfg.Sources.Main, len(cfg.Sources.ConfD))
+	}
+	for _, m := range main.loadErrs {
+		out.add(Problem, "config", "%s", m)
 	}
 
 	cat := d.Catalog
 	if cat == nil {
+		var err error
 		cat, err = catalog.Base()
 		if err != nil {
 			out.add(Problem, "catalog", "%v", err)
@@ -207,16 +210,146 @@ func Run(ctx context.Context, d Deps) Report {
 		d.programs(out, cat, cfg)
 		d.sshRunDir(out, cat, cfg)
 	}
+	// Where the configuration, the token file and the state directory lie: the
+	// check install makes, with its words.
+	for _, p := range main.placement {
+		area := "config"
+		if p.Entry.Role == install.RoleState {
+			area = "state"
+		}
+		out.add(Problem, area, "%s", p.Error())
+	}
 	if cfg != nil {
 		d.notify(out, cfg)
-		d.state(out, cfg, d.anyUnitInstalled())
+		// A state directory with a placement problem is not probed: the probe
+		// writes a file, and the path cannot be relied on.
+		if !install.Blocks(main.placement, filepath.Clean(cfg.StateDir)) {
+			installed := false
+			for _, u := range units {
+				installed = installed || u.ours()
+			}
+			d.state(out, cfg, installed)
+		}
 	}
-	var stateDir string
-	if cfg != nil {
-		stateDir = cfg.StateDir
-	}
-	d.units(ctx, out, path, stateDir, cfg)
+	d.units(ctx, out, units, unitsErr, main, source)
 	return rep
+}
+
+// unitFile is one of the four unit files as it was found.
+type unitFile struct {
+	name, path string
+	content    []byte
+	// err is the error of reading it, fs.ErrNotExist when it is not there.
+	err error
+}
+
+// ours reports whether the file was read and carries the keepwatch marker.
+func (u unitFile) ours() bool { return u.err == nil && install.HasMarker(u.content) }
+
+// service reports whether the file is one of the two services.
+func (u unitFile) service() bool { return strings.HasSuffix(u.name, ".service") }
+
+func (d Deps) unitDir() string {
+	if d.UnitDir == "" {
+		return install.DefaultUnitDir
+	}
+	return d.UnitDir
+}
+
+// readUnits reads the four unit files, in the order of install.UnitNames
+// (services first). The error is the one of opening the unit directory.
+func (d Deps) readUnits() ([]unitFile, error) {
+	if d.FS == nil {
+		return nil, errors.New("no file system")
+	}
+	ud, err := d.FS.OpenDir(d.unitDir())
+	if err != nil {
+		return nil, err
+	}
+	defer ud.Close()
+	var out []unitFile
+	for _, name := range install.UnitNames {
+		u := unitFile{name: name, path: filepath.Join(d.unitDir(), name)}
+		u.content, u.err = ud.ReadFile(name, 64<<10)
+		out = append(out, u)
+	}
+	return out, nil
+}
+
+// cleanAbs reports whether p is a clean absolute path.
+func cleanAbs(p string) bool { return filepath.IsAbs(p) && filepath.Clean(p) == p }
+
+// configPath returns the configuration file this run examines and, for
+// messages, where the choice came from.
+func (d Deps) configPath(units []unitFile) (path, source string) {
+	if d.ConfigPath != "" {
+		// Abs also cleans. A path it cannot make absolute stays as it is, and
+		// judge refuses it.
+		path = d.ConfigPath
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		return path, "given with --config"
+	}
+	for _, u := range units {
+		if !u.ours() || !u.service() {
+			continue
+		}
+		if p := install.Inspect(u.content).ConfigPath; cleanAbs(p) {
+			return p, "the --config of " + u.name
+		}
+	}
+	return filepath.Clean(config.DefaultPath), "the default path"
+}
+
+// judged is one configuration file and what doctor found out about it.
+type judged struct {
+	path string
+	// cfg is nil when the file did not load.
+	cfg *config.Config
+	// loadErrs are the reasons it did not load, one per problem.
+	loadErrs []string
+	// placement are the problems of where the file and the paths it names
+	// lie (install.CheckPlacement).
+	placement []install.PlacementProblem
+}
+
+// judge loads the configuration file at path, the way a scheduled run given
+// that path does, and checks the placement of the file and of the paths it
+// names.
+func (d Deps) judge(path string) judged {
+	j := judged{path: path}
+	if !cleanAbs(path) {
+		j.loadErrs = []string{fmt.Sprintf("%q is not a clean absolute path", path)}
+		return j
+	}
+	load := d.LoadConfig
+	if load == nil {
+		load = func(p string) (*config.Config, error) { return config.Load(p) }
+	}
+	cfg, err := load(path)
+	var errs config.Errors
+	switch {
+	case err == nil:
+		j.cfg = cfg
+	case errors.As(err, &errs):
+		for _, e := range errs {
+			j.loadErrs = append(j.loadErrs, e.Error())
+		}
+	default:
+		j.loadErrs = []string{err.Error()}
+	}
+	paths := install.Paths{ConfigPath: path}
+	if j.cfg != nil {
+		paths.StateDir = filepath.Clean(j.cfg.StateDir)
+		if n := j.cfg.Notify.Ntfy; n != nil {
+			paths.TokenFile = n.TokenFile
+		}
+	}
+	if d.FS != nil {
+		j.placement = install.CheckPlacement(d.FS, install.Manifest(paths))
+	}
+	return j
 }
 
 // enabled lists the catalog entries that are not switched off.
@@ -368,10 +501,6 @@ func (d Deps) state(out reporter, cfg *config.Config, unitsInstalled bool) {
 		out.add(Problem, "state", "internal error: no state prober")
 		return
 	}
-	if h, ok := install.HiddenBy(cfg.StateDir, install.RoleState); ok {
-		out.add(Problem, "state", "state_dir %s is under %s: %s; the scheduled run fails to start. Set state_dir elsewhere (for example /var/lib/keepwatch) and run \"keepwatch install\" again", cfg.StateDir, h.Path, h.Why)
-		return
-	}
 	st := d.State(cfg.StateDir)
 	switch {
 	case st.Err != nil:
@@ -387,40 +516,14 @@ func (d Deps) state(out reporter, cfg *config.Config, unitsInstalled bool) {
 	}
 }
 
-// anyUnitInstalled reports whether a unit file with the keepwatch marker is
-// installed.
-func (d Deps) anyUnitInstalled() bool {
-	if d.FS == nil {
-		return false
-	}
-	unitDir := d.UnitDir
-	if unitDir == "" {
-		unitDir = install.DefaultUnitDir
-	}
-	ud, err := d.FS.OpenDir(unitDir)
-	if err != nil {
-		return false
-	}
-	defer ud.Close()
-	for _, name := range install.UnitNames {
-		if content, err := ud.ReadFile(name, 64<<10); err == nil && install.HasMarker(content) {
-			return true
-		}
-	}
-	return false
-}
-
-// units checks the installed units and the timers. stateDir is empty and cfg
-// nil when the configuration did not load.
-func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir string, cfg *config.Config) {
+// units checks the installed units and the timers. main is the configuration
+// this run examined and source says where its path came from.
+func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsErr error, main judged, source string) {
 	if d.FS == nil || d.Runner == nil {
 		out.add(Problem, "units", "internal error: no file system or runner")
 		return
 	}
-	unitDir := d.UnitDir
-	if unitDir == "" {
-		unitDir = install.DefaultUnitDir
-	}
+	unitDir := d.unitDir()
 	runDir := d.SystemdRunDir
 	if runDir == "" {
 		runDir = "/run/systemd/system"
@@ -433,43 +536,71 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 		out.add(Problem, "systemd", "systemd is not running on this host (%s is missing): the timers cannot run", runDir)
 	}
 
-	ud, err := d.FS.OpenDir(unitDir)
-	if err != nil {
-		out.add(Problem, "units", "cannot open %s: %v", unitDir, err)
+	if unitsErr != nil {
+		out.add(Problem, "units", "cannot open %s: %v", unitDir, unitsErr)
 		return
 	}
-	defer ud.Close()
+	// A service that runs with another configuration than the one examined
+	// above is judged by its own file, loaded once.
+	others := map[string]judged{}
 	installedAll := true
-	for _, name := range install.UnitNames {
-		p := filepath.Join(unitDir, name)
-		content, err := ud.ReadFile(name, 64<<10)
+	for _, u := range units {
 		switch {
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(u.err, fs.ErrNotExist):
 			installedAll = false
-			out.add(Problem, "units", "%s is not installed; run \"keepwatch install\"", p)
+			out.add(Problem, "units", "%s is not installed; run \"keepwatch install\"", u.path)
 			continue
-		case err != nil:
+		case u.err != nil:
 			installedAll = false
-			out.add(Problem, "units", "%s: %v", p, err)
+			out.add(Problem, "units", "%s: %v", u.path, u.err)
 			continue
-		case !install.HasMarker(content):
+		case !u.ours():
 			installedAll = false
-			out.add(Problem, "units", "%s exists but was not written by keepwatch (no marker comment); \"keepwatch install\" refuses to overwrite it", p)
+			out.add(Problem, "units", "%s exists but was not written by keepwatch (no marker comment); \"keepwatch install\" refuses to overwrite it", u.path)
 			continue
 		}
-		if !strings.HasSuffix(name, ".service") {
+		if !u.service() {
 			continue
 		}
-		in := install.Inspect(content)
-		d.binary(out, p, in.Binary)
-		if stateDir != "" && in.ReadWritePaths != stateDir {
-			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", p, in.ReadWritePaths, stateDir)
+		in := install.Inspect(u.content)
+		if in.Binary == "" {
+			out.add(Problem, "units", "%s has no ExecStart program that doctor can read; run \"keepwatch install\" again", u.path)
+		} else {
+			// The program the service runs as root: it must be there, the
+			// sandbox must show it and only root may be able to change it.
+			for _, p := range install.CheckPlacement(d.FS, install.Manifest(install.Paths{Binary: in.Binary})) {
+				out.add(Problem, "units", "%s: %s", u.path, p.Error())
+			}
 		}
-		d.unitConfig(out, p, in.ConfigPath)
-		d.unitNotify(out, p, in.Notify, cfg)
-		if in.ConfigPath != configPath {
-			out.add(Warn, "units", "%s runs with --config %s, this doctor run used %s", p, in.ConfigPath, configPath)
+		var cfg *config.Config
+		switch {
+		case in.ConfigPath == "":
+			out.add(Problem, "units", "%s has no --config that doctor can read; run \"keepwatch install\" again", u.path)
+			continue
+		case in.ConfigPath == main.path:
+			cfg = main.cfg // judged above
+		default:
+			out.add(Problem, "units", "%s runs with --config %s, but this doctor run examined %s (%s): the findings of the other areas are about that file, not about what this service uses. Run \"keepwatch doctor\" without --config to examine the installed units, or \"keepwatch install --config FILE\" to give both services the file you mean", u.path, in.ConfigPath, main.path, source)
+			j, seen := others[in.ConfigPath]
+			if !seen {
+				j = d.judge(in.ConfigPath)
+				others[in.ConfigPath] = j
+			}
+			for _, m := range j.loadErrs {
+				out.add(Problem, "units", "%s runs with --config %s, which is not valid, so every scheduled run exits 3: %s", u.path, in.ConfigPath, m)
+			}
+			for _, p := range j.placement {
+				out.add(Problem, "units", "%s: %s", u.path, p.Error())
+			}
+			cfg = j.cfg
 		}
+		if cfg == nil {
+			continue // said where the configuration was judged
+		}
+		if stateDir := filepath.Clean(cfg.StateDir); in.ReadWritePaths != stateDir {
+			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", u.path, in.ReadWritePaths, stateDir)
+		}
+		d.unitNotify(out, u.path, in.Notify, cfg)
 	}
 	if installedAll {
 		out.add(OK, "units", "the four unit files in %s carry the keepwatch marker", unitDir)
@@ -507,39 +638,6 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 			// The sandbox only shows when the service runs: nothing above proves it can.
 			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
 		}
-	}
-}
-
-// binary checks the program the installed service runs as root: it must be
-// there and only root may be able to change it or anything above it.
-func (d Deps) binary(out reporter, unit, bin string) {
-	if bin == "" {
-		out.add(Problem, "units", "%s has no ExecStart program that doctor can read; run \"keepwatch install\" again", unit)
-		return
-	}
-	err := install.TrustedPath(d.FS, bin, install.KindFile)
-	switch {
-	case err == nil:
-	case install.IsMissing(err):
-		out.add(Problem, "units", "%s runs %s, which does not exist (%v): the scheduled run fails; install the binary there or run \"keepwatch install\" from the new location", unit, bin, err)
-	default:
-		out.add(Problem, "units", "%s runs %s as root, but it cannot be trusted: %v. Anybody who can change it or a directory above it gets root; install it for example with \"install -o root -g root -m 0755 keepwatch /usr/local/bin/\" and run \"keepwatch install\" again", unit, bin, err)
-	}
-}
-
-// unitConfig checks the configuration file an installed service is given: the
-// service must be able to see it.
-func (d Deps) unitConfig(out reporter, unit, cfgPath string) {
-	if cfgPath == "" {
-		out.add(Problem, "units", "%s has no --config that doctor can read; run \"keepwatch install\" again", unit)
-		return
-	}
-	if h, ok := install.HiddenBy(cfgPath, install.RoleConfig); ok {
-		out.add(Problem, "units", "%s runs with --config %s, which is under %s: %s; the scheduled run exits 3. Move the configuration (for example to /etc/keepwatch) and run \"keepwatch install --config ...\" again", unit, cfgPath, h.Path, h.Why)
-		return
-	}
-	if _, err := d.FS.Lstat(cfgPath); err != nil {
-		out.add(Problem, "units", "%s runs with --config %s, which cannot be read (%v): the scheduled run exits 3", unit, cfgPath, err)
 	}
 }
 

@@ -209,7 +209,10 @@ type Spec struct {
 	Weekly   Weekly
 }
 
-// Validate checks every value that reaches a unit line.
+// Validate checks the grammar of every value that reaches a unit line. Where
+// the paths lie (whether the services see them, whether only root can change
+// them) is not its business: that needs the file system and is the placement
+// check, CheckPlacement.
 func (s Spec) Validate() error {
 	var errs []string
 	chk := func(what, p string) {
@@ -222,14 +225,6 @@ func (s Spec) Validate() error {
 	chk("state_dir", s.StateDir)
 	if s.StateDir == "/" {
 		errs = append(errs, "state_dir must not be /")
-	}
-	for _, u := range []struct {
-		what, p string
-		role    Role
-	}{{"keepwatch binary", s.Binary, RoleBinary}, {"configuration file", s.ConfigPath, RoleConfig}, {"state_dir", s.StateDir, RoleState}} {
-		if h, ok := HiddenBy(u.p, u.role); ok {
-			errs = append(errs, fmt.Sprintf("%s \"%s\" is under %s: %s; put it elsewhere", u.what, quote(u.p), h.Path, h.Why))
-		}
 	}
 	if s.Interval.N == 0 {
 		errs = append(errs, "interval is not set")
@@ -253,23 +248,34 @@ const (
 	RoleState              // state_dir, in ReadWritePaths
 )
 
-// sandboxPaths lists, next to the hardening constants below that cause them,
-// the paths a service does not see (or cannot rely on) and the roles for
-// which that is refused. option is the option that hides the path, or says why
-// it cannot be used; a test checks that every option of the form NAME=yes is
-// still in the hardening, so removing one forces this table to be revisited.
-var sandboxPaths = []struct {
+// sandboxEntry is one line of sandboxPaths.
+type sandboxEntry struct {
+	// option is the line of serviceHardening that causes the entry.
 	option string
 	why    string
 	paths  []string
 	roles  []Role
-}{
+}
+
+// sandboxPaths lists, next to the hardening constants below that cause them,
+// the paths a service does not see (or cannot rely on) and the roles for
+// which that is refused. The table is matched against the text of a path, so
+// it is only right for a path without a symbolic link in it: the placement
+// check refuses those (TrustedPath).
+//
+// A test ties the table to serviceHardening in both directions: every option
+// there is classified as hiding paths or not, an option that hides paths has
+// an entry here, and every entry here names an option that is set. Adding or
+// changing an option therefore means revisiting this table.
+var sandboxPaths = []sandboxEntry{
 	{"PrivateTmp=yes", "the service has its own empty /tmp and /var/tmp (PrivateTmp=yes), so the path does not exist for it",
 		[]string{"/tmp", "/var/tmp"}, []Role{RoleBinary, RoleConfig, RoleState}},
 	{"PrivateDevices=yes", "the service has its own /dev (PrivateDevices=yes), so the path does not exist for it",
 		[]string{"/dev"}, []Role{RoleBinary, RoleConfig, RoleState}},
-	{"volatile", "it lives on a tmpfs that is empty after a reboot, and ReadWritePaths needs the directory to exist when the service starts",
-		[]string{"/run", "/var/run", "/dev/shm"}, []Role{RoleState}},
+	{"ProtectKernelModules=yes", "the service cannot reach the kernel module directory (ProtectKernelModules=yes), so the path does not exist for it",
+		[]string{"/usr/lib/modules", "/lib/modules"}, []Role{RoleBinary, RoleConfig, RoleState}},
+	{"ReadWritePaths={{state}}", "it lives on a tmpfs that is empty after a reboot, and ReadWritePaths needs the directory to exist when the service starts",
+		[]string{"/run", "/var/run", "/var/lock", "/dev/shm"}, []Role{RoleState}},
 }
 
 // Hidden is a sandbox path a value lies under.
