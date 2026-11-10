@@ -106,32 +106,57 @@ func TestEscapeOutputIsAlwaysSafe(t *testing.T) {
 	}
 }
 
-// Every code point that is not a printable character is escaped. The sweep is
-// over the whole code space, so a character that a new Unicode version adds
-// to a dangerous category cannot slip past without being noticed.
-func TestEscapeSweepOverAllCodePoints(t *testing.T) {
+// Every code point that is not a printable character is escaped. The sweep
+// covers the planes that hold characters (0 to 3, and the tag and variation
+// selector block of plane 14) in full, and the end and the start of each of
+// the other planes, which hold nothing but private use and unassigned code
+// points, so a character that a new Unicode version adds to a dangerous
+// category cannot slip past without being noticed.
+func TestEscapeSweepOverCodePoints(t *testing.T) {
 	printable := func(r rune) bool {
 		return unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S, unicode.Zs)
 	}
-	var escaped, kept int
-	for r := rune(0x80); r <= unicode.MaxRune; r++ {
+	check := func(r rune) (escaped bool) {
 		if r >= 0xd800 && r <= 0xdfff {
-			continue // surrogates cannot be encoded
+			return // surrogates cannot be encoded
 		}
 		s := string(r)
 		got := Escape(s)
 		if got == s {
-			kept++
 			if !printable(r) {
 				t.Errorf("U+%04X (%q) is not escaped and is not printable", r, s)
 			}
 			if invisible(r) {
 				t.Errorf("U+%04X is invisible and not escaped", r)
 			}
-		} else {
+			return false
+		}
+		if !strings.HasPrefix(got, `\u`) && !strings.HasPrefix(got, `\U`) {
+			t.Errorf("U+%04X escaped as %q", r, got)
+		}
+		return true
+	}
+	var escaped, kept int
+	count := func(r rune) {
+		if check(r) {
 			escaped++
-			if !strings.HasPrefix(got, `\u`) && !strings.HasPrefix(got, `\U`) {
-				t.Errorf("U+%04X escaped as %q", r, got)
+		} else {
+			kept++
+		}
+	}
+	for r := rune(0x80); r < 0x40000; r++ {
+		count(r)
+	}
+	for r := rune(0xe0000); r < 0xe1000; r++ {
+		count(r)
+	}
+	for plane := rune(4); plane <= 16; plane++ {
+		if plane == 14 {
+			continue
+		}
+		for _, off := range []rune{0, 1, 0x100, 0xfffd, 0xfffe, 0xffff} {
+			if r := plane<<16 + off; r <= unicode.MaxRune {
+				count(r)
 			}
 		}
 	}

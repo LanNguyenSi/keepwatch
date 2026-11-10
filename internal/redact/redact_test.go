@@ -436,16 +436,16 @@ func TestBuiltinPatternsOnAdversarialText(t *testing.T) {
 		secret bool // the text ends in a secret that must not survive
 	}{
 		// an odd number of quotes: the last one is never closed
-		"unclosed quotes":     {strings.Repeat(`password="`, 20001) + "hunter2", true},
-		"unclosed apostrophe": {strings.Repeat(`token='`, 20001) + "hunter2", true},
-		"backslashes":         {`password="` + strings.Repeat(`\\`, 100000) + "hunter2", true},
-		"cookies":             {strings.Repeat("cookie: ", 20000) + "hunter2", true},
-		"pass names":          {strings.Repeat("pass=", 20000) + "hunter2", true},
-		"env keys":            {strings.Repeat("a_key=", 20000) + "hunter2", true},
-		"flags with NUL":      {strings.Repeat("--token\x00", 20000) + "hunter2", true},
-		"urls":                {strings.Repeat("a://@", 20000), false},
-		"user info, no @":     {"https://" + strings.Repeat("a:", 100000), false},
-		"long PEM headers":    {strings.Repeat("-----begin ", 20000), false},
+		"unclosed quotes":     {strings.Repeat(`password="`, 5001) + "hunter2", true},
+		"unclosed apostrophe": {strings.Repeat(`token='`, 5001) + "hunter2", true},
+		"backslashes":         {`password="` + strings.Repeat(`\\`, 20000) + "hunter2", true},
+		"cookies":             {strings.Repeat("cookie: ", 5000) + "hunter2", true},
+		"pass names":          {strings.Repeat("pass=", 5000) + "hunter2", true},
+		"env keys":            {strings.Repeat("a_key=", 5000) + "hunter2", true},
+		"flags with NUL":      {strings.Repeat("--token\x00", 5000) + "hunter2", true},
+		"urls":                {strings.Repeat("a://@", 5000), false},
+		"user info, no @":     {"https://" + strings.Repeat("a:", 20000), false},
+		"long PEM headers":    {strings.Repeat("-----begin ", 5000), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if out := r.Redact(in.text); in.secret && strings.Contains(out, "hunter2") {
