@@ -429,7 +429,8 @@ cleans them (they differ in a control character, say) are still two items. The
 checks that name a path, a mount point or a free text clean the subject before
 it becomes one (non-printable characters become `?`, long names are cut):
 `cert_expiry` (file path), `disk_usage` (mount point), the TCP findings of
-`docker_exposure` and the warnings of `authorized_keys` (paths, patterns, lines).
+`docker_exposure` and the path, pattern and line warnings of `authorized_keys`
+(its other warnings, such as an expected user or key not found, keep the raw text).
 There, two names that differ only in a control character, or only after the cut,
 are one item, and a change between them is not seen.
 
