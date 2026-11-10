@@ -99,6 +99,44 @@ status transitions, the lists of still failing and warning checks, the counts,
 the exit code, `fail_on` and the wording of each summary without its numbers, versions and placeholders) from the raw and the rewritten report, and fails
 when they differ. A rewrite cannot hide a status or a check id.
 
+## Sandbox measurement
+
+```sh
+make systemd                          # Ubuntu 22.04 and 24.04, needs docker and go
+test/systemd/run.sh 24.04             # one release
+test/systemd/run.sh -update           # rewrite the measured files after a deliberate change
+```
+
+The installed services run in a sandbox, and `install` and `doctor` refuse every path
+the sandbox would take away from them ([Where the paths must lie](#where-the-paths-must-lie)).
+They decide that from a table of paths. `test/systemd/` checks the table against a real
+sandbox, on a container per release whose PID 1 is systemd (`keepwatch-systemd:22.04`,
+`keepwatch-systemd:24.04`, privileged, the Ubuntu base pinned by digest):
+
+1. `keepwatch install`, then a probe unit that is the installed check service with
+   another program. It prints the device and inode of some two hundred directories; the
+   same list is taken on the host before and after. A directory whose pair differs is
+   one the service does not see (`hidden`). Inside a hidden directory the ones that are
+   the host's all the same are listed too (`visible`), and so are the volatile and
+   kernel file systems of the mount table (`mount`) and the links that lead into any of
+   it (`link`).
+2. For every directory of that list keepwatch is asked: `install` with a `state_dir`
+   below it (a real install, which must refuse and create nothing), with a token file
+   and with a configuration below it (where a file can be created), and `doctor` for
+   units whose binary lies below it. Each must refuse and name the path.
+3. The list must equal `test/systemd/measured/<release>.txt`.
+
+`go test` then ties those files to the table, in both directions
+(`TestSandboxPathsFollowTheMeasuredSandbox`): every measured line is refused for every
+role by an entry that says the right thing about it, and every entry of the table is
+borne out by a line. So the table cannot claim that the sandbox hides a directory that
+it does not hide, and a directory that a new systemd hides makes `make systemd` fail
+until the table knows it.
+
+The measurement depends on the kernel and the container runtime as well (`/proc` counts
+as hidden because a service gets its own instance of it on current kernels). It is a
+local target; no workflow runs it.
+
 ## Configuration
 
 The main file is `/etc/keepwatch/keepwatch.yaml` (override with
@@ -896,7 +934,9 @@ The rule, for each path:
      control group).
 
    The options of the units are tied to this list by a test: an option cannot be
-   added, changed or removed without the list being judged again.
+   added, changed or removed without the list being judged again. The list is also
+   held to what a real sandbox was measured to hide, see
+   [Sandbox measurement](#sandbox-measurement).
 2. Every component of the path, from `/` down to the path itself, is looked at with
    `lstat` and must be no symbolic link, be owned by root and not be writable by
    group or other. So a configuration below `/home/someone` is refused even when the

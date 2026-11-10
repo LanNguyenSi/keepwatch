@@ -279,9 +279,13 @@ var every = []Role{RoleBinary, RoleConfig, RoleState}
 // (TrustedPath). /var/run and /var/lock, which are links into /run on every
 // supported host, are named here so that the message says where they lead.
 //
-// A test ties the table to serviceHardening in both directions: every option
-// there is classified as hiding paths or not, an option that hides paths has
-// an entry here, and an entry that names an option names one that is set.
+// Two tests keep the table honest. One ties it to serviceHardening in both
+// directions: every option there is classified as hiding paths or not, an
+// option that hides paths has an entry here, and an entry that names an option
+// names one that is set. The other ties it to what a real sandbox was measured
+// to do (test/systemd): every hidden directory and every volatile or kernel
+// file system of the measurement is refused here, and every entry here is
+// borne out by a line of the measurement.
 var sandboxPaths = []sandboxEntry{
 	{"PrivateTmp=yes", true, "the service has its own empty /tmp and /var/tmp (PrivateTmp=yes), so the path does not exist for it",
 		[]string{"/tmp", "/var/tmp"}, every},

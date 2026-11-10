@@ -416,7 +416,8 @@ func couplingErrors(hardening string, table []sandboxEntry, classes map[string]o
 // that names an option names one that is set and that hides paths. So an
 // option cannot be added, changed or removed without this table being looked
 // at again. An entry may also name no option (what is tied to no single one);
-// such an entry is held to the same form.
+// such an entry is held to the same form, and to the measurement of a real
+// sandbox by the test of the measured files.
 func TestSandboxPathsFollowTheHardening(t *testing.T) {
 	for _, e := range couplingErrors(serviceHardening, sandboxPaths, hardeningClasses) {
 		t.Error(e)

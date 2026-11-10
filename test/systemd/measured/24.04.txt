@@ -1,0 +1,30 @@
+# What the sandbox of the keepwatch services does to the file system of an
+# Ubuntu host, measured by test/systemd/run.sh with systemd as PID 1.
+#
+# hidden DIR: the service sees another directory at DIR than the host, or
+#   none. Directories below a hidden one are left out, except:
+# visible DIR: DIR lies below a hidden directory, and the service sees the
+#   directory of the host there all the same. Directories below it are left out.
+# mount DIR TYPE: a file system that does not keep files over a reboot, or
+#   that belongs to the kernel, is mounted at DIR. Mounts below a listed one
+#   are left out.
+# link PATH DIR: PATH is a symbolic link to DIR, and DIR lies in a hidden
+#   directory or on such a file system.
+hidden /dev
+hidden /lib/modules
+hidden /proc
+hidden /run/credentials
+hidden /run/systemd/incoming
+hidden /tmp
+hidden /usr/lib/modules
+hidden /var/tmp
+visible /dev/hugepages
+visible /dev/mqueue
+visible /dev/pts
+visible /dev/shm
+mount /dev tmpfs
+mount /proc proc
+mount /run tmpfs
+mount /sys sysfs
+link /var/lock /run/lock
+link /var/run /run

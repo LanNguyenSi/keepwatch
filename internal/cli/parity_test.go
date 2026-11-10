@@ -44,8 +44,11 @@ import (
 //     model asks, for the binary, the configuration, the token file and
 //     ReadWritePaths of the unit, where the kernel ends up (symbolic links
 //     resolved, which only this model does and the product never) and whether
-//     the sandbox table hides that place. The real behaviour of systemd for
-//     the same hosts is in the evidence of the task (two Ubuntu releases).
+//     the sandbox table hides that place. That makes the model as good as the
+//     table and no better: a place the real sandbox hides and the table does
+//     not know passes here. The table itself is held to a sandbox that was
+//     measured under systemd (test/systemd, and the test of the measured
+//     files in package install).
 type jail struct {
 	t    *testing.T
 	base string

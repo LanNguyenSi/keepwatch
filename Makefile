@@ -5,7 +5,7 @@ PKG     := github.com/LanNguyenSi/keepwatch/internal/version
 LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PKG).Date=$(DATE)
 STATICCHECK ?= staticcheck
 
-.PHONY: build test lint e2e clean
+.PHONY: build test lint e2e systemd clean
 
 build:
 	mkdir -p bin
@@ -22,6 +22,9 @@ lint:
 
 e2e:
 	test/e2e/run.sh
+
+systemd:
+	test/systemd/run.sh
 
 clean:
 	rm -rf bin dist
