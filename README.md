@@ -83,6 +83,9 @@ More rules, all reported with `file:line`:
   user; it refuses to follow symlinks, and `--force` only replaces a
   regular file.
 
+- `redact.patterns` is an optional list of extra redaction patterns, see
+  [Redaction](#redaction).
+
 ```sh
 keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml
@@ -300,12 +303,190 @@ confirmed and says in its summary that the picture is partial.
 Each expired exception is reported as its own `exception_expired` result
 (severity low).
 
+## Running a check
+
+```sh
+keepwatch check [--config FILE] [--format text|json|markdown] [--no-state] [--fail-on SEVERITY]
+```
+
+`check` loads the configuration, runs every enabled check of the catalog,
+compares the result with the previous run, prints a report and stores the
+result as the new "previous run".
+
+| Flag | Meaning |
+|---|---|
+| `--config FILE` | main configuration file (default `/etc/keepwatch/keepwatch.yaml`) |
+| `--format` | `text` (default), `json` or `markdown` |
+| `--no-state` | only check: the state of the last run is neither read nor written, and the report has no comparison |
+| `--fail-on SEVERITY` | lowest severity that makes the exit code 1: `info`, `low`, `medium` (default), `high`, `critical` |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | no result counts at `--fail-on` |
+| 1 | at least one result counts at `--fail-on` |
+| 2 | usage error (unknown flag, bad `--format` or `--fail-on`, extra argument) |
+| 3 | keepwatch could not do its job: invalid configuration, a state directory that cannot be trusted or a state that cannot be saved, an interrupted run, a failed write of the report |
+
+What counts for exit code 1, per status, when the check's severity is at least
+`--fail-on`:
+
+| Status | Counts | Why |
+|---|---|---|
+| `fail` | yes | a deviation |
+| `error` | yes | the check could not be evaluated; an unknown state must not look green |
+| `warn` | only for the `authorized_keys` check | a warn there can stand for keys that were never examined; every other warn is a soft deviation and leaves the exit code at 0 |
+| `pass`, `skipped`, `excepted` | no | an excepted failure is covered by a dated exception with a reason |
+
+The expired-exception result (`exception_expired`) is a `fail` of severity low,
+so it counts only with `--fail-on low` or `--fail-on info`.
+
+The exit code depends on the current results only, never on the comparison with
+the last run: a timer that runs `check` every few hours sees exit 1 for as long
+as the host stays bad. The comparison decides what is worth a notification.
+Exit code 3 wins over 1: if the state could not be handled, the run is not
+reliable, even when the report (which is still printed) shows findings.
+
+### The comparison with the last run
+
+Per check the report lists, in the order of the checks:
+
+- `new_failure`: the check fails now and did not before (from `pass`, `skipped`,
+  `excepted`, `warn` or `error`);
+- `fixed`: it failed and passes now;
+- `status_change`: every other change of status (`pass` to `error`, `fail` to
+  `warn`, `excepted` to `pass`, ...);
+- `check_added` and `check_removed`: the catalog gained or lost the check;
+- for a check that is `fail` (or `warn`) in both runs: `subject_new` and
+  `subject_gone` for items that appeared or disappeared, and `count_change` when
+  the check lists a capped number of items (see below);
+- the checks that keep failing or warning unchanged ("still failing", "still
+  warning").
+
+A change is marked as an alert (worth a notification) when a check starts to
+fail or to be in `error`, when a new check is failing or in `error`, when a
+failing check has a new item or a larger item total, and when an
+`authorized_keys` check starts to warn, is new and warns, or has a new warn item.
+Everything else (fixed, gone items, a status change to `skipped`, `excepted` or
+a `warn` of another check) is reported without the alert mark.
+
+Two rules keep the comparison honest:
+
+- An `error` is a partial picture: the check could not see everything. Its
+  evidence is never compared item by item; the change of status is reported once.
+- A check that has more than 100 items lists the first 99 sorted by subject and a
+  marker "(N more not shown)". The marker is not an item: a change of N never
+  produces new or gone subjects. With a capped list, the direction that cannot
+  be told is not reported (an item that is listed now may have been hidden
+  before; one that is no longer listed may only be hidden now) and the totals
+  are compared instead.
+
+Items are compared by the SHA-256 of their raw subject, so two subjects that
+look the same after cleaning (they differ in a control character, say) are still
+two items.
+
+### State
+
+The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
+with `schema_version`, the time of the run and, per check, its id, kind, status,
+severity and failing items (hash and cleaned, redacted subject). It holds no
+evidence detail text and no summaries.
+
+keepwatch runs as root and the state decides what the operator is told, so it is
+checked:
+
+- `state_dir` is cleaned with `filepath.Clean` and must be absolute. It is created
+  with mode 0700 if it does not exist; otherwise it must be a real directory (not
+  a symlink) owned by root or the running user that group and other cannot write
+  to. Ancestors above it are not examined (known limit): they must be root-owned.
+- The state file is opened without following links and checked on the open
+  descriptor: a regular file of at most 4 MiB, owned by root or the running user,
+  not writable by group or other.
+- It is written atomically: a temporary file in the same directory (created
+  exclusively, mode 0600), flushed, renamed over `state.json`, then the directory
+  is flushed. If a step fails, the previous file stays and the temporary file is
+  removed.
+
+Recovery. A missing state file is a first run: a baseline, no changes are
+reported. A state file that is a symlink, foreign-owned, group- or
+other-writable, too large, truncated, not valid JSON, of another schema version
+or invalid is reported as a warning (stderr and in the report) and the run is a
+new baseline; it is never an abort and never a silent "nothing changed". The
+file is replaced at the end of the run, so nothing needs repairing; to start from
+scratch, delete `state.json`. A state directory that cannot be trusted (or a
+state that cannot be saved) is different: the report is still printed, state is
+not read or written, and the exit code is 3, because the next run could not be
+compared reliably.
+
+The state is written after a successful run, never after an interrupted one. A
+manual `keepwatch check` counts as a run: it moves the "previous run" forward,
+so a scheduled run after it reports changes only since that manual run. Use
+`--no-state` for a look that must not do that.
+
+### Output safety
+
+Text in a report comes from probes and can carry what a local user chose (a
+container name, a mount point, a file path) or a secret that someone put in a
+command line. Every string of a report is cleaned before it is printed, whatever
+the format:
+
+1. secrets are replaced with `[REDACTED]` (see [Redaction](#redaction));
+2. control characters are escaped into visible sequences: C0 controls and DEL
+   (`\n`, `\r`, `\t`, `\x1b`, ...), C1 controls (`\u0085`), Unicode format
+   characters including the bidirectional overrides, zero-width characters and
+   the byte order mark, line and paragraph separators (`\u2028`), the right-to-left override (`\u202e`), and bytes that
+   are not valid UTF-8 (`\xff`), so an escape sequence cannot move the cursor,
+   set a window title, forge a line or reverse the text;
+3. the result is cut at 2000 characters.
+
+JSON is produced by `encoding/json` only. In Markdown, untrusted text appears
+only in code spans whose fence is longer than any run of backticks in the text,
+so it cannot open a link, an image, HTML or a heading; pipes are escaped in table
+cells. In the text format every field is one line built by keepwatch.
+
+### Redaction
+
+Built-in patterns, applied before escaping, so a multi-line private key is still
+one block when it is matched:
+
+- PEM private key blocks (also one cut off before its end line);
+- `name=value`, `name: value` and `"name": "value"` when the name ends in
+  `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `access_key`,
+  `private_key`, `credential` or `credentials` (`token_file` and
+  `passwordauthentication` are left alone);
+- `--password value` style flags, `Authorization: ...` values, bearer tokens;
+- URLs with credentials (`scheme://user:password@host`, `scheme://token@host`);
+- AWS access key ids, GitHub tokens (`ghp_`, `github_pat_`, ...), ntfy tokens
+  (`tk_`), Slack tokens, Google API keys, Stripe keys and JSON web tokens.
+
+Redaction is best effort: it knows the shapes above and cannot know a secret that
+has none. The probes keep secrets out of evidence in the first place (they print
+fingerprints and counts, never file contents).
+
+Extra patterns go in the configuration:
+
+```yaml
+redact:
+  patterns:
+    - 'corp-[0-9]{4}'          # the whole match is replaced
+    - 'session=([a-z0-9]+)'    # a capturing group: only the group is replaced
+```
+
+Patterns use RE2 syntax (no backtracking, no lookahead). They are compiled when
+the configuration is loaded: at most 32 patterns of at most 256 bytes, none may
+match the empty string, and a bad one is a configuration error with file and
+line. Lists in `conf.d` files are appended to the main file's list. The redaction
+function (`redact.Redactor.Clean`) is what the notification code uses as well.
+
 ## Status
 
 Pre-MVP. The command line skeleton, the program execution layer, the
-strict configuration loader and the check engine with twelve check kinds exist;
-`config check` and `init` are implemented, while the commands (`check`,
-`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
+strict configuration loader, the check engine with twelve check kinds, the state
+of the last run, the comparison and the text, JSON and Markdown reports exist;
+`check`, `config check` and `init` are implemented, while the commands
+(`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
+There is no notification yet.
 
 ## License
 

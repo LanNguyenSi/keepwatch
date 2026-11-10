@@ -14,7 +14,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/version"
 )
 
-// Exit codes.
+// Exit codes. ExitInternal and ExitNotImplemented are both 3.
 const (
 	ExitOK             = 0
 	ExitError          = 1
@@ -43,6 +43,12 @@ var commands = []command{
 // Run executes the CLI with args (without the program name) and returns the
 // process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	e, stop := prodEnv()
+	defer stop()
+	return dispatch(e, args, stdout, stderr)
+}
+
+func dispatch(e env, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage(stderr)
 		return ExitUsage
@@ -58,7 +64,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runConfig(rest, stdout, stderr)
 	case "init":
 		return runInit(rest, stdout, stderr)
-	case "check", "report", "doctor", "install", "uninstall":
+	case "check":
+		return runCheck(e, rest, stdout, stderr)
+	case "report", "doctor", "install", "uninstall":
 		return runStub(name, rest, stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "keepwatch: unknown command %q\n", name)
@@ -88,6 +96,8 @@ func parse(name string, args []string, stdout, stderr io.Writer, define func(*fl
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			fmt.Fprintf(stdout, "Usage: keepwatch %s\n", name)
+			fs.SetOutput(stdout)
+			fs.PrintDefaults()
 			return ExitOK, true
 		}
 		return ExitUsage, true
