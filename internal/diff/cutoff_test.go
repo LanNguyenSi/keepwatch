@@ -32,6 +32,8 @@ func list(hidden int, items ...string) state.Check {
 	return c
 }
 
+func ptr(s string) *string { return &s }
+
 // noCutoff is c as an older state file would hold it.
 func noCutoff(c state.Check) state.Check {
 	c.Cutoff = nil
@@ -98,6 +100,15 @@ func TestCappedListsAreComparedBelowTheCutoff(t *testing.T) {
 		{name: "an item that was excepted and is not any more is new, even in a capped list",
 			prev: list(5, "b", "d!", "f", "h"), cur: list(5, "b", "d", "f", "h"),
 			want: []string{"subject_new a d ALERT"}},
+		{name: "an excepted item that cannot be placed is still known to have been listed: new when it stops being excepted",
+			prev: list(5, "b", "d!~", "f", "h"), cur: list(5, "b", "d~", "f", "h"),
+			want: []string{"subject_new a d ALERT"}},
+		{name: "an item that cannot be placed and is excepted now is gone: it is listed",
+			prev: list(5, "b", "d~", "f", "h"), cur: list(5, "b", "d!~", "f", "h"),
+			want: []string{"subject_gone a d"}},
+		{name: "everything up to the cutoff counts as listed, the cutoff itself too",
+			prev: func() state.Check { c := list(5, "b", "d"); c.Cutoff = ptr("f"); return c }(), cur: list(4, "b", "d", "f"),
+			want: []string{"subject_new a f ALERT"}},
 		{name: "an item that is excepted now is gone, even in a capped list",
 			prev: prev, cur: list(5, "b", "d!", "f", "h"),
 			want: []string{"subject_gone a d"}},

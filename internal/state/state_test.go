@@ -855,6 +855,39 @@ func TestFileThatGrowsAfterTheSizeCheckIsStillCapped(t *testing.T) {
 	}
 }
 
+// The message names the owners that would have been accepted: as root only
+// uid 0, otherwise uid 0 and the running user.
+func TestOwnerMessagesNameTheAcceptedUIDs(t *testing.T) {
+	old := getuid
+	defer func() { getuid = old }()
+	for _, running := range []int{0, 1000} {
+		getuid = func() int { return running }
+		foreign := func(fi fs.FileInfo) (int, error) { return 4242, nil }
+		want := "want " + wantOwner(running)
+
+		s, _ := newStore(t, WithOwnerOf(foreign))
+		if err := s.Save(sample()); err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("running as %d: directory message %v, want it to end in %q", running, err, want)
+		}
+		// A foreign-owned file in a directory that is accepted.
+		s2, _ := newStore(t, WithOwnerOf(func(fi fs.FileInfo) (int, error) { return 0, nil }))
+		mustSave(t, s2, sample())
+		s3, err := Open(filepath.Dir(s2.Path()), WithOwnerOf(func(fi fs.FileInfo) (int, error) {
+			if fi.IsDir() {
+				return 0, nil
+			}
+			return 4242, nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lr, err := s3.Load()
+		if err != nil || !strings.HasSuffix(lr.Problem, want) {
+			t.Errorf("running as %d: file message %q (%v), want it to end in %q", running, lr.Problem, err, want)
+		}
+	}
+}
+
 func TestWantOwnerNamesTheAcceptedUIDs(t *testing.T) {
 	for running, want := range map[int]string{0: "uid 0", 1000: "uid 0 or 1000", 501: "uid 0 or 501"} {
 		if got := wantOwner(running); got != want {

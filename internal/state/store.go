@@ -94,7 +94,10 @@ func (s *Store) Path() string { return filepath.Join(s.dir, FileName) }
 
 // trustedOwner reports whether uid may own the state directory and file: root
 // or the user keepwatch runs as.
-func trustedOwner(uid int) bool { return uid == 0 || uid == os.Getuid() }
+func trustedOwner(uid int) bool { return uid == 0 || uid == getuid() }
+
+// getuid is the user keepwatch runs as; tests replace it.
+var getuid = os.Getuid
 
 // wantOwner names the owners trustedOwner accepts, for a message: "uid 0" when
 // keepwatch runs as root, "uid 0 or N" otherwise.
@@ -121,7 +124,7 @@ func (s *Store) checkDirInfo(fi fs.FileInfo) error {
 		return err
 	}
 	if !trustedOwner(uid) {
-		return fmt.Errorf("%s: owned by uid %d, want %s", s.dir, uid, wantOwner(os.Getuid()))
+		return fmt.Errorf("%s: owned by uid %d, want %s", s.dir, uid, wantOwner(getuid()))
 	}
 	return nil
 }
@@ -240,7 +243,7 @@ func (s *Store) Load() (LoadResult, error) {
 		return LoadResult{Problem: fmt.Sprintf("cannot tell who owns %s: %v", s.Path(), err)}, nil
 	}
 	if !trustedOwner(uid) {
-		return LoadResult{Problem: fmt.Sprintf("%s is owned by uid %d, want %s", s.Path(), uid, wantOwner(os.Getuid()))}, nil
+		return LoadResult{Problem: fmt.Sprintf("%s is owned by uid %d, want %s", s.Path(), uid, wantOwner(getuid()))}, nil
 	}
 	s.hooks.afterStat()
 	b, err := readCapped(f, MaxFileSize)

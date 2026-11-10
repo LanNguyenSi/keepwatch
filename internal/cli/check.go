@@ -166,7 +166,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 				in.Warnings = append(in.Warnings, "previous state not used, this run is a new baseline: "+lr.Problem)
 			}
 		}
-		saveState = store != nil && !stateFailed
+		saveState = !stateFailed
 	}
 	if stateFailed {
 		code = ExitInternal

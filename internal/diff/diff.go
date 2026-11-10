@@ -289,14 +289,15 @@ func itemChanges(p, c *state.Check) []Change {
 }
 
 // wasVisible reports whether run r, in which item it is not listed, would have
-// listed it had it existed: the list of r is complete, or the item sorts
-// before the cutoff of r. An item that cannot be placed (no cutoff, or a
+// listed it had it existed: the list of r is complete, or the item sorts at or
+// before the cutoff of r (the cutoff is the last item listed, so everything up
+// to it was). An item that cannot be placed (no cutoff, or a
 // subject that is not stored as it was) is not known to be visible.
 func wasVisible(r *state.Check, it state.Item) bool {
 	if !r.Capped() {
 		return true
 	}
-	return r.Cutoff != nil && it.Exact && it.Subject < *r.Cutoff
+	return r.Cutoff != nil && it.Exact && it.Subject <= *r.Cutoff
 }
 
 // keys returns the keys of all items of c, excepted ones too.
