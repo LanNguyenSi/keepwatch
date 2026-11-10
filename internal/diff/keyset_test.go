@@ -42,8 +42,10 @@ func (t tally) gones() int { return len(t.named[SubjectGone]) + t.hiddenGone }
 
 func cleaner() func(string) string { return redact.Default().Clean }
 
-// The three findings of the last review of the cutoff design, as table cases.
-func TestFindingsOfTheCutoffDesign(t *testing.T) {
+// The cases the earlier cutoff based comparison got wrong, as table cases: a
+// new item whose subject is changed for display, a list that is cut on one side
+// only, and items an exception covers.
+func TestCasesTheCutoffComparisonGotWrong(t *testing.T) {
 	clean := cleaner()
 	base := many("s", 150)
 	without := func(drop string, add ...string) []string {
@@ -64,50 +66,50 @@ func TestFindingsOfTheCutoffDesign(t *testing.T) {
 		hiddenGone        int
 		alert             bool
 	}{
-		// F-A: a new item whose subject is changed for display used to be
-		// invisible when it replaced a hidden item.
-		{name: "F-A escaped subject replaces a hidden item",
+		// A new item whose subject is changed for display (escaped, redacted,
+		// cut) used to be invisible when it replaced a hidden item.
+		{name: "non-exact subject: escaped subject replaces a hidden item",
 			prev: big(clean, "a", result.Fail, base...), cur: big(clean, "a", result.Fail, without("s-149", "zz\x1b[31mevil\nline")...),
 			hiddenNew: 1, hiddenGone: 1, alert: true},
-		{name: "F-A redacted subject replaces a hidden item",
+		{name: "non-exact subject: redacted subject replaces a hidden item",
 			prev: big(clean, "a", result.Fail, base...), cur: big(clean, "a", result.Fail, without("s-149", "zz password=hunter2")...),
 			hiddenNew: 1, hiddenGone: 1, alert: true},
-		{name: "F-A a subject with a control character instead of a hidden lookalike",
+		{name: "non-exact subject: a subject with a control character instead of a hidden lookalike",
 			prev: big(clean, "a", result.Fail, append(without("s-149"), "zz\x01")...), cur: big(clean, "a", result.Fail, append(without("s-149"), "zz\x02")...),
 			hiddenNew: 1, hiddenGone: 1, alert: true},
-		{name: "F-A over-long subject replaces a hidden item",
+		{name: "non-exact subject: over-long subject replaces a hidden item",
 			prev: big(clean, "a", result.Fail, base...), cur: big(clean, "a", result.Fail, without("s-149", "zz"+strings.Repeat("x", 500))...),
 			hiddenNew: 1, hiddenGone: 1, alert: true},
-		{name: "F-A the same replacement among the listed items is named with its display text",
+		{name: "non-exact subject: the same replacement among the listed items is named with its display text",
 			prev: big(clean, "a", result.Fail, base...), cur: big(clean, "a", result.Fail, without("s-149", "a\x01first")...),
 			wantNew: []string{`a\x01first`}, hiddenGone: 1, alert: true},
-		{name: "F-A not escaped and not hidden: the old case still works",
+		{name: "non-exact subject: not escaped and not hidden: the old case still works",
 			prev: big(clean, "a", result.Fail, base...), cur: big(clean, "a", result.Fail, without("s-149", "zz-new")...),
 			hiddenNew: 1, hiddenGone: 1, alert: true},
 
-		// F-B: capped on one side and complete on the other.
-		{name: "F-B capped to complete: the exact number of gone items",
+		// Cut on one side and complete on the other.
+		{name: "cut and complete: capped to complete: the exact number of gone items",
 			prev: bigN("a", result.Fail, base...), cur: bigN("a", result.Fail, many("s", 50)...),
 			wantGone: many("s", 99)[50:], hiddenGone: 51},
-		{name: "F-B complete to capped: the exact number of new items",
+		{name: "cut and complete: complete to capped: the exact number of new items",
 			prev: bigN("a", result.Fail, many("s", 50)...), cur: bigN("a", result.Fail, base...),
 			wantNew: many("s", 99)[50:], hiddenNew: 51, alert: true},
-		{name: "F-B capped to complete with a new item",
+		{name: "cut and complete: capped to complete with a new item",
 			prev: bigN("a", result.Fail, base...), cur: bigN("a", result.Fail, append(many("s", 50), "x-new")...),
 			wantNew: []string{"x-new"}, wantGone: many("s", 99)[50:], hiddenGone: 51, alert: true},
 
-		// F-C: an excepted item is not in the failing set and does not count.
-		{name: "F-C a new excepted item adds nothing",
+		// An excepted item is not in the failing set and does not count.
+		{name: "excepted: a new excepted item adds nothing",
 			prev: bigN("a", result.Fail, many("s", 104)...), cur: bigN("a", result.Fail, append(many("s", 104), "a-new!")...)},
-		{name: "F-C a new excepted item next to a hidden new one counts only the hidden one",
+		{name: "excepted: a new excepted item next to a hidden new one counts only the hidden one",
 			prev: bigN("a", result.Fail, many("s", 104)...), cur: bigN("a", result.Fail, append(many("s", 105), "a-new!")...),
 			hiddenNew: 1, alert: true},
-		{name: "F-C an excepted item that disappears is not gone",
+		{name: "excepted: an excepted item that disappears is not gone",
 			prev: bigN("a", result.Fail, append(many("s", 104), "a-old!")...), cur: bigN("a", result.Fail, many("s", 104)...)},
-		{name: "F-C a listed item that becomes excepted is gone",
+		{name: "excepted: a listed item that becomes excepted is gone",
 			prev: bigN("a", result.Fail, many("s", 104)...), cur: bigN("a", result.Fail, append(many("s", 104)[1:], "s-000!")...),
 			wantGone: []string{"s-000"}},
-		{name: "F-C an excepted item that stops being excepted is new",
+		{name: "excepted: an excepted item that stops being excepted is new",
 			prev: bigN("a", result.Fail, append(many("s", 104)[1:], "s-000!")...), cur: bigN("a", result.Fail, many("s", 104)...),
 			wantNew: []string{"s-000"}, alert: true},
 	}
