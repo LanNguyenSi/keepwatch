@@ -273,3 +273,16 @@ func TestEverySubjectOfAChangeIsAlsoACleanedSubject(t *testing.T) {
 		}
 	}
 }
+
+// Digest and total come from the same list. A state whose total was edited
+// while the digest stayed is not trusted to be the same list.
+func TestEqualDigestsWithDifferentTotalsAreAChangedSet(t *testing.T) {
+	base := bigSet("h", result.MaxKeys+40)
+	prev := bigN("a", result.Fail, base...)
+	cur := prev
+	cur.Total++
+	got := tallyOf(Compute(run(prev), run(cur)))
+	if len(got.setChanged) != 1 || !got.alert {
+		t.Errorf("%+v", got)
+	}
+}

@@ -76,6 +76,10 @@ func TestKeySetValidation(t *testing.T) {
 		{"no keys though the total is small", valid, func(c *Check) { c.Keys = nil }, false},
 		{"keys not sorted", valid, func(c *Check) { swap(c.Keys, 3, 4) }, false},
 		{"duplicate key", valid, func(c *Check) { c.Keys[5] = c.Keys[4] }, false},
+		{"duplicate key with a matching digest", valid, func(c *Check) {
+			c.Keys[5] = c.Keys[4]
+			c.Digest = result.DigestOfKeys(c.Keys)
+		}, false},
 		{"upper-case key", valid, func(c *Check) { c.Keys[5] = strings.ToUpper(c.Keys[5]) }, false},
 		{"short key", valid, func(c *Check) { c.Keys[5] = c.Keys[5][:63] }, false},
 		{"digest missing", valid, func(c *Check) { c.Digest = "" }, false},
