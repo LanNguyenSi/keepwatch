@@ -247,8 +247,9 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	// Nothing to write: make sure the timers are enabled and running anyway.
 	ok := true
 	for _, t := range Timers {
-		st, err := d.QueryTimer(ctx, t)
-		if err != nil || !st.Enabled() || !st.Active() {
+		// A failed query leaves the zero state, which is neither enabled nor active.
+		st, _ := d.QueryTimer(ctx, t)
+		if !st.Enabled() || !st.Active() {
 			ok = false
 		}
 	}

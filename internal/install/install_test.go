@@ -313,7 +313,7 @@ func TestInstallRefusesWhatIsNotARegularFile(t *testing.T) {
 	r := newRig()
 	r.fs.AddDir(unitPath(install.CheckService), 0o755, 0)
 	err := r.install(t, install.InstallOptions{})
-	if !errors.Is(err, install.ErrRefused) || !strings.Contains(err.Error(), "not a regular file") {
+	if !errors.Is(err, install.ErrRefused) || !strings.Contains(err.Error(), "exists and is not a regular file, refusing to replace it") {
 		t.Fatalf("err = %v", err)
 	}
 }

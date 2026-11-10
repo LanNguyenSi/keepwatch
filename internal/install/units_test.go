@@ -190,8 +190,8 @@ func TestSpecValidateRefusesInjection(t *testing.T) {
 	}
 }
 
-// Whatever the (valid) values are, the files have the same line structure: one
-// ExecStart, one ReadWritePaths, no unexpected specifier.
+// The services have one ExecStart, one ReadWritePaths and no specifier
+// character, whatever the (valid) values are.
 func TestRenderLineStructure(t *testing.T) {
 	files, err := Render(customSpec())
 	if err != nil {
@@ -202,11 +202,12 @@ func TestRenderLineStructure(t *testing.T) {
 		if strings.Contains(body, "%") {
 			t.Errorf("%s contains a %% specifier character", f.Name)
 		}
-		if strings.HasSuffix(f.Name, ".service") {
-			for key, n := range map[string]int{"ExecStart=": 1, "ReadWritePaths=": 1, "[Service]": 1, "Type=oneshot": 1} {
-				if got := strings.Count(body, "\n"+key); got != n && !(key == "[Service]" && got == 1) {
-					t.Errorf("%s: %q appears %d times, want %d", f.Name, key, got, n)
-				}
+		if !strings.HasSuffix(f.Name, ".service") {
+			continue
+		}
+		for _, key := range []string{"\nExecStart=", "\nReadWritePaths=", "\n[Service]\n", "\nType=oneshot\n"} {
+			if got := strings.Count(string(f.Content), key); got != 1 {
+				t.Errorf("%s: %q appears %d times, want 1", f.Name, strings.TrimSpace(key), got)
 			}
 		}
 	}

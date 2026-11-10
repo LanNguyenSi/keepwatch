@@ -182,6 +182,9 @@ func (o OSFS) OpenDir(path string) (Dir, error) {
 type osDir struct {
 	path string
 	root *os.Root
+	// beforeOpen runs after a file was looked at and before it is opened;
+	// tests swap the file there.
+	beforeOpen func()
 }
 
 func (d *osDir) Close() error { return d.root.Close() }
@@ -201,6 +204,9 @@ func (d *osDir) ReadFile(name string, max int64) ([]byte, error) {
 	}
 	if li.Mode()&fs.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s/%s is a symlink, it is not followed", d.path, name)
+	}
+	if d.beforeOpen != nil {
+		d.beforeOpen()
 	}
 	f, err := d.root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {

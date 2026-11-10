@@ -237,3 +237,29 @@ func TestOSFSRemoveRemovesTheLinkNotTheTarget(t *testing.T) {
 		t.Errorf("the target is gone: %v", err)
 	}
 }
+
+// A file swapped for another between the look and the open is not read.
+func TestOSFSReadFileDetectsASwap(t *testing.T) {
+	base := tempDir(t)
+	name := filepath.Join(base, "unit")
+	if err := os.WriteFile(name, []byte("first"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := (OSFS{}).OpenDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	d.(*osDir).beforeOpen = func() {
+		other := filepath.Join(base, "other")
+		if err := os.WriteFile(other, []byte("second"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(other, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, err := d.ReadFile("unit", 100); err == nil || !strings.Contains(err.Error(), "changed while") {
+		t.Errorf("ReadFile = %q, %v, want the swap to be detected", b, err)
+	}
+}

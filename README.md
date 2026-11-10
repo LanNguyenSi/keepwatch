@@ -910,13 +910,17 @@ options, and why each is set:
 | `CPUQuota=50%` | a check must never starve the services it watches |
 | `TimeoutStartSec=10min` | the slowest probe is the apt simulation (90 seconds); a check that hangs is killed |
 
-Left out on purpose, because a check needs it: `CapabilityBoundingSet` (reading
-root-only files, `nft`, `ss -p` and `needrestart` need `CAP_DAC_READ_SEARCH`,
-`CAP_NET_ADMIN` and `CAP_SYS_PTRACE`), `ProtectProc` and `ProcSubset` (`ss -p` and
-`needrestart` read `/proc` of other processes), `PrivateNetwork` and `IPAddressDeny`
-(notifications), `SystemCallFilter` (twelve different programs run), `ProtectHome=yes`
-and `PrivateUsers`. `systemd-analyze security keepwatch-check.service` scores the unit
-5.3 (MEDIUM) on Ubuntu 22.04 and 24.04.
+Tried with a test drop-in, one at a time, and not adopted because a check breaks:
+`ProtectHome=yes` (the `authorized_keys` check can no longer read `/home` and `/root`,
+and its result changes) and `PrivateUsers=yes` (`nft` and `iptables` fail with "you
+must be root", the key files of other users are unreadable). `PrivateNetwork` and
+`IPAddressDeny` would stop the notifications. `CapabilityBoundingSet` (four
+capabilities), `ProtectProc=invisible` with `ProcSubset=pid`, and
+`SystemCallFilter=@system-service` changed no result of the current checks, and are
+left out on purpose: a check added later that needs one more capability, a file under
+`/proc/sys` or one more system call would otherwise fail only under systemd.
+`systemd-analyze security keepwatch-check.service` scores the unit 5.3 (MEDIUM) on
+Ubuntu 22.04 and 24.04.
 
 With these options every check returned the same status, severity, summary and
 evidence subjects as a direct run as root, on Ubuntu 22.04 (systemd 249) and 24.04
