@@ -41,7 +41,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -351,9 +350,6 @@ func parse(b []byte) (*State, error) {
 	if err := dec.Decode(&s); err != nil {
 		return nil, problemf("not a valid state file: %v", err)
 	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, problemf("not a valid state file: data after the JSON document")
-	}
 	if err := validate(&s); err != nil {
 		return nil, err
 	}
@@ -445,6 +441,29 @@ func validateSet(c *Check, where string) error {
 	for j, it := range c.Items {
 		if _, ok := slices.BinarySearch(c.Keys, it.Key); !ok {
 			return problemf("%s.items[%d]: the item is not in the key set", where, j)
+		}
+	}
+	return nil
+}
+
+// CheckConsistency verifies the key sets of a state that this run built (the
+// output of FromResults), before it is compared with the previous one. It is
+// deliberately narrower than the check applied to a state file: the limits
+// that exist for foreign files (number of checks, items per check, id and
+// subject lengths, at least one check) are not applied, so a legitimate run
+// can never fail it. Per check it applies validateSet (keys hash-sized, sorted
+// and unique, the total, the digest, every listed item in the set) and requires
+// that no more items are listed than the set holds. The error names the check
+// and the rule, never a subject.
+func CheckConsistency(s *State) error {
+	for i := range s.Checks {
+		c := &s.Checks[i]
+		where := "check " + strconv.Quote(c.ID)
+		if err := validateSet(c, where); err != nil {
+			return err
+		}
+		if c.Capped() && len(c.Items) > c.Total {
+			return problemf("%s: %d items listed for a total of %d", where, len(c.Items), c.Total)
 		}
 	}
 	return nil

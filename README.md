@@ -334,7 +334,7 @@ hold.
 | 0 | no result counts at `--fail-on` |
 | 1 | at least one result counts at `--fail-on` |
 | 2 | usage error (unknown flag, bad `--format` or `--fail-on`, extra argument) |
-| 3 | keepwatch could not do its job: invalid configuration, a state directory that cannot be trusted or a state that cannot be saved, an interrupted run, a failed write of the report |
+| 3 | keepwatch could not do its job: invalid configuration, a state directory that cannot be trusted or a state that cannot be saved, a state of the run itself that contradicts itself (an internal error), an interrupted run, a failed write of the report |
 
 What counts for exit code 1, per status, when the check's severity is at least
 `--fail-on`:
@@ -474,6 +474,15 @@ scratch, delete `state.json`. A state directory that cannot be trusted (or a
 state that cannot be saved) is different: the report is still printed, state is
 not read or written, and the exit code is 3, because the next run could not be
 compared reliably.
+
+Before the comparison, keepwatch checks the state it built from this run for
+consistency: for each check with a key set, the keys are sorted, unique and
+hash-sized, the total and the digest match them, no more items are listed than
+the set holds and every listed item is in the set. This cannot fail on a correct
+build; if it does, it is a defect in keepwatch, not a property of the host. The
+run then takes the same path as an unusable state directory: the report is still
+printed, no changes are reported, a warning names the check and the rule (never
+a subject), the stored state is left as it was and the exit code is 3.
 
 The report is built first, written to stdout, and only then is the state
 saved. A report that could not be written (a closed pipe, a full disk) therefore
