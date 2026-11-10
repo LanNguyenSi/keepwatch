@@ -78,14 +78,19 @@ exceptions:
 #     - 'corp-[0-9]{4}'
 #     - 'session=([a-z0-9]+)'
 
-# Notification channels. When ntfy is set, url and topic are required.
-# url must be https, or http only for a loopback host, and any URL port
-# must be 1-65535. token_file is an optional absolute path to a file
+# Notification channels (used by `keepwatch check --notify` and
+# `keepwatch report --weekly --notify`). When ntfy is set, url and topic are
+# required. url is the address of the server, not of the topic: a message is
+# posted to <url>/<topic> (a path prefix in url is kept, for a server behind a
+# reverse proxy). topic is 1-64 characters of A-Z a-z 0-9 _ -. url must be
+# https, or http only for a loopback host, and any URL port must be 1-65535;
+# it must not hold credentials, a query or a fragment, and the topic is
+# checked too (both when --notify is used, not by `config check`). token_file is an optional absolute path to a file
 # that must be owned by the running user, mode 0600 or stricter, and at
 # most 4 KiB; its content is never read during validation and is
 # re-checked against these rules each time the token is read.
 notify:
   ntfy:
-    url: https://ntfy.example.com/keepwatch-alerts
+    url: https://ntfy.example.com
     topic: keepwatch-alerts
     # token_file: /etc/keepwatch/ntfy.token

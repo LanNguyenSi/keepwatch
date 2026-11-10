@@ -58,8 +58,9 @@ import (
 //
 // Version 3 replaced the sort cutoff and the exact mark of version 2 with the
 // complete key set of a capped check (Check.Total, Check.Keys, Check.Digest).
-// Files of version 1 and 2 cannot be compared with it and are not read.
-const SchemaVersion = 3
+// Version 4 added the delivery record (State.Delivery). Files of an older
+// version cannot be compared with it and are not read.
+const SchemaVersion = 4
 
 // FileName is the name of the state file inside the state directory.
 const FileName = "state.json"
@@ -96,6 +97,45 @@ type State struct {
 	SchemaVersion int       `json:"schema_version"`
 	RunAt         time.Time `json:"run_at"`
 	Checks        []Check   `json:"checks"`
+	// Delivery is set when the last notification could not be delivered. A
+	// run that sends notifications does not move the snapshot forward until
+	// a delivery succeeds (see the cli package), so the checks above are
+	// then the last snapshot whose changes were delivered, and the next run
+	// reports the same changes again.
+	Delivery *Delivery `json:"delivery,omitempty"`
+}
+
+// Kinds of a failed delivery.
+const (
+	// DeliveryCheck: the notification of the changes of a `check --notify`
+	// run. The snapshot did not move forward because of it.
+	DeliveryCheck = "check"
+	// DeliveryBaseline: the notice of a first run (or of a run whose previous
+	// state was unusable). There was no change to hold the snapshot for: the
+	// next notification sends the open findings of that run.
+	DeliveryBaseline = "baseline"
+	// DeliveryWeekly: the weekly report. The snapshot is the one of the last
+	// run and is not held back.
+	DeliveryWeekly = "weekly"
+)
+
+// Limits of a delivery record.
+const (
+	maxDeliveryReason   = 500
+	maxDeliveryFailures = 1 << 30
+)
+
+// Delivery records a notification that could not be delivered.
+type Delivery struct {
+	// FailedAt is the time of the latest failed attempt, Failures the number
+	// of failed runs in a row.
+	FailedAt time.Time `json:"failed_at"`
+	Failures int       `json:"failures"`
+	// Kind is DeliveryCheck, DeliveryWeekly or DeliveryBaseline.
+	Kind string `json:"kind"`
+	// Reason says why, in cleaned and redacted words; it never holds the
+	// message or the address of the server.
+	Reason string `json:"reason"`
 }
 
 // Check is the snapshot of one check.
@@ -356,11 +396,31 @@ func parse(b []byte) (*State, error) {
 	return &s, nil
 }
 
+// validateDelivery checks the delivery record of a decoded state.
+func validateDelivery(d *Delivery) error {
+	switch {
+	case d == nil:
+		return nil
+	case d.Kind != DeliveryCheck && d.Kind != DeliveryWeekly && d.Kind != DeliveryBaseline:
+		return problemf("delivery: unknown kind %q", d.Kind)
+	case d.Failures < 1 || d.Failures > maxDeliveryFailures:
+		return problemf("delivery: invalid failure count")
+	case d.FailedAt.IsZero():
+		return problemf("delivery: no time of failure")
+	case len(d.Reason) > maxDeliveryReason:
+		return problemf("delivery: the reason is longer than %d bytes", maxDeliveryReason)
+	}
+	return nil
+}
+
 // validate checks a decoded state. encoding/json replaces invalid UTF-8 with
 // U+FFFD while decoding, so the strings here are valid UTF-8 already.
 func validate(s *State) error {
 	if len(s.Checks) == 0 {
 		return problemf("no checks in the state file")
+	}
+	if err := validateDelivery(s.Delivery); err != nil {
+		return err
 	}
 	if len(s.Checks) > maxChecks {
 		return problemf("%d checks, at most %d are accepted", len(s.Checks), maxChecks)

@@ -17,6 +17,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/diff"
 	"github.com/LanNguyenSi/keepwatch/internal/engine"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/notify"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
 	"github.com/LanNguyenSi/keepwatch/internal/redact"
 	"github.com/LanNguyenSi/keepwatch/internal/render"
@@ -39,6 +40,15 @@ type env struct {
 	// state.FromResults. Tests replace it to hand the command a state that is
 	// inconsistent, which FromResults never produces.
 	buildState func([]result.Result, time.Time, func(string) string) *state.State
+	// notifier replaces the ntfy notifier built from the configuration;
+	// notifyOpts customise that one (tests set the backoff and the clock of
+	// its retry).
+	notifier   notify.Notifier
+	notifyOpts []notify.Option
+	// afterSend runs in `report --weekly --notify` after a failed delivery
+	// and before the failure is recorded; tests change the state there, as a
+	// concurrent `check` would.
+	afterSend func()
 }
 
 func (e env) withDefaults() env {
@@ -66,11 +76,12 @@ const DefaultFailOn = result.Medium
 func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	e = e.withDefaults()
 	var cfgPath, formatS, failOnS string
-	var noState bool
+	var noState, doNotify bool
 	if code, done := parse("check", args, stdout, stderr, func(fs *flag.FlagSet) {
 		fs.StringVar(&cfgPath, "config", "", "main configuration file (default "+config.DefaultPath+")")
 		fs.StringVar(&formatS, "format", string(render.Text), "output format: text, json or markdown")
 		fs.BoolVar(&noState, "no-state", false, "only check: neither read nor write the state of the last run")
+		fs.BoolVar(&doNotify, "notify", false, "send the changes worth an alert (and, on the first run, the open findings) to the configured ntfy topic")
 		fs.StringVar(&failOnS, "fail-on", string(DefaultFailOn), "lowest severity that makes the exit code 1 (info, low, medium, high, critical)")
 	}); done {
 		return code
@@ -83,6 +94,10 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	failOn, err := result.ParseSeverity(failOnS)
 	if err != nil {
 		fmt.Fprintf(stderr, "keepwatch check: --fail-on: %v\n", err)
+		return ExitUsage
+	}
+	if doNotify && noState {
+		fmt.Fprintln(stderr, "keepwatch check: --notify needs the state of the last run to know what changed: it cannot be combined with --no-state")
 		return ExitUsage
 	}
 
@@ -106,6 +121,14 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	}
 	if red, err = redact.New(cfg.Redact.Patterns); err != nil {
 		return fail("%v", err)
+	}
+	var ntf notify.Notifier
+	if doNotify {
+		// Before anything runs: a notification that cannot be sent is a
+		// configuration problem, and the checks are not worth running for it.
+		if ntf, err = e.newNotifier(cfg); err != nil {
+			return fail("--notify: %v", err)
+		}
 	}
 
 	cat := e.catalog
@@ -140,7 +163,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	code := ExitCode(results, failOn)
 
 	var store *state.Store
-	var cur *state.State
+	var cur, prev *state.State
 	stateFailed, saveState := false, false
 	if !noState {
 		in.State.Used = true
@@ -173,6 +196,7 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 		} else {
 			switch {
 			case lr.State != nil:
+				prev = lr.State
 				in.Diff = diff.Compute(lr.State, cur)
 				in.State.PrevRunAt = lr.State.RunAt
 			case lr.Missing:
@@ -189,6 +213,28 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	}
 	in.ExitCode = code
 
+	// A notification that could not be delivered earlier is told in the
+	// report; with --notify it is sent again together with this run's
+	// changes (the stored state is the last one whose changes were
+	// delivered, so they are in this run's comparison). Without --notify a
+	// run does not move that state forward: it would mark changes as seen
+	// that nobody was told.
+	var prevDel *render.DeliveryNote
+	holdState := false
+	if prev != nil && prev.Delivery != nil {
+		prevDel = deliveryNote(prev.Delivery)
+		in.Warnings = append(in.Warnings, deliveryWarning(prev.Delivery, doNotify))
+		holdState = !doNotify && prev.Delivery.Kind == state.DeliveryCheck
+	}
+	var notice render.Notice
+	send := false
+	switch {
+	case doNotify && stateFailed:
+		in.Warnings = append(in.Warnings, "no notification is sent: the state could not be used, so what changed is not known")
+	case doNotify:
+		notice, send = render.BuildNotice(in, prevDel, red)
+	}
+
 	for _, w := range in.Warnings {
 		fmt.Fprintf(stderr, "keepwatch check: warning: %s\n", red.Clean(w))
 	}
@@ -202,15 +248,63 @@ func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "keepwatch check: cannot write the report: %s\n", red.Clean(err.Error()))
 		return ExitInternal
 	}
+	var deliveryErr error
+	if send {
+		deliveryErr = ntf.Send(e.ctx, toMessage(notice))
+		if e.ctx.Err() != nil {
+			// A signal during the delivery: the run is interrupted like
+			// one that was interrupted during the checks. Nothing is
+			// stored, so the next run reports (and, if it was not
+			// delivered, sends) the same changes again.
+			return fail("interrupted: %v", e.ctx.Err())
+		}
+		if deliveryErr != nil {
+			fmt.Fprintf(stderr, "keepwatch check: the notification was not delivered: %s\n", red.Clean(deliveryErr.Error()))
+		}
+	}
 	if saveState {
-		// The state moves forward only after the report was written. A
+		// The state moves forward only after the report was written and,
+		// with --notify, only after the notification was delivered. A
 		// failure here cannot be part of the report any more: it is told on
 		// stderr and the exit code is 3 (the exit code printed in the report
 		// is the one of the checks).
-		if err := store.Save(cur); err != nil {
-			fmt.Fprintf(stderr, "keepwatch check: warning: the state could not be saved, the next run compares with an older one: %s\n", red.Clean(err.Error()))
-			return ExitInternal
+		toSave, committed := cur, true
+		switch {
+		case deliveryErr != nil:
+			// The snapshot stays where it was, with a record of the
+			// failure, so the next run compares with it again and reports
+			// the same changes. Without a previous snapshot (a first run)
+			// the current one is stored: it holds no change to lose.
+			kind := state.DeliveryCheck
+			if in.State.Baseline || (prev != nil && prev.Delivery != nil && prev.Delivery.Kind == state.DeliveryBaseline) {
+				// The message was the notice of a first run, or the
+				// resend of it: what is owed is the list of open
+				// findings, not the changes since a snapshot.
+				kind = state.DeliveryBaseline
+			}
+			toSave, committed = failedState(prev, cur, kind, now, deliveryErr, red), false
+		case holdState:
+			toSave, committed = nil, false
+			fmt.Fprintln(stderr, "keepwatch check: warning: the state is not moved forward: the last notification was not delivered yet, run with --notify")
+		case prev != nil && prev.Delivery != nil && prev.Delivery.Kind != state.DeliveryCheck && !doNotify:
+			d := *prev.Delivery
+			cur.Delivery = &d
 		}
+		if toSave != nil {
+			if err := store.Save(toSave); err != nil {
+				fmt.Fprintf(stderr, "keepwatch check: warning: the state could not be saved, the next run compares with an older one: %s\n", red.Clean(err.Error()))
+				return ExitInternal
+			}
+		}
+		if committed {
+			if n := len(in.Diff.Alerts(result.Info)); n > 0 && !doNotify && cfg.Notify.Ntfy != nil { // a baseline run has no changes, hence no alerts
+				fmt.Fprintf(stderr, "keepwatch check: warning: this run did not use --notify and moved the state forward past %d alert-worthy %s that no notification will tell\n", n, plural(n, "change", "changes"))
+			}
+			recordHistory(cfg.StateDir, now, in, red, stderr)
+		}
+	}
+	if deliveryErr != nil {
+		return ExitDelivery
 	}
 	return code
 }

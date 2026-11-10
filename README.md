@@ -146,7 +146,8 @@ More rules, all reported with `file:line`:
   owned by root or the running user and not writable by group or
   other; deeper ancestor directories are not checked (known limit).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
-  http only for loopback; a URL port must be 1-65535).
+  http only for loopback; a URL port must be 1-65535). It is the address of
+  the server, not of the topic: see [Notifications](#notifications).
 - `notify.ntfy.token_file` must be a regular file, at most 4096 bytes,
   with exactly one hard link, mode 0600 or stricter, owned by the
   running user and not empty; it is validated without reading and
@@ -382,7 +383,7 @@ Each expired exception is reported as its own `exception_expired` result
 ## Running a check
 
 ```sh
-keepwatch check [--config FILE] [--format text|json|markdown] [--no-state] [--fail-on SEVERITY]
+keepwatch check [--config FILE] [--format text|json|markdown] [--no-state] [--fail-on SEVERITY] [--notify]
 ```
 
 `check` loads the configuration, runs every enabled check of the catalog,
@@ -395,6 +396,7 @@ result as the new "previous run".
 | `--format` | `text` (default), `json` or `markdown` |
 | `--no-state` | only check: the state of the last run is neither read nor written, and the report has no comparison |
 | `--fail-on SEVERITY` | lowest severity that makes the exit code 1: `info`, `low`, `medium` (default), `high`, `critical` |
+| `--notify` | send the changes worth an alert (and on a first run the open findings) to the ntfy topic, see [Notifications](#notifications); cannot be combined with `--no-state` |
 
 The JSON report carries `schema_version` 2. Version 2 added the change kinds
 `hidden_gone` and `set_changed` (with the fields `hidden_gone`, `old_total` and
@@ -408,7 +410,8 @@ hold.
 | 0 | no result counts at `--fail-on` |
 | 1 | at least one result counts at `--fail-on` |
 | 2 | usage error (unknown flag, bad `--format` or `--fail-on`, extra argument) |
-| 3 | keepwatch could not do its job: invalid configuration, a state directory that cannot be trusted or a state that cannot be saved, a state of the run itself that contradicts itself (an internal error), an interrupted run, a failed write of the report |
+| 3 | keepwatch could not do its job: invalid configuration (also `--notify` without `notify.ntfy`), a state directory that cannot be trusted or a state that cannot be saved, a state of the run itself that contradicts itself (an internal error), an interrupted run, a failed write of the report |
+| 4 | `--notify` (or `report --weekly --notify`) could not deliver the notification, see [Notifications](#notifications) |
 
 What counts for exit code 1, per status, when the check's severity is at least
 `--fail-on`:
@@ -426,8 +429,12 @@ so it counts only with `--fail-on low` or `--fail-on info`.
 The exit code depends on the current results only, never on the comparison with
 the last run: a timer that runs `check` every few hours sees exit 1 for as long
 as the host stays bad. The comparison decides what is worth a notification.
-Exit code 3 wins over 1: if the state could not be handled, the run is not
-reliable, even when the report (which is still printed) shows findings. The
+Precedence: 3 wins over 4, 4 wins over 1, 1 wins over 0. Exit code 3 wins over
+everything: if the state could not be handled, the run is not reliable, even
+when the report (which is still printed) shows findings, and nothing is sent.
+Exit code 4 wins over 1: while the host stays bad, 1 is what every run exits
+with and says nothing new, whereas 4 says that an alert did not arrive. The
+report was printed in both cases, and the next run repeats the checks' verdict. The
 `exit_code` in a report is the one decided before the state is saved; a state
 that cannot be saved is found after the report was written (see "State"), so it
 is told on stderr and the process exits 3 although the report says 1 or 0.
@@ -511,8 +518,8 @@ are one item, and a change between them is not seen.
 ### State
 
 The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
-with `schema_version` (3; files of version 1 and 2 are not read), the time of the
-run and, per check, its id, kind, status, severity and items (hash and cleaned,
+with `schema_version` (4; files of version 1 to 3 are not read), the time of the
+run, the record of a failed delivery (see [Notifications](#notifications)) and, per check, its id, kind, status, severity and items (hash and cleaned,
 redacted subject, and whether an exception covers it). For a check whose list was
 cut it also holds the total, the sorted key list (up to 10,000 keys) and the
 digest described above; the stored keys must be sorted, unique, hash-sized, match
@@ -559,16 +566,181 @@ run then takes the same path as an unusable state directory: the report is still
 printed, no changes are reported, a warning names the check and the rule (never
 a subject), the stored state is left as it was and the exit code is 3.
 
-The report is built first, written to stdout, and only then is the state
-saved. A report that could not be written (a closed pipe, a full disk) therefore
-leaves the state as it was: the next run reports the same changes again instead
-of losing them, and the exit code is 3. A failed save cannot be part of the
+The report is built first, written to stdout, then (with `--notify`) the
+notification is sent, and only then is the state saved. A report that could not
+be written (a closed pipe, a full disk) therefore leaves the state as it was: the
+next run reports the same changes again instead of losing them, and the exit code
+is 3. A notification that could not be delivered leaves the snapshot as it was too
+(see [Notifications](#notifications)). A failed save cannot be part of the
 report any more; it is a warning on stderr and exit code 3.
 
 The state is written after a successful run, never after an interrupted one. A
 manual `keepwatch check` counts as a run: it moves the "previous run" forward,
 so a scheduled run after it reports changes only since that manual run. Use
 `--no-state` for a look that must not do that.
+
+### Notifications
+
+`keepwatch check --notify` sends one message per run to an
+[ntfy](https://docs.ntfy.sh/) topic, and only when there is something to tell.
+ntfy is the only channel of stage 0. Nothing else is ever contacted: keepwatch has
+no telemetry, and the address comes from the configuration only.
+
+```yaml
+notify:
+  ntfy:
+    url: https://ntfy.example.com        # the server, not the topic
+    topic: keepwatch-alerts              # 1-64 characters of A-Z a-z 0-9 _ -
+    token_file: /etc/keepwatch/ntfy.token  # optional, an access token (tk_...)
+```
+
+The message is posted to `<url>/<topic>` (a path prefix in `url`, for a server behind a
+reverse proxy at `/ntfy`, is kept). `url` must be https, or http for a loopback host,
+and holds no credentials, query or fragment; a bad `url` or `topic`, or `--notify`
+without `notify.ntfy`, is exit code 3 before any check runs. The token is read from
+`token_file` every time a message is sent (through the same checks as at load time:
+regular file, mode 0600, owned by the running user, no symlink) and goes only into the
+`Authorization: Bearer` header; a token with a space, a control or a non-ASCII
+character is refused. `token_file` is optional for a server that accepts anonymous
+publishing.
+
+**What is sent when.** The decision is made from the comparison with the last run
+(the report's counts), never from the exit code: the exit code says that something
+fails now, not that something changed.
+
+| Run | Sent |
+|---|---|
+| first run, or the previous state was not usable | one notice: the counts and the open findings (`fail`, `warn`, `error`; for `fail` and `warn` up to three subjects, for `error` none) |
+| at least one change is an alert (see "The comparison") | one message with the alerts, then the other changes (fixes, items that are gone), then the checks that keep failing |
+| only changes that are not alerts (a fix, an item that is gone), or none | nothing; the state moves forward |
+| the last delivery failed, whatever else happened | one message that says so, with the changes since the last delivered report |
+| the state could not be used (exit 3) | nothing |
+
+At most one message per run, so a timer that runs every few hours sends at most that
+many messages a day, however many things change. A check in `error` is one change of
+status; the evidence of an `error` is never listed item by item. If the delivery
+of a baseline notice fails, the first state is stored with a `delivery` record of kind
+`baseline`; the next run with `--notify` sends the open findings of that run again as a
+"first report" (not the changes since a snapshot, because nothing was ever delivered),
+and keeps doing so until a delivery works.
+
+**Every string of a message is cut at 200 characters** (whole characters, with `...`), so
+that one long subject cannot use up the body, and the alerts are listed with the highest
+severity first: when the body is too small for all of them it is the low ones that are
+left out ("N more lines not shown"), never the critical one. The counts in the title and
+heading are always the real ones.
+
+**Use `--notify` for every run that is supposed to tell.** A run without `--notify`
+(a manual `keepwatch check`, a script) moves the snapshot forward like any other run, so
+the alert-worthy changes it finds are consumed: the next scheduled run with `--notify`
+compares with that snapshot and does not send them. When `notify.ntfy` is configured, such
+a run says so on stderr ("moved the state forward past N alert-worthy changes that no
+notification will tell"). Use `--no-state` for a look that must not do that.
+
+**A signal during the delivery of `check --notify`** (SIGINT, SIGTERM) is an interrupted run like
+one during the checks: exit code 3, nothing is stored, the next run reports and sends the same
+changes. If the message had already reached the server, it arrives twice; it is never lost.
+For `report --weekly --notify` a signal during the delivery counts as a failed delivery (exit
+code 4, a weekly failure is recorded).
+
+**Priority and tags.** The priority is that of the highest severity among the alerts
+(baseline: among the `fail` and `error` findings): critical 5 (urgent), high 4, medium
+3 (default), low 2, info 1. The weekly report has priority 3 (2 when nothing is open).
+Tags are fixed words: `keepwatch` plus `rotating_light` (high or critical),
+`warning`, `information_source` (baseline) or `calendar` (weekly report). The title is
+`keepwatch <host>: N alerts` and the like, in printable ASCII (anything else becomes
+`?`, which also keeps a line break or a header out of the title).
+
+**Markdown.** The body is Markdown and is sent with the header `Markdown: yes`. ntfy
+renders it only then. Checked against the sources of ntfy (server main at
+v2.37.2, web app, Android app): the server does not interpret the body; the web app
+renders it with remark-parse 9 (CommonMark, micromark), without the GFM extensions
+(so no tables and no autolinks) and without raw HTML (a tag in the source is not
+rendered, links and images get a protocol check); the Android app uses Markwon 4.6.2
+(commonmark-java) with the image, linkify, table and strikethrough plugins. The
+argument of [Output safety](#output-safety) therefore holds for ntfy: everything that
+comes from the host or the configuration is put into a code span whose fence is longer
+than any run of backticks in it, and nothing outside a code span is anything but bold
+words, list markers, numbers and fixed phrases; a link, an image, HTML, a heading, an
+`@` or a line that starts a block cannot be made out of evidence. One thing stays:
+the Android app's linkify plugin acts on running text only and not on a code span
+(Markwon 4.6.2: the listener is fired by the text visitor, not by the code visitor), and
+ntfy shows the text of a message
+to everybody who can read the topic: on an open server the topic name is the only
+secret, so use a long one or an access token. No table is used, because the web app
+does not render them. A body is cut at 3,600 bytes (ntfy's limit is 4,096; a longer body
+would be turned into an attachment) with a line that says how many lines were left
+out; the numbers in the heading are always the real ones.
+
+**Redaction.** Every string of a message, the title included, goes through the
+redactor (built-in patterns plus `redact.patterns`, control characters escaped) before
+it is sent, the same as in the report. A message holds names of checks, item subjects
+as the report shows them, counts, statuses and severities; never evidence detail, a
+summary, a file content or a command line.
+
+**The HTTP client.** It uses no proxy from the environment (`HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY` are ignored: the token would travel through whatever they name; there is
+no proxy setting), verifies TLS certificates (TLS 1.2 or newer), does not follow
+redirects (a redirect could take the token to another host: it is an error, and the
+`url` in the configuration should be the final address), keeps no connection between
+runs, times out after 15 seconds per request and reads at most 64 KiB of an answer.
+There is one retry after 2 seconds, and only for a network error, a timeout, a 5xx or
+a 429; a `Retry-After` of up to 30 seconds is waited for, a longer one means no retry
+in this run. Other 4xx answers (a refused token, an unknown topic) are not retried.
+Error messages name the status and ntfy's own error text, never the topic or the token
+(a network error names the address and port that could not be reached, as the system
+reports it, which is the server you configured).
+
+**When a delivery fails.** The exit code is 4, and the snapshot in `state.json` is not
+moved forward: it is stored again as it was, with a `delivery` record (time, number of
+failed runs in a row, kind, a short redacted reason). The history is not written
+either. The next run therefore compares with the last snapshot whose changes were
+delivered and reports the same changes again, together with "last delivery failed",
+in the report (a warning), on stderr and in the message. The record is cleared when a
+message is delivered. Without `--notify`, a run does not move a snapshot that holds
+undelivered changes forward either (it says so on stderr), because that would mark
+changes as seen that nobody was told; `--no-state` is the way to look without
+touching anything. If the state cannot be saved after a successful delivery (exit
+3), the next run tells the same changes a second time. Delivery is at least once.
+
+### Weekly report
+
+```sh
+keepwatch report --weekly [--config FILE] [--format text|markdown] [--notify]
+```
+
+The digest of the open findings of the last run (from `state.json`, per check: status,
+severity and up to three subjects) and of the changes of the last 7 days (from the
+history, newest first, at most 25 lines, alerts marked). It runs no checks. Without
+`--notify` it is printed (text, or Markdown); with `--notify` it is sent to ntfy (the
+Markdown form, priority 3) and the command prints one line. A state or history that
+cannot be used is a warning on stderr and a note in the digest, never an abort (an
+untrusted state directory is exit code 3). A weekly report that cannot be delivered
+is exit code 4 and a `delivery` record of kind `weekly` in the state (unless there is
+a record already: the one about undelivered changes is the more important); the next
+`check --notify` mentions it. `report` without `--weekly` is not implemented (exit
+code 3).
+
+### History
+
+`history.json` in `state_dir`, next to `state.json`, written by `check` when it moves
+the state forward (not with `--no-state`, not when a delivery failed): the last 60
+runs and per run the changes of the comparison (kind, check id, severities, statuses,
+the cleaned and redacted subject, counts, alert mark; at most 100 per run, the rest
+is counted), nothing from evidence or summaries. A baseline run is recorded without
+changes. The file follows the rules of the state file (real directory owned by root or
+the running user, no group or other write, no symlink, regular file of the right owner
+and mode, written to a temporary file and renamed) with a limit of 8 MiB: an ordinary
+full history (60 runs of 100 changes) is about 1.7 MB, and when hostile subjects would take it past the limit
+the oldest runs are dropped. It is a convenience, not a source of truth: a history that
+cannot be read or written is a warning on stderr and does not change the exit code; an
+unusable file is replaced by the next write. A `check` and a `report` that run at the
+same moment are not coordinated, for `history.json` and for `state.json` alike (known
+limit, like two `check` runs; there is no lock). `report --notify` narrows the window for
+the one write it makes: it reads the state again right after a failed delivery (which
+can be a minute after it first read it) and records the failure only if the snapshot and
+the record are still the ones it started with, otherwise it only warns. What remains is
+the time between that read and the rename.
 
 ### Output safety
 
@@ -647,10 +819,10 @@ function (`redact.Redactor.Clean`) is what the notification code uses as well.
 
 Pre-MVP. The command line skeleton, the program execution layer, the
 strict configuration loader, the check engine with twelve check kinds, the state
-of the last run, the comparison and the text, JSON and Markdown reports exist;
-`check`, `config check` and `init` are implemented, while the commands
-(`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
-There is no notification yet.
+of the last run, the comparison, the text, JSON and Markdown reports, the ntfy
+notification and the weekly report exist; `check`, `report --weekly`, `config check`
+and `init` are implemented, while the commands (`doctor`, `install`, `uninstall`)
+and `report` without `--weekly` are stubs that exit with status 3.
 
 ## License
 

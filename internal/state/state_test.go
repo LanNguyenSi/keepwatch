@@ -155,11 +155,12 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 		"not an object":       "[1,2,3]",
 		"data after json":     g + "{}",
 		"unknown field":       strings.Replace(g, `"run_at"`, `"extra": 1, "run_at"`, 1),
-		"version 1":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 1`, 1),
-		"version 2":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 2`, 1),
-		"version 4":           strings.Replace(g, `"schema_version": 3`, `"schema_version": 4`, 1),
-		"schema zero":         strings.Replace(g, `"schema_version": 3`, `"schema_version": 0`, 1),
-		"no schema":           strings.Replace(g, `"schema_version": 3,`, ``, 1),
+		"version 1":           strings.Replace(g, `"schema_version": 4`, `"schema_version": 1`, 1),
+		"version 2":           strings.Replace(g, `"schema_version": 4`, `"schema_version": 2`, 1),
+		"version 3":           strings.Replace(g, `"schema_version": 4`, `"schema_version": 3`, 1),
+		"version 5":           strings.Replace(g, `"schema_version": 4`, `"schema_version": 5`, 1),
+		"schema zero":         strings.Replace(g, `"schema_version": 4`, `"schema_version": 0`, 1),
+		"no schema":           strings.Replace(g, `"schema_version": 4,`, ``, 1),
 		"cutoff of version 2": strings.Replace(g, `"items": [`, `"cutoff": "a", "items": [`, 1),
 		"hidden of version 2": strings.Replace(g, `"items": [`, `"hidden": 3, "items": [`, 1),
 		"exact of version 2":  strings.Replace(g, `"subject": "passwordauthentication"`, `"subject": "passwordauthentication", "exact": true`, 1),
@@ -168,8 +169,8 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 		"empty id":            strings.Replace(g, `"id": "ssh.password_authentication"`, `"id": ""`, 1),
 		"duplicate id":        strings.Replace(g, `"id": "services.fail2ban_active"`, `"id": "ssh.password_authentication"`, 1),
 		"bad key":             strings.Replace(g, result.SubjectKey("passwordauthentication"), "xyz", 1),
-		"no checks":           `{"schema_version": 3, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
-		"null checks":         `{"schema_version": 3, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
+		"no checks":           `{"schema_version": 4, "run_at": "2026-11-10T12:00:00Z", "checks": []}`,
+		"null checks":         `{"schema_version": 4, "run_at": "2026-11-10T12:00:00Z", "checks": null}`,
 		"wrong type":          strings.Replace(g, `"status": "fail"`, `"status": 7`, 1),
 		"huge item count":     hugeItems(),
 		"too many checks":     manyChecks(maxChecks + 1),
@@ -202,7 +203,7 @@ func TestLoadingSomethingUnusableIsAProblemNotAnError(t *testing.T) {
 
 func manyChecks(n int) string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":3,"run_at":"2026-11-10T12:00:00Z","checks":[`)
+	sb.WriteString(`{"schema_version":4,"run_at":"2026-11-10T12:00:00Z","checks":[`)
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			sb.WriteString(",")
@@ -215,7 +216,7 @@ func manyChecks(n int) string {
 
 func hugeItems() string {
 	var sb strings.Builder
-	sb.WriteString(`{"schema_version":3,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
+	sb.WriteString(`{"schema_version":4,"run_at":"2026-11-10T12:00:00Z","checks":[{"id":"a.b","kind":"k","status":"fail","severity":"low","items":[`)
 	for i := 0; i < maxItems+1; i++ {
 		if i > 0 {
 			sb.WriteString(",")
