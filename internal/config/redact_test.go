@@ -75,6 +75,7 @@ func TestRedactPatternErrors(t *testing.T) {
 		{"lookahead", "redact:\n  patterns:\n    - '(?=x)y'\n", []string{"keepwatch.yaml:3: redact.patterns[0]: is not a valid regular expression"}},
 		{"empty pattern", "redact:\n  patterns:\n    - ''\n", []string{"keepwatch.yaml:3: redact.patterns[0]: must not be empty"}},
 		{"matches empty", "redact:\n  patterns:\n    - 'a*'\n", []string{"keepwatch.yaml:3: redact.patterns[0]: matches the empty string"}},
+		{"too complex", "redact:\n  patterns:\n    - '(a|b|c|d|e){1000}x'\n", []string{"keepwatch.yaml:3: redact.patterns[0]: is too complex: it compiles to 3003 instructions, the limit is 1000"}},
 		{"too long", "redact:\n  patterns:\n    - '" + long + "'\n", []string{"keepwatch.yaml:3: redact.patterns[0]: is 257 bytes long, the limit is 256"}},
 		{"too many", many.String(), []string{"keepwatch.yaml:3: redact.patterns: 33 patterns, the limit is 32"}},
 	}

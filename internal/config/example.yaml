@@ -69,9 +69,10 @@ exceptions:
 # keys, URLs with credentials, ...) are replaced by [REDACTED] before
 # anything is printed, written or sent. These patterns (RE2 regular
 # expressions, at most 32 of at most 256 bytes each, none that matches the
-# empty string) are added to the built-in ones. If a pattern has a capturing
-# group only the text of the first group is replaced, otherwise the whole
-# match.
+# empty string, none that compiles to a program of more than 1000
+# instructions, which a large repeat count such as (a|b){500} does) are
+# added to the built-in ones. If a pattern has a capturing group only the
+# text of the first group is replaced, otherwise the whole match.
 # redact:
 #   patterns:
 #     - 'corp-[0-9]{4}'

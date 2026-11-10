@@ -18,6 +18,14 @@ import (
 //   - the Unicode format characters, which include the bidirectional
 //     overrides and isolates, the zero-width characters and the byte order
 //     mark, and the line and paragraph separators: \uNNNN or \UNNNNNNNN;
+//   - characters that draw nothing but are not format characters, which
+//     could make two different names look alike: the fillers (U+115F,
+//     U+1160, U+3164, U+FFA0, U+17B4, U+17B5, U+2800), the combining
+//     grapheme joiner (U+034F) and the variation selectors (U+180B to
+//     U+180D, U+180F, U+FE00 to U+FE0F, U+E0100 to U+E01EF);
+//   - private-use characters and code points that are unassigned (or
+//     noncharacters): what they show depends on the font of whoever reads
+//     the report;
 //   - bytes that are not valid UTF-8: \xNN.
 //
 // Other characters, including all printable non-ASCII text, are kept. A
@@ -56,9 +64,21 @@ func Escape(s string) string {
 	return sb.String()
 }
 
-// unsafeRune reports whether a rune of 0x80 or above must be escaped.
+// unsafeRune reports whether a rune of 0x80 or above must be escaped. Go's
+// category C is every "other" code point: controls, format characters,
+// private use, surrogates and the unassigned ones.
 func unsafeRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	return unicode.In(r, unicode.C, unicode.Zl, unicode.Zp) || invisible(r)
+}
+
+// invisible reports whether r is a character that draws nothing and is not
+// one of the format characters.
+func invisible(r rune) bool {
+	switch r {
+	case 0x034f, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x180b, 0x180c, 0x180d, 0x180f, 0x2800, 0x3164, 0xffa0:
+		return true
+	}
+	return (r >= 0xfe00 && r <= 0xfe0f) || (r >= 0xe0100 && r <= 0xe01ef)
 }
 
 func needsEscape(s string) bool {

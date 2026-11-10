@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 )
 
@@ -38,6 +39,12 @@ const (
 	MaxPatterns = 32
 	// MaxPatternLen is the longest extra pattern, in bytes.
 	MaxPatternLen = 256
+	// MaxProgramSize is the largest compiled program, in instructions, of an
+	// extra pattern. Matching is linear in the text, but a repeat such as
+	// (a|b|c|d|e){1000} compiles to thousands of instructions, and every
+	// instruction costs time on every byte of every field that is shown. Real
+	// patterns need a few dozen.
+	MaxProgramSize = 1000
 )
 
 // MaxFieldRunes bounds the text Clean returns for one field. A longer field
@@ -46,14 +53,27 @@ const (
 const MaxFieldRunes = 2000
 
 // ValidatePattern reports why p cannot be used as an extra redaction pattern:
-// empty, too long, not valid RE2 syntax, or able to match the empty string
-// (which would "redact" every position of every text).
+// empty, too long, not valid RE2 syntax, compiling to a program of more than
+// MaxProgramSize instructions, or able to match the empty string (which would
+// "redact" every position of every text).
 func ValidatePattern(p string) error {
 	if p == "" {
 		return errors.New("must not be empty")
 	}
 	if len(p) > MaxPatternLen {
 		return fmt.Errorf("is %d bytes long, the limit is %d", len(p), MaxPatternLen)
+	}
+	// The same steps regexp.Compile takes, to see the size of the program.
+	parsed, err := syntax.Parse(p, syntax.Perl)
+	if err != nil {
+		return fmt.Errorf("is not a valid regular expression: %v", err)
+	}
+	prog, err := syntax.Compile(parsed.Simplify())
+	if err != nil {
+		return fmt.Errorf("is not a valid regular expression: %v", err)
+	}
+	if n := len(prog.Inst); n > MaxProgramSize {
+		return fmt.Errorf("is too complex: it compiles to %d instructions, the limit is %d", n, MaxProgramSize)
 	}
 	re, err := regexp.Compile(p)
 	if err != nil {
@@ -71,28 +91,51 @@ type rule struct {
 	repl string
 }
 
+// A value after "name=" or "name:": a quoted string (backslash escapes
+// count; a quote that is never closed runs to the end of the text, so a
+// secret is not left because its closing quote is missing), the replacement
+// itself (so redacting twice changes nothing), or a run of characters up to
+// a separator. A NUL byte, which separates the arguments of a command line,
+// ends a value as a space does.
+const valueRe = `"(?:[^"\\]|(?s:\\.))*(?:"|\\?$)|'(?:[^'\\]|(?s:\\.))*(?:'|\\?$)|\[REDACTED\]|[^\s\x00"',;&][^\s\x00",;&]*`
+
 // builtin lists the built-in patterns, specific shapes first. All use RE2
 // (linear time), none can backtrack.
 var builtin = []rule{
 	// PEM private key blocks, also a block cut off before its end line.
-	{regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), "[REDACTED private key]"},
-	// scheme://user:password@host and scheme://token@host
-	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]+@`), "${1}" + Replacement + "@"},
+	{regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), "[REDACTED private key]"},
+	// scheme://user:password@host and scheme://token@host. The user info
+	// runs to the last @ before the first /, ? or # (a password can hold an
+	// @).
+	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s\x00/?#]+@`), "${1}" + Replacement + "@"},
 	// Authorization: Bearer abc, Authorization=Basic abc, "authorization": "..."
-	{regexp.MustCompile(`(?i)\b(authorization["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s"',;]+)`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)\b(authorization["']?[\s\x00]*[:=][\s\x00]*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s\x00"',;]+)`), "${1}" + Replacement},
+	// Cookie and Set-Cookie: the rest of the line
+	{regexp.MustCompile(`(?i)\b((?:set-)?cookie2?["']?[ \t\x00]*[:=][ \t\x00]*)[^\r\n\x00]+`), "${1}" + Replacement},
 	// a bare bearer token
 	{regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}`), "${1}" + Replacement},
 	// name=value and name: value, also in JSON ("name": "value"), when the
 	// name ends in a secret word (the word must be followed directly by the
 	// separator): "token_file" and "passwordauthentication" do not qualify
 	// and are left alone.
-	{regexp.MustCompile(`(?i)((?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\[REDACTED\]|[^\s"',;&]+)`), "${1}" + Replacement},
-	// --password hunter2, -token abc (a value that does not start with "-")
-	{regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)\s+)[^\s-]\S*`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)((?:password|passwd|passphrase|secret|(?:secret|auth|signing|encryption|master)[_-]?key|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?\s*[=:]\s*)(` + valueRe + `)`), "${1}" + Replacement},
+	// pass and pwd as a name of their own or as the last word of one
+	// (DB_PASS=..., MYSQL_PWD=..., pwd: ...), not as the end of a longer word
+	// ("bypass=1")
+	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9])(?:pass|pwd)["']?\s*[=:]\s*)(` + valueRe + `)`), "${1}" + Replacement},
+	// env-style NAME_KEY=value
+	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9])[a-z0-9]+[_-]key["']?\s*=\s*)(` + valueRe + `)`), "${1}" + Replacement},
+	// --password hunter2, -token abc (a value that does not start with "-");
+	// a NUL byte between flag and value counts as a space
+	{regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}" + Replacement},
 	// AWS access key ids
 	{regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), Replacement},
 	// GitHub tokens
 	{regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b`), Replacement},
+	// GitLab personal access tokens
+	{regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`), Replacement},
+	// API keys of the sk- family (OpenAI, Anthropic: sk-..., sk-proj-..., sk-ant-...)
+	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`), Replacement},
 	// ntfy access tokens
 	{regexp.MustCompile(`\btk_[A-Za-z0-9]{29,}\b`), Replacement},
 	// Slack tokens
