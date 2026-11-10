@@ -266,6 +266,71 @@ func TestCompute(t *testing.T) {
 	}
 }
 
+func TestSeverityChange(t *testing.T) {
+	ak := func(st result.Status, s result.Severity, items ...string) state.Check {
+		return sev(kind(chk("a", st, items...), AuthorizedKeysKind), s)
+	}
+	tests := []struct {
+		name         string
+		prev, cur    state.Check
+		want         []string
+		stillFailing bool
+	}{
+		{name: "fail, higher: alert", prev: sev(chk("a", result.Fail, "x"), result.Low), cur: sev(chk("a", result.Fail, "x"), result.Critical),
+			want: []string{"severity_change a low>critical (fail) ALERT"}, stillFailing: true},
+		{name: "fail, lower: no alert", prev: sev(chk("a", result.Fail, "x"), result.Critical), cur: sev(chk("a", result.Fail, "x"), result.Low),
+			want: []string{"severity_change a critical>low (fail)"}, stillFailing: true},
+		{name: "fail, one step", prev: sev(chk("a", result.Fail, "x"), result.Medium), cur: sev(chk("a", result.Fail, "x"), result.High),
+			want: []string{"severity_change a medium>high (fail) ALERT"}, stillFailing: true},
+		{name: "fail, unchanged", prev: sev(chk("a", result.Fail, "x"), result.High), cur: sev(chk("a", result.Fail, "x"), result.High), stillFailing: true},
+		{name: "fail, higher, and a new item", prev: sev(chk("a", result.Fail, "x"), result.Low), cur: sev(chk("a", result.Fail, "x", "y"), result.High),
+			want: []string{"severity_change a low>high (fail) ALERT", "subject_new a y ALERT"}, stillFailing: true},
+		{name: "error, higher: alert", prev: sev(chk("a", result.Error), result.Low), cur: sev(chk("a", result.Error), result.High),
+			want: []string{"severity_change a low>high (error) ALERT"}},
+		{name: "error, lower: no alert", prev: sev(chk("a", result.Error), result.High), cur: sev(chk("a", result.Error), result.Low),
+			want: []string{"severity_change a high>low (error)"}},
+		{name: "warn of another kind, higher: reported, no alert", prev: sev(chk("a", result.Warn, "w"), result.Low), cur: sev(chk("a", result.Warn, "w"), result.High),
+			want: []string{"severity_change a low>high (warn)"}},
+		{name: "authorized_keys warn, higher: alert", prev: ak(result.Warn, result.Low, "w"), cur: ak(result.Warn, result.High, "w"),
+			want: []string{"severity_change a low>high (warn) ALERT"}},
+		{name: "pass: not reported", prev: sev(chk("a", result.Pass), result.Low), cur: sev(chk("a", result.Pass), result.High)},
+		{name: "skipped: not reported", prev: sev(chk("a", result.Skipped), result.Low), cur: sev(chk("a", result.Skipped), result.High)},
+		{name: "excepted: not reported", prev: sev(chk("a", result.Excepted, "x!"), result.Low), cur: sev(chk("a", result.Excepted, "x!"), result.High)},
+		{name: "a changed status is one status change, not two", prev: sev(chk("a", result.Pass), result.Low), cur: sev(chk("a", result.Fail, "x"), result.High),
+			want: []string{"new_failure a pass>fail ALERT"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Compute(run(tc.prev), run(tc.cur))
+			var got []string
+			for _, c := range rep.Changes {
+				got = append(got, show(c))
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("changes:\n got %q\nwant %q", got, tc.want)
+			}
+			if tc.stillFailing != (len(rep.StillFailing) == 1) {
+				t.Errorf("still failing = %v", rep.StillFailing)
+			}
+		})
+	}
+}
+
+func TestSeverityChangeIsAnAlertAtTheNewSeverity(t *testing.T) {
+	rep := Compute(run(sev(chk("a", result.Fail, "x"), result.Low)), run(sev(chk("a", result.Fail, "x"), result.High)))
+	if len(rep.Alerts(result.Medium)) != 1 {
+		t.Errorf("a failure that rose from low to high should alert at medium: %+v", rep.Changes)
+	}
+	rep = Compute(run(sev(chk("a", result.Fail, "x"), result.High)), run(sev(chk("a", result.Fail, "x"), result.Low)))
+	if len(rep.Alerts(result.Info)) != 0 {
+		t.Errorf("a failure that fell in severity should not alert: %+v", rep.Alerts(result.Info))
+	}
+	c := rep.Changes[0]
+	if c.Kind != SeverityChange || c.Severity != result.Low || c.FromSeverity != result.High || c.ToSeverity != result.Low {
+		t.Errorf("change %+v", c)
+	}
+}
+
 func TestBaselineHasNoChanges(t *testing.T) {
 	rep := Compute(nil, run(chk("a", result.Fail, "x"), chk("b", result.Error)))
 	if !rep.Baseline || len(rep.Changes) != 0 || len(rep.StillFailing) != 0 || len(rep.Alerts(result.Info)) != 0 {

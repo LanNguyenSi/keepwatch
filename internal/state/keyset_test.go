@@ -72,6 +72,19 @@ func TestKeySetValidation(t *testing.T) {
 		{"negative total", valid, func(c *Check) { c.Total = -1 }, false},
 		{"total absurd", digestOnly, func(c *Check) { c.Total = maxTotal + 1 }, false},
 		{"fewer keys than the total", valid, func(c *Check) { c.Keys = c.Keys[:len(c.Keys)-1] }, false},
+		{"fewer keys than the total, with the digest of those keys", valid, func(c *Check) {
+			listed := map[string]bool{}
+			for _, it := range c.Items {
+				listed[it.Key] = true
+			}
+			for i, k := range c.Keys { // drop a key that no listed item uses
+				if !listed[k] {
+					c.Keys = append(c.Keys[:i:i], c.Keys[i+1:]...)
+					break
+				}
+			}
+			c.Digest = result.DigestOfKeys(c.Keys)
+		}, false},
 		{"more keys than the total", valid, func(c *Check) { c.Total-- }, false},
 		{"no keys though the total is small", valid, func(c *Check) { c.Keys = nil }, false},
 		{"keys not sorted", valid, func(c *Check) { swap(c.Keys, 3, 4) }, false},

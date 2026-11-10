@@ -395,8 +395,8 @@ Two rules keep the comparison honest:
 - A check that has more than 100 items lists the first 99 sorted by subject and a
   marker "(N more not shown)". The marker is not an item: a change of N never
   produces new or gone subjects. Besides the 99 items the state keeps the
-  complete list as a set of keys (the SHA-256 of each raw subject, sorted, without
-  duplicates) and a digest of that list, so two runs are compared as sets and not
+  complete list as a set of keys (the SHA-256 of each subject as the check
+  produced it, sorted, without duplicates) and a digest of that list, so two runs are compared as sets and not
   by what happened to be listed. The failing set of a check is its keys without
   the keys of the items an exception covers. A list that is not cut is its own
   set, so a cut and a complete list compare like any other pair:
@@ -406,9 +406,10 @@ Two rules keep the comparison honest:
     exact number (also an alert); a key that left it is `subject_gone` or counted
     in one `hidden_gone` (no alert). For example, a listener below the cut stops
     and a new one starts above it: `subject_gone` for the first and `hidden_new` 1
-    for the second, although the total is the same. A subject that had to be
-    escaped, redacted or cut for display is compared by its raw subject like any
-    other.
+    for the second, although the total is the same. A subject that the report
+    has to escape, redact or cut for display is still compared by the subject the
+    check produced, not by its display text (see below for which checks keep the
+    subject as it is).
   - A set has more than 10,000 keys: its keys are not stored, only its total and
     the digest. Equal digests mean the same list. Different digests are one
     `set_changed` change with both totals, an alert: that something changed is
@@ -420,9 +421,17 @@ Two rules keep the comparison honest:
   of the listed part (because new items sort before it) is a failing item again
   and is reported as new.
 
-Items are compared by the SHA-256 of their raw subject, so two subjects that
-look the same after cleaning (they differ in a control character, say) are still
-two items.
+Items are compared by the SHA-256 of the subject the check produced. For the
+listeners (address and port), the authorized key fingerprints, the container
+names and ids of `docker_exposure` and the package names of `security_updates`
+that is the raw subject, so two subjects that look the same after the report
+cleans them (they differ in a control character, say) are still two items. The
+checks that name a path, a mount point or a free text clean the subject before
+it becomes one (non-printable characters become `?`, long names are cut):
+`cert_expiry` (file path), `disk_usage` (mount point), the TCP findings of
+`docker_exposure` and the warnings of `authorized_keys` (paths, patterns, lines).
+There, two names that differ only in a control character, or only after the cut,
+are one item, and a change between them is not seen.
 
 ### State
 

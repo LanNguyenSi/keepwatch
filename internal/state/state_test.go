@@ -889,6 +889,75 @@ func TestMergedResultsOfSetsTooLargeToListKeepADigest(t *testing.T) {
 	}
 }
 
+func TestStateFileOfAnotherVersionIsNotRead(t *testing.T) {
+	good, err := Marshal(sample())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []int{0, SchemaVersion - 1, SchemaVersion + 1, -1} {
+		b := strings.Replace(string(good), fmt.Sprintf(`"schema_version": %d`, SchemaVersion), fmt.Sprintf(`"schema_version": %d`, v), 1)
+		if _, err := parse([]byte(b)); err == nil {
+			t.Errorf("schema version %d is accepted", v)
+		}
+	}
+}
+
+// scrub stands in for the redactor: it hides the word "secret" and escapes a
+// newline, so a subject that holds either is not shown as it is.
+func scrub(s string) string {
+	return strings.NewReplacer("secret", "[REDACTED]", "\n", `\n`).Replace(s)
+}
+
+// The cut a list gets in FromResults (a probe that did not cut it itself)
+// starts above maxItems: the list the state validates and loads again is at
+// most maxItems items long.
+func TestTheCutOfAnUncutListStartsAboveMaxItems(t *testing.T) {
+	for _, tc := range []struct {
+		n      int
+		capped bool
+	}{{maxItems - 1, false}, {maxItems, false}, {maxItems + 1, true}} {
+		ev := make([]result.Evidence, tc.n)
+		for i := range ev {
+			ev[i] = result.Evidence{Subject: fmt.Sprintf("s%05d", i)}
+		}
+		st := FromResults([]result.Result{{CheckID: "a.b", Status: result.Fail, Severity: result.Low, Evidence: ev}}, t0, nil)
+		c := st.Checks[0]
+		if c.Capped() != tc.capped || (tc.capped && (len(c.Items) != displayItems || c.Total != tc.n)) || (!tc.capped && len(c.Items) != tc.n) {
+			t.Errorf("%d uncut items: capped %v, %d stored, total %d", tc.n, c.Capped(), len(c.Items), c.Total)
+		}
+		if err := validate(st); err != nil {
+			t.Errorf("%d uncut items: the state does not validate: %v", tc.n, err)
+		}
+	}
+}
+
+// The state holds hashes and display text only: a subject with a secret in a
+// cut list leaves no trace of the secret, in the keys or anywhere else.
+func TestACutListWithASecretLeavesNoTraceOfIt(t *testing.T) {
+	r := capped(130)
+	r.Evidence[3].Subject = "tcp/0.0.0.0:22 secret-token"
+	all := make([]result.Evidence, 130)
+	for i := range all {
+		all[i] = result.Evidence{Subject: fmt.Sprintf("item-%05d", i)}
+	}
+	all[3].Subject = "tcp/0.0.0.0:22 secret-token"
+	r.Set = result.NewEvidenceSet(all)
+	st := FromResults([]result.Result{r}, t0, scrub)
+	b, err := Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "secret") {
+		t.Errorf("the state holds the secret:\n%s", b)
+	}
+	if !strings.Contains(string(b), "[REDACTED]") {
+		t.Errorf("the display text was not redacted:\n%s", b)
+	}
+	if err := validate(st); err != nil {
+		t.Errorf("invalid: %v", err)
+	}
+}
+
 func TestAListThatWasNotCutByTheProbeIsCutHere(t *testing.T) {
 	n := maxItems + 500
 	ev := make([]result.Evidence, n)
