@@ -96,9 +96,12 @@ type confInfo struct {
 	found bool
 	// notify: notify.ntfy is configured.
 	notify bool
+	// tokenFile is notify.ntfy.token_file, empty when there is none.
+	tokenFile string
 }
 
-// readConfig reads state_dir and whether notify.ntfy is configured.
+// readConfig reads state_dir, whether notify.ntfy is configured and its
+// token_file.
 func readConfig(h hostOps, path string) (confInfo, error) {
 	if _, serr := h.fs.Lstat(path); serr != nil {
 		if errors.Is(serr, os.ErrNotExist) {
@@ -110,7 +113,11 @@ func readConfig(h hostOps, path string) (confInfo, error) {
 	if err != nil {
 		return confInfo{found: true}, err
 	}
-	return confInfo{stateDir: filepath.Clean(cfg.StateDir), found: true, notify: cfg.Notify.Ntfy != nil}, nil
+	ci := confInfo{stateDir: filepath.Clean(cfg.StateDir), found: true}
+	if n := cfg.Notify.Ntfy; n != nil {
+		ci.notify, ci.tokenFile = true, n.TokenFile
+	}
+	return ci, nil
 }
 
 func printConfigErr(stderr io.Writer, name string, err error) {
@@ -165,12 +172,14 @@ func runInstall(e env, args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	spec := install.Spec{Binary: exe, ConfigPath: path, StateDir: ci.stateDir, Notify: ci.notify, Interval: interval, Weekly: weekly}
+	opts := install.InstallOptions{Spec: spec, DryRun: dryRun, ConfigFound: ci.found, TokenFile: ci.tokenFile}
 
 	if printOnly {
-		files, err := install.Render(spec)
+		// The same refusals as install, looking only: what is printed is what
+		// install would write.
+		files, err := install.Preflight(h.fs, opts)
 		if err != nil {
-			fmt.Fprintf(stderr, "keepwatch install: %v\n", err)
-			return ExitUsage
+			return installExit("install", err, stderr)
 		}
 		for i, f := range files {
 			if i > 0 {
@@ -181,7 +190,7 @@ func runInstall(e env, args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 	deps := install.Deps{FS: h.fs, Runner: h.runner, Geteuid: h.geteuid, UnitDir: h.unitDir, SystemdRunDir: h.systemdRunDir, Out: stdout}
-	err = install.Install(e.ctx, deps, install.InstallOptions{Spec: spec, DryRun: dryRun, ConfigFound: ci.found})
+	err = install.Install(e.ctx, deps, opts)
 	return installExit("install", err, stderr)
 }
 
@@ -255,7 +264,7 @@ func runDoctor(e env, args []string, stdout, stderr io.Writer) int {
 	var cfgPath string
 	var send bool
 	if code, done := parse("doctor", args, stdout, stderr, func(fs *flag.FlagSet) {
-		fs.StringVar(&cfgPath, "config", "", "main configuration file (default "+config.DefaultPath+")")
+		fs.StringVar(&cfgPath, "config", "", "main configuration file to examine (default: the one the installed units run with, else "+config.DefaultPath+")")
 		fs.BoolVar(&send, "send-test", false, "deliver one test message through the configured ntfy channel (writes no state)")
 	}); done {
 		return code
@@ -274,17 +283,24 @@ func runDoctor(e env, args []string, stdout, stderr io.Writer) int {
 	if res == nil {
 		res = execx.NewReal(progs)
 	}
-	path, err := absConfig(cfgPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "keepwatch doctor: --config: %v\n", err)
-		return ExitUsage
+	// Without --config doctor examines the configuration the installed units
+	// run with, so the default path is not filled in here.
+	path := ""
+	if cfgPath != "" {
+		var err error
+		if path, err = absConfig(cfgPath); err != nil {
+			fmt.Fprintf(stderr, "keepwatch doctor: --config: %v\n", err)
+			return ExitUsage
+		}
 	}
 	rep := doctor.Run(e.ctx, doctor.Deps{
 		ConfigPath: path, LoadConfig: h.loadConfig, Catalog: cat, Resolver: res, Runner: h.runner,
 		FS: h.fs, Geteuid: h.geteuid, State: h.state, UnitDir: h.unitDir, SystemdRunDir: h.systemdRunDir, SSHRunDir: h.sshRunDir,
 	})
 	if send {
-		rep.Findings = append(rep.Findings, sendTestFinding(e, h, path))
+		// Through the configuration the report is about: the one the scheduled
+		// runs use, unless --config named another.
+		rep.Findings = append(rep.Findings, sendTestFinding(e, h, rep.ConfigPath))
 	}
 	rep.Write(stdout)
 	if rep.Problems() > 0 {

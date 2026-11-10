@@ -29,6 +29,20 @@ type hostRig struct {
 	cfgErr   error
 	resolver map[string]error
 	state    doctor.StateStatus
+	// cfgs and cfgErrs are the configurations by path; a path in neither
+	// loads cfg (or fails with cfgErr).
+	cfgs    map[string]*config.Config
+	cfgErrs map[string]error
+}
+
+func (h *hostRig) load(p string) (*config.Config, error) {
+	if err, ok := h.cfgErrs[p]; ok {
+		return nil, err
+	}
+	if c, ok := h.cfgs[p]; ok {
+		return c, nil
+	}
+	return h.cfg, h.cfgErr
 }
 
 type missingResolver map[string]error
@@ -42,7 +56,8 @@ func (m missingResolver) Resolve(n string) (string, error) {
 
 func newHost(t *testing.T) *hostRig {
 	t.Helper()
-	h := &hostRig{fs: installtest.NewMemFS(), sd: installtest.NewSystemd(), exe: "/usr/local/bin/keepwatch", resolver: map[string]error{}}
+	h := &hostRig{fs: installtest.NewMemFS(), sd: installtest.NewSystemd(), exe: "/usr/local/bin/keepwatch", resolver: map[string]error{},
+		cfgs: map[string]*config.Config{}, cfgErrs: map[string]error{}}
 	h.cfg = &config.Config{Sources: config.Sources{Main: "/etc/keepwatch/keepwatch.yaml"}, StateDir: "/var/lib/keepwatch", Checks: map[string]config.Check{}}
 	h.state = doctor.StateStatus{Exists: true}
 	h.fs.AddDir("/run/sshd", 0o755, 0)
@@ -50,7 +65,7 @@ func newHost(t *testing.T) *hostRig {
 	opsFor = func(env) hostOps {
 		return hostOps{
 			fs: h.fs, runner: h.sd.Runner, geteuid: func() int { return h.uid }, exe: func() (string, error) { return h.exe, nil },
-			loadConfig: func(string) (*config.Config, error) { return h.cfg, h.cfgErr },
+			loadConfig: h.load,
 			state:      func(string) doctor.StateStatus { return h.state }, resolver: missingResolver(h.resolver),
 		}
 	}
@@ -58,7 +73,12 @@ func newHost(t *testing.T) *hostRig {
 	return h
 }
 
-func (h *hostRig) withConfigFile() { h.fs.AddFile("/etc/keepwatch/keepwatch.yaml", 0o644, 0, "{}\n") }
+// withConfigFile adds the default configuration file in a root-owned
+// directory, as "keepwatch init" run by root leaves it.
+func (h *hostRig) withConfigFile() {
+	h.fs.AddDir("/etc/keepwatch", 0o750, 0)
+	h.fs.AddFile("/etc/keepwatch/keepwatch.yaml", 0o640, 0, "{}\n")
+}
 
 func runCmd(args ...string) (int, string, string) {
 	var out, errb bytes.Buffer
@@ -102,10 +122,15 @@ func TestInstallPrint(t *testing.T) {
 	h := newHost(t)
 	h.uid = 1000 // printing needs no privileges
 	h.withConfigFile()
-	h.cfg.StateDir = "/srv/kw/state"
+	h.cfg.StateDir = "/srv/kw/state" // missing: --print names it and does not create it
+	h.fs.AddDir("/srv", 0o755, 0)
+	h.fs.AddDir("/srv/kw", 0o755, 0)
 	code, stdout, stderr := runCmd("install", "--print", "--interval", "30m", "--weekly-report", "Sun 23:59")
 	if code != ExitOK || stderr != "" {
 		t.Fatalf("exit = %d stderr = %q", code, stderr)
+	}
+	if h.fs.Exists("/srv/kw/state") {
+		t.Error("--print created state_dir")
 	}
 	for _, want := range []string{
 		"# ===== keepwatch-check.service =====", "# ===== keepwatch-report.timer =====",
@@ -124,21 +149,85 @@ func TestInstallPrint(t *testing.T) {
 
 func TestInstallPrintRefusesAnUnsafeBinaryPath(t *testing.T) {
 	h := newHost(t)
-	for _, exe := range []string{"/tmp/keepwatch", "/home/me/my tools/keepwatch", "/opt/kw%n/keepwatch"} {
+	h.withConfigFile()
+	for exe, want := range map[string]string{
+		"/tmp/keepwatch":              "the keepwatch binary /tmp/keepwatch is under /tmp",
+		"/home/me/my tools/keepwatch": "keepwatch binary",
+		"/opt/kw%n/keepwatch":         "keepwatch binary",
+	} {
 		h.exe = exe
-		if code, stdout, stderr := runCmd("install", "--print"); code != ExitUsage || stdout != "" || stderr == "" {
+		if code, stdout, stderr := runCmd("install", "--print"); code != ExitUsage || stdout != "" || !strings.Contains(stderr, want) {
 			t.Errorf("%s: exit = %d stdout %q stderr %q", exe, code, stdout, stderr)
 		}
 	}
 }
 
+// --print is install without the writing: what install refuses, --print
+// refuses with the same words and prints no unit, and neither of the two
+// looking modes creates anything.
+func TestInstallPrintAndDryRunRefuseWhatInstallRefuses(t *testing.T) {
+	cases := map[string]struct {
+		setup func(h *hostRig)
+		want  string
+	}{
+		"a missing configuration": {func(h *hostRig) { h.fs.Remove("/etc/keepwatch/keepwatch.yaml") }, "keepwatch init"},
+		"a token file under /tmp": {func(h *hostRig) {
+			h.cfg.Notify.Ntfy = &config.Ntfy{URL: "https://ntfy.example.org", Topic: "x", TokenFile: "/tmp/kwtok/ntfy.token"}
+		}, "the directory of notify.ntfy.token_file /tmp/kwtok is under /tmp"},
+		"a state_dir whose parent a user owns": {func(h *hostRig) {
+			h.fs.AddDir("/home", 0o755, 0)
+			h.fs.AddDir("/home/tester", 0o750, 1000)
+			h.cfg.StateDir = "/home/tester/kwstate"
+		}, "state_dir /home/tester/kwstate cannot be created in a trusted place: /home/tester is owned by uid 1000"},
+		"a configuration directory a user can write": {func(h *hostRig) { h.fs.AddDir("/etc/keepwatch", 0o777, 0) },
+			"the configuration directory /etc/keepwatch cannot be trusted"},
+	}
+	for name, c := range cases {
+		h := newHost(t)
+		h.withConfigFile()
+		c.setup(h)
+		var first string
+		for _, args := range [][]string{{"install"}, {"install", "--dry-run"}, {"install", "--print"}, {"install", "--print", "--dry-run"}} {
+			code, stdout, stderr := runCmd(args...)
+			if code != ExitUsage || stdout != "" || !strings.Contains(stderr, c.want) {
+				t.Errorf("%s %v: exit = %d stdout %q stderr %q", name, args, code, stdout, stderr)
+			}
+			if first == "" {
+				first = stderr
+			}
+			if stderr != first {
+				t.Errorf("%s %v: the message differs from the one of install:\n%s%s", name, args, first, stderr)
+			}
+		}
+		if len(h.fs.Log) != 0 || len(h.sd.Runner.Calls) != 0 {
+			t.Errorf("%s: a refused command did something: %v %v", name, h.fs.Log, h.sd.Runner.Calls)
+		}
+	}
+	// Accepted, a missing state_dir is created by install alone.
+	h := newHost(t)
+	h.withConfigFile()
+	for _, args := range [][]string{{"install", "--dry-run"}, {"install", "--print"}} {
+		if code, _, stderr := runCmd(args...); code != ExitOK {
+			t.Fatalf("%v: exit = %d stderr = %q", args, code, stderr)
+		}
+		if h.fs.Exists("/var/lib/keepwatch") || len(h.fs.Log) != 0 {
+			t.Fatalf("%v created something: %v", args, h.fs.Log)
+		}
+	}
+	if code, _, stderr := runCmd("install"); code != ExitOK || !h.fs.Exists("/var/lib/keepwatch") {
+		t.Errorf("install: exit = %d stderr = %q", code, stderr)
+	}
+}
+
 func TestInstallUsesThePathOfTheConfigurationFile(t *testing.T) {
 	h := newHost(t)
+	h.fs.AddDir("/srv", 0o755, 0)
+	h.fs.AddDir("/srv/kw", 0o750, 0)
+	h.fs.AddFile("/srv/kw/main.yaml", 0o640, 0, "{}\n")
 	code, stdout, _ := runCmd("install", "--print", "--config", "/srv/kw/../kw/main.yaml")
 	if code != ExitOK || !strings.Contains(stdout, "--config /srv/kw/main.yaml\n") {
 		t.Errorf("exit = %d\n%s", code, stdout)
 	}
-	_ = h
 	if code, _, stderr := runCmd("install", "--print", "--config", "/srv/my config.yaml"); code != ExitUsage || !strings.Contains(stderr, "configuration file") {
 		t.Errorf("exit = %d stderr = %q", code, stderr)
 	}
@@ -187,6 +276,7 @@ func TestInstallExitCodes(t *testing.T) {
 	})
 	t.Run("a binary a user can change is 2 and nothing is written", func(t *testing.T) {
 		h := newHost(t)
+		h.withConfigFile()
 		h.fs.AddFile("/usr/local/bin/keepwatch", 0o755, 1000, "")
 		code, _, stderr := runCmd("install")
 		if code != ExitUsage || !strings.Contains(stderr, "cannot be trusted to run as root") || !strings.Contains(stderr, "install -o root -g root") {
@@ -692,4 +782,65 @@ func TestABadNtfyConfigurationIsRefusedEverywhere(t *testing.T) {
 			noSecret(strings.Join(args, " "), stdout)
 		}
 	}
+}
+
+// doctor without --config examines the configuration the installed units run
+// with. The defect before: the units ran with a file that was not valid (every
+// run exits 3) while the default file was fine, and doctor said "no problems".
+func TestDoctorExaminesTheConfigurationOfTheInstalledUnits(t *testing.T) {
+	const custom = "/srv/kw/main.yaml"
+	setup := func(t *testing.T) (*hostRig, *fakeNtfy, *fakeNtfy) {
+		h := newHost(t)
+		h.withConfigFile()
+		h.fs.AddDir("/srv", 0o755, 0)
+		h.fs.AddDir("/srv/kw", 0o750, 0)
+		h.fs.AddFile(custom, 0o640, 0, "{}\n")
+		// The default file and the file of the units name different servers.
+		def, own := withNtfy(t, h), newFakeNtfy(t)
+		h.cfgs[custom] = &config.Config{Sources: config.Sources{Main: custom}, StateDir: "/srv/kw/state", Checks: map[string]config.Check{},
+			Notify: config.Notify{Ntfy: &config.Ntfy{URL: own.srv.URL, Topic: "kw-own"}}}
+		if code, _, stderr := runCmd("install", "--config", custom); code != ExitOK {
+			t.Fatalf("install: %d %q", code, stderr)
+		}
+		return h, def, own
+	}
+	t.Run("an invalid configuration behind the units is a problem without --config", func(t *testing.T) {
+		h, _, _ := setup(t)
+		h.cfgErrs[custom] = config.Errors{{File: custom, Line: 3, Msg: "unknown key"}}
+		code, stdout, _ := runCmd("doctor")
+		if code != ExitError || !strings.Contains(stdout, "PROBLEM config: "+custom+":3: unknown key") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("healthy, the report is about the file of the units", func(t *testing.T) {
+		setup(t)
+		code, stdout, _ := runCmd("doctor")
+		if code != ExitOK || !strings.Contains(stdout, "config: "+custom+" is valid") || !strings.Contains(stdout, "doctor: all ok") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+	})
+	t.Run("--send-test goes through the configuration of the units", func(t *testing.T) {
+		h, def, own := setup(t)
+		code, stdout, _ := runDoctorEnv(h, env{notifyOpts: []notify.Option{notify.WithBackoff(0)}}, "--send-test")
+		if code != ExitOK || own.count() != 1 || def.count() != 0 || own.last().Path != "/kw-own" {
+			t.Errorf("exit = %d, %d messages to the server of the units, %d to the one of the default file\n%s", code, own.count(), def.count(), stdout)
+		}
+	})
+	t.Run("--config naming another file is a problem that names both", func(t *testing.T) {
+		h, def, own := setup(t)
+		code, stdout, _ := runDoctorEnv(h, env{notifyOpts: []notify.Option{notify.WithBackoff(0)}}, "--config", "/etc/keepwatch/../keepwatch/keepwatch.yaml", "--send-test")
+		if code != ExitError || !strings.Contains(stdout, "runs with --config "+custom+", but this doctor run examined /etc/keepwatch/keepwatch.yaml (given with --config)") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+		// The test message goes through the file that was asked for.
+		if def.count() != 1 || own.count() != 0 {
+			t.Errorf("%d messages to the server of the given file, %d to the one of the units", def.count(), own.count())
+		}
+	})
+	t.Run("--config naming the file of the units changes nothing", func(t *testing.T) {
+		setup(t)
+		if code, stdout, _ := runCmd("doctor", "--config", custom); code != ExitOK || !strings.Contains(stdout, "doctor: all ok") {
+			t.Errorf("exit = %d\n%s", code, stdout)
+		}
+	})
 }

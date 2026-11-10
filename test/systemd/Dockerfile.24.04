@@ -1,0 +1,16 @@
+# Image for the sandbox measurement of keepwatch on Ubuntu 24.04: systemd runs as
+# PID 1 in it. The base is pinned by the digest of the multi-arch index, as in
+# test/e2e.
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv \
+ && rm -rf /var/lib/apt/lists/*
+
+# A container has no kernel modules. The directory is there so that what
+# ProtectKernelModules=yes does to it can be measured.
+RUN mkdir -p /usr/lib/modules /opt/keepwatch /out
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

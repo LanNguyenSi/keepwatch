@@ -35,13 +35,18 @@ type MemFS struct {
 	FailWrite map[string]error
 	// FailOpenDir makes OpenDir of the named path fail with the error.
 	FailOpenDir map[string]error
+	// FailMkdir makes Mkdir of the named path fail with the error.
+	FailMkdir map[string]error
+	// AfterMkdir runs after Mkdir created the path; a test changes the new
+	// directory there, as somebody else on the host could.
+	AfterMkdir func(p string)
 }
 
 // NewMemFS returns a file system with a root-owned "/", the directories /etc,
 // /run, /var, /var/lib and /usr/local/bin, and a root-owned keepwatch binary in
 // the last.
 func NewMemFS() *MemFS {
-	m := &MemFS{nodes: map[string]*node{}, FailWrite: map[string]error{}, FailOpenDir: map[string]error{}}
+	m := &MemFS{nodes: map[string]*node{}, FailWrite: map[string]error{}, FailOpenDir: map[string]error{}, FailMkdir: map[string]error{}}
 	for _, d := range []string{"/", "/etc", "/etc/systemd", "/etc/systemd/system", "/run", "/run/systemd", "/run/systemd/system", "/var", "/var/lib", "/usr", "/usr/local", "/usr/local/bin"} {
 		m.nodes[d] = &node{mode: fs.ModeDir | 0o755}
 	}
@@ -107,6 +112,9 @@ func (m *MemFS) Mkdir(p string, perm fs.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p = path.Clean(p)
+	if err, ok := m.FailMkdir[p]; ok {
+		return err
+	}
 	if _, ok := m.nodes[p]; ok {
 		return &fs.PathError{Op: "mkdir", Path: p, Err: fs.ErrExist}
 	}
@@ -115,6 +123,9 @@ func (m *MemFS) Mkdir(p string, perm fs.FileMode) error {
 	}
 	m.nodes[p] = &node{mode: fs.ModeDir | perm}
 	m.Log = append(m.Log, "mkdir "+p)
+	if m.AfterMkdir != nil {
+		m.AfterMkdir(p)
+	}
 	return nil
 }
 

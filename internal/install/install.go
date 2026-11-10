@@ -12,11 +12,10 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 )
 
-// Modes of the directories install creates.
+// Modes of what install creates.
 const (
-	ConfigDirMode fs.FileMode = 0o750
-	StateDirMode  fs.FileMode = 0o700
-	unitFileMode  fs.FileMode = 0o644
+	StateDirMode fs.FileMode = 0o700
+	unitFileMode fs.FileMode = 0o644
 )
 
 // maxUnitSize bounds a unit file that is read: a larger file cannot be ours.
@@ -81,6 +80,15 @@ type InstallOptions struct {
 	// ConfigFound is false when the configuration file does not exist; install
 	// then refuses, because the services have nothing to read.
 	ConfigFound bool
+	// TokenFile is notify.ntfy.token_file of the configuration, empty when
+	// there is none. The services read it, so it is part of the placement
+	// check.
+	TokenFile string
+}
+
+// paths are the inputs of the path manifest for these options.
+func (o InstallOptions) paths() Paths {
+	return Paths{Binary: o.Spec.Binary, ConfigPath: o.Spec.ConfigPath, StateDir: o.Spec.StateDir, TokenFile: o.TokenFile}
 }
 
 type fileAction struct {
@@ -88,32 +96,39 @@ type fileAction struct {
 	action string // "create", "update" or "unchanged"
 }
 
-type dirAction struct {
-	path string
-	mode fs.FileMode
-	make bool
+// Preflight is everything install decides before it needs root or systemd,
+// and it only looks: the grammar of the values (Render), the presence of the
+// configuration file, and the placement of every path the services depend on
+// (CheckPlacement over Manifest). It returns the unit files to write. Install
+// starts with it, and "install --print" is this and nothing more, so a unit
+// file that is printed is one that install would write.
+func Preflight(fsys FS, o InstallOptions) ([]File, error) {
+	files, err := Render(o.Spec)
+	if err != nil {
+		return nil, refuse("%v", err)
+	}
+	// The services read this file on every run: without it each run exits 3.
+	if !o.ConfigFound {
+		return nil, refuse("the configuration file %s does not exist, so every scheduled run would exit 3: create it first with \"keepwatch init\" (add --config %s if it is not the default path), edit it, and run install again", o.Spec.ConfigPath, o.Spec.ConfigPath)
+	}
+	if problems := CheckPlacement(fsys, Manifest(o.paths())); len(problems) > 0 {
+		return nil, refuse("%s", PlacementError(problems))
+	}
+	return files, nil
 }
 
 // Install writes the directories and the four unit files and enables the
 // timers. With DryRun nothing is written or run, except for read-only queries
 // of systemd. It is idempotent: a second run changes nothing and says so.
 func Install(ctx context.Context, d Deps, o InstallOptions) error {
-	files, err := Render(o.Spec)
+	files, err := Preflight(d.FS, o)
 	if err != nil {
-		return refuse("%v", err)
+		return err
 	}
 	say := func(format string, a ...any) { fmt.Fprintf(d.Out, format+"\n", a...) }
 	would := ""
 	if o.DryRun {
 		would = "would "
-	}
-	// The service runs this file as root: nobody else may be able to change it.
-	if err := TrustedPath(d.FS, o.Spec.Binary, KindFile); err != nil {
-		return refuse("the keepwatch binary %s cannot be trusted to run as root: %v\nput it where only root can change it and run install from there, for example: install -o root -g root -m 0755 keepwatch /usr/local/bin/ && /usr/local/bin/keepwatch install", o.Spec.Binary, err)
-	}
-	// The services read this file on every run: without it each run exits 3.
-	if !o.ConfigFound {
-		return refuse("the configuration file %s does not exist, so every scheduled run would exit 3: create it first with \"keepwatch init\" (add --config %s if it is not the default path), edit it, and run install again", o.Spec.ConfigPath, o.Spec.ConfigPath)
 	}
 	if !o.DryRun && d.Geteuid() != 0 {
 		return refuse("install writes below /etc and runs systemctl, run it as root (or use --dry-run or --print)")
@@ -130,32 +145,11 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	}
 
 	// Plan everything before the first write, so a conflict leaves the host
-	// as it was.
-	var dirs []dirAction
-	for _, want := range []dirAction{
-		{path: filepath.Dir(o.Spec.ConfigPath), mode: ConfigDirMode},
-		{path: o.Spec.StateDir, mode: StateDirMode},
-	} {
-		_, err := d.FS.Lstat(want.path)
-		switch {
-		case err == nil:
-			// Opening checks it the way the loaders will.
-			dir, derr := d.FS.OpenDir(want.path)
-			if derr != nil {
-				return refuse("%v", derr)
-			}
-			dir.Close()
-		case errors.Is(err, fs.ErrNotExist):
-			want.make = true
-			parent := filepath.Dir(want.path)
-			if pi, perr := d.FS.Lstat(parent); perr != nil || !pi.IsDir() {
-				return refuse("%s: the parent directory %s does not exist", want.path, parent)
-			}
-		default:
-			return refuse("%s: %v", want.path, err)
-		}
-		dirs = append(dirs, want)
-	}
+	// as it was. The configuration directory exists (the file in it was
+	// found); state_dir is the one directory install creates. Preflight has
+	// checked it, or its parent while it is missing.
+	_, serr := d.FS.Lstat(o.Spec.StateDir)
+	makeState := errors.Is(serr, fs.ErrNotExist)
 
 	unitDir := d.unitDir()
 	ud, err := d.FS.OpenDir(unitDir)
@@ -178,26 +172,18 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	}
 
 	changed := false
-	for _, da := range dirs {
-		if !da.make {
-			continue
-		}
+	if makeState {
 		changed = true
-		say("%screate directory %s (mode %04o)", would, da.path, da.mode)
+		say("%screate directory %s (mode %04o)", would, o.Spec.StateDir, StateDirMode)
 		if !o.DryRun {
-			if err := d.FS.Mkdir(da.path, da.mode); err != nil {
-				return failed("create %s: %v", da.path, err)
+			if err := d.FS.Mkdir(o.Spec.StateDir, StateDirMode); err != nil {
+				return failed("create %s: %v", o.Spec.StateDir, err)
 			}
-		}
-	}
-	// The state directory must be usable by the services as it now is.
-	if !o.DryRun {
-		for _, da := range dirs {
-			dir, err := d.FS.OpenDir(da.path)
-			if err != nil {
-				return failed("%v", err)
+			// Until now only the parent was checked: the directory must be
+			// the trusted one that was just made before anything depends on it.
+			if problems := CheckPlacement(d.FS, Manifest(o.paths())); len(problems) > 0 {
+				return failed("after creating %s: %s", o.Spec.StateDir, PlacementError(problems))
 			}
-			dir.Close()
 		}
 	}
 	updatedTimers := map[string]bool{}

@@ -104,7 +104,15 @@ func TestInstallRefusesAnUntrustedBinary(t *testing.T) {
 				t.Errorf("%s dry=%v: err = %v, want ErrRefused", name, dry, err)
 				continue
 			}
-			for _, want := range []string{s.Binary, "cannot be trusted to run as root", "install -o root -g root -m 0755 keepwatch /usr/local/bin/"} {
+			wants := []string{s.Binary, "cannot be trusted to run as root", "install -o root -g root -m 0755 keepwatch /usr/local/bin/"}
+			if name == "missing" {
+				// A binary that is not there is not called untrusted.
+				wants = []string{s.Binary, "does not exist", "the scheduled run cannot start"}
+				if strings.Contains(err.Error(), "cannot be trusted") {
+					t.Errorf("a missing binary is called untrusted: %v", err)
+				}
+			}
+			for _, want := range wants {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("%s: the message lacks %q: %v", name, want, err)
 				}

@@ -40,14 +40,25 @@ type rig struct {
 	cfgErr  error
 	missing resolver
 	state   doctor.StateStatus
+	// configPath is the --config given to doctor; empty means none, as when
+	// the command is run without the flag.
+	configPath string
+	// cfgs are the configurations by path; a path that is not in it loads
+	// cfg (or fails with cfgErr).
+	cfgs    map[string]*config.Config
+	cfgErrs map[string]error
+	// loaded records the paths doctor asked for.
+	loaded []string
 }
 
 // newRig is a healthy host: root, a valid configuration, every program, the
 // units installed and the timers running.
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	r := &rig{fs: installtest.NewMemFS(), sd: installtest.NewSystemd(), missing: resolver{}}
+	r := &rig{fs: installtest.NewMemFS(), sd: installtest.NewSystemd(), missing: resolver{}, cfgs: map[string]*config.Config{}, cfgErrs: map[string]error{}}
 	r.fs.AddDir("/run/sshd", 0o755, 0)
+	r.fs.AddDir("/etc/keepwatch", 0o750, 0)
+	r.fs.AddFile(cfgPath, 0o640, 0, "{}\n")
 	r.cfg = &config.Config{
 		Sources:  config.Sources{Main: cfgPath, ConfD: []string{"/etc/keepwatch/conf.d/a.yaml"}},
 		StateDir: stateDir, Checks: map[string]config.Check{},
@@ -63,24 +74,35 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r.sd.Loaded[install.CheckService], r.sd.Loaded[install.ReportService] = true, true
-	r.fs.AddFile(cfgPath, 0o644, 0, "{}\n")
 	return r
 }
 
+// load is the configuration loader of the rig.
+func (r *rig) load(p string) (*config.Config, error) {
+	r.loaded = append(r.loaded, p)
+	if err, ok := r.cfgErrs[p]; ok {
+		return nil, err
+	}
+	if c, ok := r.cfgs[p]; ok {
+		return c, nil
+	}
+	if r.cfgErr != nil {
+		return nil, r.cfgErr
+	}
+	return r.cfg, nil
+}
+
 func (r *rig) run() doctor.Report {
-	d := doctor.Deps{
-		ConfigPath: cfgPath,
-		LoadConfig: func(string) (*config.Config, error) { return r.cfg, r.cfgErr },
+	r.loaded = nil
+	return doctor.Run(context.Background(), doctor.Deps{
+		ConfigPath: r.configPath,
+		LoadConfig: r.load,
 		Resolver:   r.missing,
 		Runner:     r.sd.Runner,
 		FS:         r.fs,
 		Geteuid:    func() int { return r.uid },
 		State:      func(string) doctor.StateStatus { return r.state },
-	}
-	if r.cfgErr != nil {
-		d.LoadConfig = func(string) (*config.Config, error) { return nil, r.cfgErr }
-	}
-	return doctor.Run(context.Background(), d)
+	})
 }
 
 // has reports whether the report has a finding of the level in the area whose
@@ -137,6 +159,10 @@ func TestInvalidConfiguration(t *testing.T) {
 	rep := r.run()
 	if !has(rep, doctor.Problem, "config", cfgPath+":3", "state_dir") || !has(rep, doctor.Problem, "config", ":9") {
 		t.Errorf("\n%s", dump(rep))
+	}
+	// One finding per error, each on its own line.
+	if has(rep, doctor.Problem, "config", ":3", ":9") || rep.Problems() != 2 {
+		t.Errorf("want the two errors as two findings:\n%s", dump(rep))
 	}
 	// Without a configuration nothing that depends on it is claimed as ok.
 	for _, f := range rep.Findings {
@@ -365,26 +391,31 @@ func TestUnitConfigurationFile(t *testing.T) {
 			r.fs.AddFile(p, 0o644, 0, strings.ReplaceAll(c, "--config "+cfgPath, "--config "+path))
 		}
 	}
+	// Without --config doctor examines the file of the units, so its
+	// placement is a finding about the configuration, said once.
 	t.Run("under /tmp: the service does not see it", func(t *testing.T) {
 		r := newRig(t)
 		setConfig(r, "/tmp/kwc/keepwatch.yaml")
-		for _, svc := range []string{install.CheckService, install.ReportService} {
-			if rep := r.run(); !has(rep, doctor.Problem, "units", svc, "/tmp/kwc/keepwatch.yaml", "under /tmp", "exits 3") {
-				t.Errorf("%s:\n%s", svc, dump(rep))
-			}
+		rep := r.run()
+		if !has(rep, doctor.Problem, "config", "the configuration directory /tmp/kwc", "under /tmp", "exits 3") || rep.Problems() != 1 {
+			t.Errorf("\n%s", dump(rep))
+		}
+		if rep.ConfigPath != "/tmp/kwc/keepwatch.yaml" {
+			t.Errorf("examined %q", rep.ConfigPath)
 		}
 	})
 	t.Run("missing", func(t *testing.T) {
 		r := newRig(t)
+		r.fs.AddDir("/srv", 0o755, 0)
 		setConfig(r, "/srv/gone.yaml")
-		if rep := r.run(); !has(rep, doctor.Problem, "units", "/srv/gone.yaml", "cannot be read", "exits 3") {
+		if rep := r.run(); !has(rep, doctor.Problem, "config", "the configuration file /srv/gone.yaml does not exist", "exits 3") || rep.Problems() != 1 {
 			t.Errorf("\n%s", dump(rep))
 		}
 	})
 	t.Run("the file of the unit is deleted", func(t *testing.T) {
 		r := newRig(t)
 		r.fs.Remove(cfgPath)
-		if rep := r.run(); !has(rep, doctor.Problem, "units", cfgPath, "cannot be read") {
+		if rep := r.run(); !has(rep, doctor.Problem, "config", "the configuration file "+cfgPath+" does not exist") {
 			t.Errorf("\n%s", dump(rep))
 		}
 	})
@@ -474,10 +505,17 @@ func TestUnits(t *testing.T) {
 	})
 	t.Run("another configuration file", func(t *testing.T) {
 		r := newRig(t)
-		d := doctor.Deps{ConfigPath: "/srv/kw.yaml", LoadConfig: func(string) (*config.Config, error) { return r.cfg, nil }, Resolver: r.missing, Runner: r.sd.Runner,
-			FS: r.fs, Geteuid: func() int { return 0 }, State: func(string) doctor.StateStatus { return r.state }}
-		if rep := doctor.Run(context.Background(), d); !has(rep, doctor.Warn, "units", "--config "+cfgPath, "/srv/kw.yaml") {
-			t.Errorf("\n%s", dump(rep))
+		r.fs.AddDir("/srv", 0o755, 0)
+		r.fs.AddFile("/srv/kw.yaml", 0o640, 0, "{}\n")
+		r.configPath = "/srv/kw.yaml"
+		rep := r.run()
+		for _, svc := range []string{install.CheckService, install.ReportService} {
+			if !has(rep, doctor.Problem, "units", svc, "runs with --config "+cfgPath, "examined /srv/kw.yaml (given with --config)", "without --config") {
+				t.Errorf("%s:\n%s", svc, dump(rep))
+			}
+		}
+		if rep.Problems() != 2 || rep.ConfigPath != "/srv/kw.yaml" {
+			t.Errorf("want exactly the two problems about /srv/kw.yaml:\n%s", dump(rep))
 		}
 	})
 	timers := map[string]struct {
