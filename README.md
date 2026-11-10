@@ -637,8 +637,11 @@ compares with that snapshot and does not send them. When `notify.ntfy` is config
 a run says so on stderr ("moved the state forward past N alert-worthy changes that no
 notification will tell"). Use `--no-state` for a look that must not do that.
 
-**A signal during the delivery** (SIGINT, SIGTERM) is an interrupted run like one during the
-checks: exit code 3, nothing is stored, the next run reports and sends the same changes.
+**A signal during the delivery of `check --notify`** (SIGINT, SIGTERM) is an interrupted run like
+one during the checks: exit code 3, nothing is stored, the next run reports and sends the same
+changes. If the message had already reached the server, it arrives twice; it is never lost.
+For `report --weekly --notify` a signal during the delivery counts as a failed delivery (exit
+code 4, a weekly failure is recorded).
 
 **Priority and tags.** The priority is that of the highest severity among the alerts
 (baseline: among the `fail` and `error` findings): critical 5 (urgent), high 4, medium
