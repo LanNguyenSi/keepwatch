@@ -46,6 +46,8 @@ current archive) and runs `keepwatch check --format json` in five scenarios:
 | `nochange` | two runs without a change: no changes | 0, 0 |
 | `reboot` | a run, then the reboot marker file, then a second run: `system.reboot_required` is a `new_failure` with an alert | 0, 1 |
 
+`run.sh` also asserts the exit code of every run against a table of its own, independent of the golden files, and in `-update` mode it refuses to write an empty or invalid result.
+
 The reports are compared with `test/e2e/golden/<release>/<scenario>.json`, which
 also hold the exit code of every run and its stderr (empty). The container
 starts sshd and fail2ban by hand, because there is no systemd.
@@ -78,6 +80,14 @@ points it at a plain log file instead of the journal), only sshd listens, and
 the file systems are below the thresholds. `disk.usage` is configured with
 thresholds of 99 and 100 percent, so a full runner cannot change the result.
 
+### Known issue
+
+The `open` goldens contain a mangled failure text for `ssh.permit_root_login`:
+the redaction rule for command-line flags (`-password <value>`) reads
+"prohibit-password or" in the list of allowed values as a flag with a value and
+replaces "or" with `[REDACTED]`. The goldens record what keepwatch prints today.
+A separate fix of the redaction will regenerate them with `-update`.
+
 ### Normalisation
 
 Before the comparison the report is rewritten in `test/e2e/normalize.jq`, and
@@ -94,7 +104,7 @@ The host name is not normalised: the container gets a fixed one. After the
 rewrite, `run.sh` compares what `test/e2e/signature.jq` extracts (check ids,
 kinds, statuses, severities, changes with their alert flag, subjects and
 status transitions, the lists of still failing and warning checks, the counts,
-the exit code and `fail_on`) from the raw and the rewritten report, and fails
+the exit code, `fail_on` and the wording of each summary without its numbers, versions and placeholders) from the raw and the rewritten report, and fails
 when they differ. A rewrite cannot hide a status or a check id.
 
 ## Configuration

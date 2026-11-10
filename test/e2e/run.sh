@@ -71,6 +71,18 @@ trap cleanup EXIT
 echo "e2e: building keepwatch for linux/$arch"
 (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$go" build -trimpath -o "$work/keepwatch" ./cmd/keepwatch)
 
+# expected_exit_codes SCENARIO: the exit code of each run, independent of the
+# golden files (the same on every release).
+expected_exit_codes() {
+  case $1 in
+    hardened) echo "0" ;;
+    open) echo "1" ;;
+    diff | reboot) echo "0 1" ;;
+    nochange) echo "0 0" ;;
+    *) echo "e2e: no expected exit codes for scenario $1" >&2; return 1 ;;
+  esac
+}
+
 # run_scenario RELEASE SCENARIO: runs the container, leaves the raw results in
 # $work/raw/RELEASE/SCENARIO/.
 run_scenario() {
@@ -93,23 +105,28 @@ run_scenario() {
 # code of the process, the stderr text and the normalised report. Fails when
 # the normalisation changed anything signature.jq protects.
 assemble() {
-  local dir=$1 f n code raw norm
+  local dir=$1 f n code raw norm doc
   local docs=()
   for f in "$dir"/run*.json; do
+    [ -s "$f" ] || { echo "e2e: no report in $f" >&2; return 1; }
+    jq -e '(.results | length) > 0 and (.exit_code | type) == "number"' "$f" >/dev/null \
+      || { echo "e2e: $f is not a keepwatch report" >&2; return 1; }
     n=${f##*/run}
     n=${n%.json}
-    code=$(tr -d '[:space:]' <"$dir/run$n.exit")
-    raw=$(jq -S -f "$here/signature.jq" "$f")
-    norm=$(jq -S -f "$normalize" "$f" | jq -S -f "$here/signature.jq")
-    if [ "$raw" != "$norm" ]; then
+    code=$(tr -d '[:space:]' <"$dir/run$n.exit") || return 1
+    raw=$(jq -S -f "$here/signature.jq" "$f") || return 1
+    norm=$(jq -S -f "$normalize" "$f" | jq -S -f "$here/signature.jq") || return 1
+    if [ -z "$raw" ] || [ "$raw" != "$norm" ]; then
       echo "e2e: the normalisation changed a protected field in $f" >&2
       diff <(printf '%s\n' "$raw") <(printf '%s\n' "$norm") >&2 || true
       return 1
     fi
-    docs+=("$(jq -S -n --argjson n "$n" --argjson code "$code" \
+    doc=$(jq -S -n --argjson n "$n" --argjson code "$code" \
       --rawfile stderr "$dir/run$n.stderr" --slurpfile report <(jq -S -f "$normalize" "$f") \
-      '{run: $n, process_exit_code: $code, stderr: $stderr, report: $report[0]}')")
+      '{run: $n, process_exit_code: $code, stderr: $stderr, report: $report[0]}') || return 1
+    docs+=("$doc")
   done
+  [ ${#docs[@]} -gt 0 ] || { echo "e2e: no run in $dir" >&2; return 1; }
   printf '%s\n' "${docs[@]}" | jq -S -s '{runs: .}'
 }
 
@@ -121,7 +138,16 @@ for rel in "${releases[@]}"; do
     run_scenario "$rel" "$sc" || { status=1; continue; }
     actual=$work/actual/$rel/$sc.json
     mkdir -p "$(dirname "$actual")"
-    assemble "$work/raw/$rel/$sc" >"$actual" || { status=1; continue; }
+    assemble "$work/raw/$rel/$sc" >"$actual" || { echo "e2e: FAIL $rel/$sc: no usable output" >&2; status=1; continue; }
+    jq -e '(.runs | length) > 0 and all(.runs[]; (.report.results | length) > 0)' "$actual" >/dev/null \
+      || { echo "e2e: FAIL $rel/$sc: assembled output is empty or invalid" >&2; status=1; continue; }
+    want=$(expected_exit_codes "$sc") || { status=1; continue; }
+    got=$(jq -r '[.runs[] | select(.process_exit_code == .report.exit_code) | .process_exit_code] | join(" ")' "$actual") || { status=1; continue; }
+    if [ "$got" != "$want" ]; then
+      echo "e2e: FAIL $rel/$sc: exit codes (process = report) are '$got', expected '$want'" >&2
+      status=1
+      continue
+    fi
     golden=$here/golden/$rel/$sc.json
     if [ "$update" -eq 1 ]; then
       mkdir -p "$(dirname "$golden")"
