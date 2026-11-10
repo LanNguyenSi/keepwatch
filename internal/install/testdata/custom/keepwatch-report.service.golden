@@ -1,0 +1,42 @@
+# keepwatch-managed-unit: written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.
+[Unit]
+Description=keepwatch weekly report
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/kw-1.2/bin/keepwatch report --weekly --config /srv/kw/main.yaml
+# 0 and 1 are normal: 1 means the host has findings, and the notification (not
+# a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
+SuccessExitStatus=1
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/kw/state
+# read-only, not yes: the authorized_keys check reads /home and /root.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+# AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Two 64 MiB buffers of "ss" output (tcp and udp) with their copies peak at
+# 750-900 MiB without a soft limit (about 480 MiB with GOMEMLIMIT); the largest
+# state file is a 16 MiB read, around 100 MB.
+MemoryMax=1G
+Environment=GOMEMLIMIT=384MiB
+CPUQuota=50%
+TimeoutStartSec=10min

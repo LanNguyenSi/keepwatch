@@ -1,0 +1,366 @@
+// Package install writes and removes the systemd units that run keepwatch on
+// a schedule, and renders them. keepwatch runs as root, so this package is
+// careful about what it writes and removes:
+//
+//   - A unit file carries a marker comment on its first line. install never
+//     overwrites a file without the marker, and uninstall removes only files
+//     with it.
+//   - Every write goes through an opened, checked directory (see FS): the
+//     target is never a symlink, the data goes into a temporary file that is
+//     renamed into place.
+//   - Everything that reaches a unit line (paths, the interval, the calendar
+//     time) is validated against a strict grammar first, so no value can add
+//     a line, an option or a specifier.
+package install
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"path"
+	"strconv"
+	"strings"
+)
+
+// Unit file names, in the order they are written. Services come before the
+// timers that start them.
+const (
+	CheckService  = "keepwatch-check.service"
+	CheckTimer    = "keepwatch-check.timer"
+	ReportService = "keepwatch-report.service"
+	ReportTimer   = "keepwatch-report.timer"
+)
+
+// UnitNames lists the unit files keepwatch owns, services first.
+var UnitNames = []string{CheckService, ReportService, CheckTimer, ReportTimer}
+
+// Timers lists the timer units, which install enables and uninstall disables.
+var Timers = []string{CheckTimer, ReportTimer}
+
+// DefaultUnitDir is where the units are written.
+const DefaultUnitDir = "/etc/systemd/system"
+
+// markerPrefix starts the first line of every unit file keepwatch writes. A
+// file is keepwatch's if, and only if, its first line starts with it.
+const markerPrefix = "# keepwatch-managed-unit:"
+
+// markerLine is the whole first line.
+const markerLine = markerPrefix + ` written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.`
+
+// HasMarker reports whether content starts with the keepwatch marker line.
+func HasMarker(content []byte) bool {
+	first, _, _ := bytes.Cut(content, []byte("\n"))
+	return bytes.HasPrefix(first, []byte(markerPrefix))
+}
+
+// Defaults of the schedule.
+const (
+	DefaultInterval     = "6h"
+	DefaultWeeklyReport = "Mon 08:00"
+)
+
+// Interval is the time between two checks.
+type Interval struct {
+	N    int
+	Unit string // "min", "h" or "d"
+}
+
+// Bounds of the interval: below five minutes a check would overlap its own
+// slowest probe (apt takes up to 90 seconds), above thirty days it is no
+// longer a watch.
+const (
+	minIntervalMinutes = 5
+	maxIntervalMinutes = 30 * 24 * 60
+)
+
+// String returns the interval as systemd writes a time span: 5min, 6h, 2d.
+func (i Interval) String() string { return strconv.Itoa(i.N) + i.Unit }
+
+// ParseInterval parses the --interval value. The grammar is one positive
+// number without leading zeros (at most five digits) and one unit, m, h or d
+// (minutes, hours, days), lower case, nothing else: no spaces, no sign, no
+// fraction, no second unit, no "infinity". The span must be at least five
+// minutes and at most thirty days.
+func ParseInterval(s string) (Interval, error) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	num, unit := s[:i], s[i:]
+	bad := func() (Interval, error) {
+		return Interval{}, fmt.Errorf("interval \"%s\": want one number and one unit (m, h or d), for example 30m, 6h or 1d", quote(s))
+	}
+	if num == "" || len(num) > 5 || num[0] == '0' {
+		return bad()
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return bad()
+	}
+	var iv Interval
+	var minutes int
+	switch unit {
+	case "m":
+		iv, minutes = Interval{n, "min"}, n
+	case "h":
+		iv, minutes = Interval{n, "h"}, n*60
+	case "d":
+		iv, minutes = Interval{n, "d"}, n*60*24
+	default:
+		return bad()
+	}
+	if minutes < minIntervalMinutes || minutes > maxIntervalMinutes {
+		return Interval{}, fmt.Errorf("interval \"%s\": must be between 5m and 30d", quote(s))
+	}
+	return iv, nil
+}
+
+// Weekly is the day and time of the weekly report.
+type Weekly struct {
+	Day    string // Mon .. Sun
+	Hour   int
+	Minute int
+}
+
+var weekdays = []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+
+// OnCalendar returns the value of the OnCalendar= line.
+func (w Weekly) OnCalendar() string {
+	return fmt.Sprintf("%s *-*-* %02d:%02d:00", w.Day, w.Hour, w.Minute)
+}
+
+// ParseWeekly parses the --weekly-report value. The grammar is a three-letter
+// English day name (Mon, Tue, Wed, Thu, Fri, Sat or Sun, capitalised exactly
+// so), one space and a time HH:MM on the 24-hour clock with two digits each.
+// It is the local time of the host; the schedule is persistent, so a report
+// missed while the host was off runs when it is back.
+func ParseWeekly(s string) (Weekly, error) {
+	bad := func() (Weekly, error) {
+		return Weekly{}, fmt.Errorf("weekly report time \"%s\": want a day and a time like \"Mon 08:00\" (Mon..Sun, HH:MM, 24 hours)", quote(s))
+	}
+	day, clock, ok := strings.Cut(s, " ")
+	if !ok || len(clock) != 5 || clock[2] != ':' {
+		return bad()
+	}
+	found := false
+	for _, d := range weekdays {
+		found = found || d == day
+	}
+	if !found {
+		return bad()
+	}
+	for _, i := range []int{0, 1, 3, 4} {
+		if clock[i] < '0' || clock[i] > '9' {
+			return bad()
+		}
+	}
+	h, _ := strconv.Atoi(clock[:2])
+	m, _ := strconv.Atoi(clock[3:])
+	if h > 23 || m > 59 {
+		return bad()
+	}
+	return Weekly{Day: day, Hour: h, Minute: m}, nil
+}
+
+// quote shortens and escapes a value for a message.
+func quote(s string) string {
+	q := strconv.Quote(s)
+	q = q[1 : len(q)-1]
+	if len(q) > 60 {
+		q = q[:60] + "..."
+	}
+	return q
+}
+
+// safePath reports whether p can be written into a unit line unquoted: an
+// absolute, clean path of ASCII letters, digits and . _ - + @ / only. No
+// space, quote, backslash, dollar, percent (a systemd specifier), semicolon
+// or control character can be in it, and no component is "." or "..".
+func safePath(p string) error {
+	if p == "" || p[0] != '/' || path.Clean(p) != p || len(p) > 1024 {
+		return errors.New("must be a clean absolute path")
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("._-+@/", c) >= 0:
+		default:
+			return fmt.Errorf("contains %q, only letters, digits and . _ - + @ / are allowed", string(c))
+		}
+	}
+	return nil
+}
+
+// volatileDirs hold files that a service with PrivateTmp=yes does not see.
+var volatileDirs = []string{"/tmp", "/var/tmp", "/dev/shm"}
+
+// Spec is everything the units depend on.
+type Spec struct {
+	// Binary is the absolute path of the keepwatch executable.
+	Binary string
+	// ConfigPath is the absolute path of the main configuration file.
+	ConfigPath string
+	// StateDir is state_dir of the configuration.
+	StateDir string
+	Interval Interval
+	Weekly   Weekly
+}
+
+// Validate checks every value that reaches a unit line.
+func (s Spec) Validate() error {
+	var errs []string
+	chk := func(what, p string) {
+		if err := safePath(p); err != nil {
+			errs = append(errs, fmt.Sprintf("%s \"%s\": %v", what, quote(p), err))
+		}
+	}
+	chk("keepwatch binary", s.Binary)
+	chk("configuration file", s.ConfigPath)
+	chk("state_dir", s.StateDir)
+	if s.StateDir == "/" {
+		errs = append(errs, "state_dir must not be /")
+	}
+	for _, d := range volatileDirs {
+		if s.Binary == d || strings.HasPrefix(s.Binary, d+"/") {
+			errs = append(errs, fmt.Sprintf("keepwatch binary \"%s\" is under %s, which the service does not see (PrivateTmp=yes); install it elsewhere, for example /usr/local/bin", quote(s.Binary), d))
+		}
+	}
+	if s.Interval.N == 0 {
+		errs = append(errs, "interval is not set")
+	}
+	if s.Weekly.Day == "" {
+		errs = append(errs, "weekly report time is not set")
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// File is one unit file to be written.
+type File struct {
+	Name    string
+	Content []byte
+}
+
+// Hardening of both services. The reason for every option is in the README.
+const (
+	memoryMax        = "1G"
+	goMemLimit       = "384MiB"
+	cpuQuota         = "50%"
+	timeoutStartSec  = "10min"
+	addressFamilies  = "AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+	serviceHardening = `# 0 and 1 are normal: 1 means the host has findings, and the notification (not
+# a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
+SuccessExitStatus=1
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={{state}}
+# read-only, not yes: the authorized_keys check reads /home and /root.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+# AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
+RestrictAddressFamilies=` + addressFamilies + `
+# Two 64 MiB buffers of "ss" output (tcp and udp) with their copies peak at
+# 750-900 MiB without a soft limit (about 480 MiB with GOMEMLIMIT); the largest
+# state file is a 16 MiB read, around 100 MB.
+MemoryMax=` + memoryMax + `
+Environment=GOMEMLIMIT=` + goMemLimit + `
+CPUQuota=` + cpuQuota + `
+TimeoutStartSec=` + timeoutStartSec + `
+`
+)
+
+// checkArgs and reportArgs are what the services run after the binary.
+var (
+	checkArgs  = []string{"check"}
+	reportArgs = []string{"report", "--weekly"}
+)
+
+// Render returns the four unit files for spec, in write order. It fails if
+// the spec does not validate.
+func Render(s Spec) ([]File, error) {
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	hard := strings.ReplaceAll(serviceHardening, "{{state}}", s.StateDir)
+	exec := func(args []string) string {
+		return s.Binary + " " + strings.Join(args, " ") + " --config " + s.ConfigPath
+	}
+	service := func(desc string, args []string) string {
+		return markerLine + `
+[Unit]
+Description=` + desc + `
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=` + exec(args) + `
+` + hard
+	}
+	timer := func(desc, unit, schedule string) string {
+		return markerLine + `
+[Unit]
+Description=` + desc + `
+
+[Timer]
+` + schedule + `
+Unit=` + unit + `
+
+[Install]
+WantedBy=timers.target
+`
+	}
+	return []File{
+		{CheckService, []byte(service("keepwatch posture check", checkArgs))},
+		{ReportService, []byte(service("keepwatch weekly report", reportArgs))},
+		{CheckTimer, []byte(timer("keepwatch periodic check", CheckService,
+			"OnBootSec=5min\nOnUnitActiveSec="+s.Interval.String()+"\nAccuracySec=1min"))},
+		{ReportTimer, []byte(timer("keepwatch weekly report", ReportService,
+			"OnCalendar="+s.Weekly.OnCalendar()+"\nPersistent=true"))},
+	}, nil
+}
+
+// Installed describes what an installed service file says; doctor compares it
+// with the configuration.
+type Installed struct {
+	ReadWritePaths string
+	ConfigPath     string
+}
+
+// Inspect reads the values doctor needs out of a service file written by
+// Render. Values it does not find are empty.
+func Inspect(content []byte) Installed {
+	var in Installed
+	for _, line := range strings.Split(string(content), "\n") {
+		switch {
+		case strings.HasPrefix(line, "ReadWritePaths="):
+			in.ReadWritePaths = strings.TrimPrefix(line, "ReadWritePaths=")
+		case strings.HasPrefix(line, "ExecStart="):
+			f := strings.Fields(line)
+			for i := 0; i+1 < len(f); i++ {
+				if f[i] == "--config" {
+					in.ConfigPath = f[i+1]
+				}
+			}
+		}
+	}
+	return in
+}

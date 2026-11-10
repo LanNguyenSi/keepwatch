@@ -815,14 +815,168 @@ short, but its cost is paid on every byte of every field that is shown), and a
 bad one is a configuration error with file and line. Lists in `conf.d` files are appended to the main file's list. The redaction
 function (`redact.Redactor.Clean`) is what the notification code uses as well.
 
+## Scheduled runs: install, uninstall, doctor
+
+```sh
+keepwatch install [--interval 6h] [--weekly-report "Mon 08:00"] [--config FILE] [--dry-run] [--print]
+keepwatch uninstall [--purge] [--config FILE] [--dry-run]
+keepwatch doctor [--config FILE] [--send-test]
+```
+
+### install
+
+`install` (run as root) writes four systemd units to `/etc/systemd/system`:
+`keepwatch-check.service` and `.timer`, which run `keepwatch check --config FILE`
+every `--interval`, and `keepwatch-report.service` and `.timer`, which run
+`keepwatch report --weekly --config FILE` at the weekly time. It creates the
+directory of the configuration file (`/etc/keepwatch`, mode 0750) and `state_dir`
+(mode 0700) if they are missing, runs `systemctl daemon-reload` and
+`systemctl enable --now` for both timers, and restarts a timer whose schedule
+changed. The units run the binary that ran `install` (its path is written into
+them), so install it where it stays, for example `/usr/local/bin`. A binary below
+`/tmp`, `/var/tmp` or `/dev/shm` is refused: the services have a private `/tmp`
+and would not find it.
+
+It reads `state_dir` from the configuration file if there is one (an invalid
+configuration is refused, because the service would fail with it); without a
+file it uses `/var/lib/keepwatch` and says that `keepwatch init` is still to do.
+`ReadWritePaths` in the units is that directory, so after changing `state_dir`
+run `install` again (`doctor` tells when the two differ).
+
+`install` is idempotent: with nothing to change it prints `already installed,
+nothing to change` and touches nothing (it still makes sure the timers are
+enabled and active, and enables them if they are not). `--dry-run` lists the
+directories, files and `systemctl` commands, and changes nothing (it asks
+systemd read-only, and works without root). `--print` writes the four unit files
+to stdout, each after a `# ===== name =====` line, and does nothing else; it wins over `--dry-run`.
+
+| Flag | Grammar |
+|---|---|
+| `--interval` | one number from 1 to 99999 without a leading zero and one unit, `m`, `h` or `d` (minutes, hours, days), lower case: `30m`, `6h`, `1d`. At least `5m`, at most `30d`. Written as `OnUnitActiveSec=`; the first run comes five minutes after boot, or at once when the host has been up for longer. Default `6h`. |
+| `--weekly-report` | a day, `Mon` to `Sun` (exactly so, three letters), one space and a time `HH:MM` on the 24-hour clock with two digits each, in the local time of the host: `Mon 08:00`, `Sun 23:59`. Written as `OnCalendar=Mon *-*-* 08:00:00` with `Persistent=true`, so a report missed while the host was off runs when it is back. Default `Mon 08:00`. |
+| `--config` | the main configuration file the services use (default `/etc/keepwatch/keepwatch.yaml`); made absolute and cleaned |
+
+Anything else is a usage error (exit 2): a second unit, a fraction, a space or
+newline in a value, `%`, a quote. The same goes for every path that is written
+into a unit (the binary, the configuration file, `state_dir`): they must be
+clean absolute paths of the characters `A-Z a-z 0-9 . _ - + @ /`, so no value can
+add a line, an option or a systemd specifier.
+
+What `install` does to the files it writes:
+
+- Every unit file starts with a marker comment (`# keepwatch-managed-unit: ...`).
+  A file that is already there without it is never overwritten (exit 2, the
+  message names the file), and nothing is written at all in that case: the
+  conflicts are found before the first write. A symbolic link at the target
+  name, or a directory, is refused the same way.
+- Writes are atomic: a temporary file in the same directory (created exclusively,
+  without following links), written, flushed, set to mode 0644, renamed over the
+  name, and the directory flushed. The target name is never opened for writing,
+  so a link there could not redirect a write.
+- The unit directory, the configuration directory and `state_dir` must be real
+  directories (not symbolic links) that group and other cannot write to and that
+  root or the running user owns; otherwise `install` refuses. An existing
+  directory is left as it is (mode included). Ancestors above these directories
+  are not examined: they must be root-owned.
+
+Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
+failed after work had started (a `systemctl` command, a write; what was done is
+printed and a second run continues), 2 refused or usage error (not root, systemd
+not running, bad flag, a file that is not keepwatch's, an invalid configuration;
+nothing was changed), 3 internal error.
+
+### The units and their hardening
+
+Both services run as root (the checks need it: `sshd -T`, `ss -p`,
+`fail2ban-client`, `docker`, `nft`) and are as confined as the checks allow. The
+options, and why each is set:
+
+| Option | Why |
+|---|---|
+| `Type=oneshot` | one run to completion; the timer arms the next one after it |
+| `SuccessExitStatus=1` | exit 1 means the host has findings; that is news for the notification, not a failed unit. Exit 3 (keepwatch could not do its job) and 4 (delivery failed) still fail the unit, and `doctor` reports a failed last run |
+| `ProtectSystem=strict` | the whole file system is read-only for the service ... |
+| `ReadWritePaths=<state_dir>` | ... except the state directory, the only place keepwatch writes. The apt simulation of `updates.security_pending` runs with `Debug::NoLocking=true` and an in-memory package cache, so it needs no other writable path (checked under systemd) |
+| `ProtectHome=read-only` | not `yes`: the `authorized_keys` check reads `/home/*/.ssh` and `/root/.ssh`; read-only is as far as it can go |
+| `PrivateTmp=yes` | probes and the programs they start get their own `/tmp` |
+| `PrivateDevices=yes` | no access to real device nodes; no check needs any (the results are the same with it) |
+| `NoNewPrivileges=yes` | nothing the checks start can gain privileges through set-uid files |
+| `UMask=0077` | the state file and anything else the service creates is private |
+| `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `ProtectControlGroups=yes` | the checks only read; none of them changes kernel settings, loads modules, reads the kernel log, sets the clock or hostname, or touches cgroups |
+| `LockPersonality=yes`, `RestrictRealtime=yes`, `RestrictSUIDSGID=yes`, `RestrictNamespaces=yes`, `RemoveIPC=yes`, `SystemCallArchitectures=native` | no check needs these; they remove tools an exploit would use |
+| `MemoryDenyWriteExecute=yes` | no JIT in keepwatch or in the programs it runs (Go, perl, C); memory cannot be both writable and executable |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | `AF_UNIX` for `docker.sock`, `fail2ban.sock` and the journal, `AF_INET` and `AF_INET6` for notifications, `AF_NETLINK` for `ss` and `nft`; no packet or exotic sockets |
+| `MemoryMax=1G` and `Environment=GOMEMLIMIT=384MiB` | the `listeners` check reads up to two 64 MiB buffers of `ss` output (tcp and udp). Measured with two full buffers: a peak of 750 to 900 MiB without a soft limit and 470 to 490 MiB with `GOMEMLIMIT`; the largest state file is a 16 MiB read, about 100 MB. `MemoryMax` sits above the worst case without the soft limit, so a runaway check is stopped without killing a normal worst-case run |
+| `CPUQuota=50%` | a check must never starve the services it watches |
+| `TimeoutStartSec=10min` | the slowest probe is the apt simulation (90 seconds); a check that hangs is killed |
+
+Left out on purpose, because a check needs it: `CapabilityBoundingSet` (reading
+root-only files, `nft`, `ss -p` and `needrestart` need `CAP_DAC_READ_SEARCH`,
+`CAP_NET_ADMIN` and `CAP_SYS_PTRACE`), `ProtectProc` and `ProcSubset` (`ss -p` and
+`needrestart` read `/proc` of other processes), `PrivateNetwork` and `IPAddressDeny`
+(notifications), `SystemCallFilter` (twelve different programs run), `ProtectHome=yes`
+and `PrivateUsers`. `systemd-analyze security keepwatch-check.service` scores the unit
+5.3 (MEDIUM) on Ubuntu 22.04 and 24.04.
+
+With these options every check returned the same status, severity, summary and
+evidence subjects as a direct run as root, on Ubuntu 22.04 (systemd 249) and 24.04
+(systemd 255).
+
+### uninstall
+
+`uninstall` (run as root) disables and stops the timers, stops the services,
+removes the four unit files that carry the marker, and runs `systemctl
+daemon-reload`. A file with the name of one of the units that has no marker, or
+is a symbolic link, is left alone and reported (`left ...`); if disabling a timer
+fails, nothing is removed and a second run continues. Without `--purge`,
+configuration and state stay. `--dry-run` lists what would be done.
+
+`--purge` additionally removes keepwatch's own files and nothing else:
+
+- in `state_dir`: `state.json` and leftover `.state.json.tmp-*` files, then the
+  directory if it is empty;
+- the main configuration file, the `*.yaml` files in the `conf.d` directory next to
+  it, then `conf.d` and the configuration directory if each is empty.
+
+Every other file in these directories (for example the file named by
+`notify.ntfy.token_file`) stays, and so does the directory that holds it; the
+output says `left DIR: it holds entries that are not keepwatch's own (...)`.
+A symbolic link is never followed or removed as if it were a keepwatch file. If
+the configuration cannot be read, `--purge` uses the default state directory
+and says so. Use `--config` to point it at a configuration file in another place.
+
+### doctor
+
+`doctor` says whether keepwatch will work on this host. It prints one line per
+finding, `ok`, `warn` or `PROBLEM`, and a summary. It changes nothing except one
+probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
+(warnings are allowed), 1 at least one problem, 2 usage error, 3 internal error.
+
+| Area | What it checks | Level |
+|---|---|---|
+| user | running as root | not root: problem (the checks would fail or see less) |
+| config | the configuration loads (file and line of each error) and agrees with the catalog (unknown check ids, bad parameters) | invalid: problem |
+| catalog | the embedded catalog is valid | |
+| programs | for every enabled check, the programs it needs are found the way the checks will find them (the fixed directories `/usr/sbin:/usr/bin:/sbin:/bin`, the same trust rules). A check that is switched off needs nothing | not installed: warn, naming the checks that will be `skipped` (`reboot_required` still reads its marker file, `firewall_default` is skipped only without `nft`, `iptables` and `ip6tables`, `docker_exposure` is an error if a daemon is configured); refused by the execution layer, or `nft` missing with only one of `iptables` and `ip6tables`: problem (the check would be an `error`) |
+| ssh | `/run/sshd` exists when an `sshd` check is enabled. Ubuntu 24.04 starts `ssh.service` (which creates it) only at the first login when `ssh.socket` is used, and until then `sshd -T` fails and the five ssh checks are `error` | missing: problem, with the cause and `systemctl start ssh` as the remedy (keepwatch does not create it) |
+| notify | a notification channel is configured | none: warn |
+| state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet, or a state file that will not be used: warn |
+| units | the four unit files are installed with the marker; `ReadWritePaths` equals `state_dir`; `--config` matches | missing, foreign, or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
+| systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
+| last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output) | failed: problem |
+
+`--send-test` is for delivering a test notification through the configured
+channel. The notifier is not part of this version: the flag exists and
+answers `--send-test is not available yet` with exit 2, before anything is checked.
+
 ## Status
 
 Pre-MVP. The command line skeleton, the program execution layer, the
 strict configuration loader, the check engine with twelve check kinds, the state
 of the last run, the comparison, the text, JSON and Markdown reports, the ntfy
-notification and the weekly report exist; `check`, `report --weekly`, `config check`
-and `init` are implemented, while the commands (`doctor`, `install`, `uninstall`)
-and `report` without `--weekly` are stubs that exit with status 3.
+notification and the weekly report exist; `check`, `report --weekly`, `config check`,
+`init`, `install`, `uninstall` and `doctor` are implemented, while `report` without
+`--weekly` is a stub that exits with status 3.
 
 ## License
 

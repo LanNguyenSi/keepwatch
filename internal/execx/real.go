@@ -203,6 +203,13 @@ func (r *Real) resolve(name string) (string, error) {
 	return "", fmt.Errorf("%w: %s (resolves to %s)", ErrNotAllowed, name, target)
 }
 
+// Resolve reports the file Run would execute for argv[0]=name, with the same
+// allowlist and trust rules, without running anything. ErrNotFound means Run
+// would report the program as not installed, ErrNotAllowed that it would
+// refuse it. keepwatch doctor uses it so that its answer is the one the
+// checks will get.
+func (r *Real) Resolve(name string) (string, error) { return r.resolve(name) }
+
 // lookup finds the first executable regular file called name in the trusted
 // directories. Directories and non-executable files are skipped.
 func (r *Real) lookup(name string) (string, error) {
