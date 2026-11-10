@@ -414,7 +414,12 @@ Two rules keep the comparison honest:
   anyway; a subject that had to be escaped, redacted or cut for display has no
   cutoff and no place in the order, and counts as "above the cutoff". A state
   file of an older version has no cutoffs, so its capped lists are compared by
-  total only until the next run has written them.
+  total only until the next run has written them. Known gaps of this
+  comparison, to be closed by comparing the complete set of item keys: a new
+  item whose subject had to be escaped or redacted is never placed, so when it
+  replaces an item that was already hidden it is not reported; `hidden_new` is
+  not computed when the list was capped before and is complete now; and a new
+  excepted item can make `hidden_new` count one item too many.
 
 Items are compared by the SHA-256 of their raw subject, so two subjects that
 look the same after cleaning (they differ in a control character, say) are still
