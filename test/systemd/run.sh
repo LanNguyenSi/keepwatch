@@ -4,7 +4,8 @@
 #
 # usage: test/systemd/run.sh [-update] [-keep] [RELEASE...]
 #   RELEASE   22.04 and/or 24.04 (default: both)
-#   -update   rewrite measured/<release>.txt instead of comparing with it
+#   -update   rewrite measured/<release>.txt and answers/<release>.txt
+#             instead of comparing with them
 #   -keep     keep the work directory (default: remove it on exit)
 #
 # Environment:
@@ -19,7 +20,9 @@
 # then checked:
 #
 #   1. keepwatch refuses a path below every directory of the measurement, in
-#      every role (measure.sh asks install and doctor; product.txt).
+#      every role (measure.sh asks install and doctor; product.txt), and the
+#      list of answers equals answers/<release>.txt, so a question that is no
+#      longer asked fails as well.
 #   2. The measurement equals measured/<release>.txt. A Go test
 #      (internal/install) ties that file to the table keepwatch decides by, in
 #      both directions, so a table entry that claims a directory is hidden
@@ -114,6 +117,25 @@ for rel in "${releases[@]}"; do
     status=1
   else
     echo "systemd: ok   $rel keepwatch refuses every measured directory ($(grep -c '^ok' "$out/product.txt") answers)"
+  fi
+  answers=$here/answers/$rel.txt
+  if [ "$update" -eq 1 ]; then
+    if grep -q '^FAIL' "$out/product.txt"; then
+      echo "systemd: FAIL $rel: answers not written, keepwatch failed a question" >&2
+      status=1
+    else
+      cp "$out/product.txt" "$answers"
+      echo "systemd: $rel answers written to ${answers#"$root"/}"
+    fi
+  elif [ ! -f "$answers" ]; then
+    echo "systemd: FAIL $rel: no answers/$rel.txt (run with -update)" >&2
+    status=1
+  elif diff -u "$answers" "$out/product.txt" >"$work/answers-diff.txt"; then
+    echo "systemd: ok   $rel the answers equal answers/$rel.txt"
+  else
+    echo "systemd: FAIL $rel: the answers differ from answers/$rel.txt:" >&2
+    cat "$work/answers-diff.txt" >&2
+    status=1
   fi
   measured=$here/measured/$rel.txt
   if [ "$update" -eq 1 ]; then

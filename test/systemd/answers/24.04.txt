@@ -1,0 +1,60 @@
+ok   the installed check service runs (Result=success, exit status 1)
+ok   state_dir below /dev is refused
+ok   binary below /dev is refused
+ok   token_file below /dev is refused
+ok   configuration below /dev is refused
+ok   state_dir below /dev/hugepages is refused
+ok   binary below /dev/hugepages is refused
+note configuration and token_file below /dev/hugepages: no file can be created there, not asked
+ok   state_dir below /dev/mqueue is refused
+ok   binary below /dev/mqueue is refused
+note configuration and token_file below /dev/mqueue: no file can be created there, not asked
+ok   state_dir below /dev/pts is refused
+ok   binary below /dev/pts is refused
+note configuration and token_file below /dev/pts: no file can be created there, not asked
+ok   state_dir below /dev/shm is refused
+ok   binary below /dev/shm is refused
+ok   token_file below /dev/shm is refused
+ok   configuration below /dev/shm is refused
+ok   state_dir below /lib/modules is refused
+ok   binary below /lib/modules is refused
+ok   token_file below /lib/modules is refused
+ok   configuration below /lib/modules is refused
+ok   state_dir below /proc is refused
+ok   binary below /proc is refused
+note configuration and token_file below /proc: no file can be created there, not asked
+ok   state_dir below /run is refused
+ok   binary below /run is refused
+ok   token_file below /run is refused
+ok   configuration below /run is refused
+ok   state_dir below /run/credentials is refused
+ok   binary below /run/credentials is refused
+ok   token_file below /run/credentials is refused
+ok   configuration below /run/credentials is refused
+ok   state_dir below /run/systemd/incoming is refused
+ok   binary below /run/systemd/incoming is refused
+ok   token_file below /run/systemd/incoming is refused
+ok   configuration below /run/systemd/incoming is refused
+ok   state_dir below /sys is refused
+ok   binary below /sys is refused
+note configuration and token_file below /sys: no file can be created there, not asked
+ok   state_dir below /tmp is refused
+ok   binary below /tmp is refused
+ok   token_file below /tmp is refused
+ok   configuration below /tmp is refused
+ok   state_dir below /usr/lib/modules is refused
+ok   binary below /usr/lib/modules is refused
+ok   token_file below /usr/lib/modules is refused
+ok   configuration below /usr/lib/modules is refused
+ok   state_dir below /var/lock is refused
+ok   binary below /var/lock is refused
+ok   token_file below /var/lock is refused
+ok   configuration below /var/lock is refused
+ok   state_dir below /var/run is refused
+ok   binary below /var/run is refused
+ok   token_file below /var/run is refused
+ok   configuration below /var/run is refused
+ok   state_dir below /var/tmp is refused
+ok   binary below /var/tmp is refused
+ok   token_file below /var/tmp is refused
+ok   configuration below /var/tmp is refused

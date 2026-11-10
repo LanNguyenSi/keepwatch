@@ -298,7 +298,7 @@ var sandboxPaths = []sandboxEntry{
 		[]string{"/run/credentials"}, every},
 	{"", true, "the service has a directory of its own at /run/systemd/incoming, so the path does not exist for it",
 		[]string{"/run/systemd/incoming"}, every},
-	{"", true, "it is a file system of the kernel, of which the service has an instance of its own: nothing can be kept there",
+	{"", true, "it is a file system of the kernel, and the service gets an instance of its own (ProtectKernelTunables and ProtectControlGroups imply MountAPIVFS): nothing can be kept there",
 		[]string{"/proc"}, every},
 	{"", false, "it is a file system of the kernel: nothing can be kept there",
 		[]string{"/sys", "/dev/pts", "/dev/mqueue", "/dev/hugepages"}, every},
@@ -308,7 +308,7 @@ var sandboxPaths = []sandboxEntry{
 		[]string{"/var/run"}, every},
 	{"", false, "/var/lock is /run/lock, on a tmpfs that is empty after a reboot, so what the scheduled run needs there is gone then",
 		[]string{"/var/lock"}, every},
-	{"", false, "it is a tmpfs that is empty after a reboot, and programs do not run from it (noexec)",
+	{"", false, "it is a tmpfs that is empty after a reboot, so what keepwatch needs there is gone",
 		[]string{"/dev/shm"}, every},
 }
 

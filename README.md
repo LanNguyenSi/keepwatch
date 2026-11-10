@@ -104,7 +104,7 @@ when they differ. A rewrite cannot hide a status or a check id.
 ```sh
 make systemd                          # Ubuntu 22.04 and 24.04, needs docker and go
 test/systemd/run.sh 24.04             # one release
-test/systemd/run.sh -update           # rewrite the measured files after a deliberate change
+test/systemd/run.sh -update           # rewrite the measured and answer files after a deliberate change
 ```
 
 The installed services run in a sandbox, and `install` and `doctor` refuse every path
@@ -124,7 +124,9 @@ sandbox, on a container per release whose PID 1 is systemd (`keepwatch-systemd:2
    below it (a real install, which must refuse and create nothing), with a token file
    and with a configuration below it (where a file can be created), and `doctor` for
    units whose binary lies below it. Each must refuse and name the path.
-3. The list must equal `test/systemd/measured/<release>.txt`.
+3. The list must equal `test/systemd/measured/<release>.txt`, and the answers of step 2
+   must equal `test/systemd/answers/<release>.txt`, so a question that is no longer asked
+   fails too.
 
 `go test` then ties those files to the table, in both directions
 (`TestSandboxPathsFollowTheMeasuredSandbox`): every measured line is refused for every
@@ -134,7 +136,8 @@ it does not hide, and a directory that a new systemd hides makes `make systemd` 
 until the table knows it.
 
 The measurement depends on the kernel and the container runtime as well (`/proc` counts
-as hidden because a service gets its own instance of it on current kernels). It is a
+as hidden because `ProtectKernelTunables=yes` and `ProtectControlGroups=yes` imply
+`MountAPIVFS=yes`, which gives the service its own instance of it). It is a
 local target; no workflow runs it.
 
 ## Configuration
@@ -926,7 +929,7 @@ The rule, for each path:
    - `/run`, and so `/var/run` and `/var/lock`, which are links into it: a tmpfs that
      is empty after a reboot. A file there is gone until something puts it back, and a
      service whose `ReadWritePaths` names a missing directory does not start (status
-     226/NAMESPACE). `/dev/shm` is the same and runs no programs.
+     226/NAMESPACE). `/dev/shm` is the same.
    - `/run/credentials` and `/run/systemd/incoming`: systemd keeps them away from a
      sandboxed service although no option of the unit says so.
    - `/proc` and `/sys`: file systems of the kernel. A `state_dir` there is refused

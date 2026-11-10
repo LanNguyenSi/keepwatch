@@ -269,7 +269,7 @@ func TestHiddenBy(t *testing.T) {
 	}
 	// The reasons say what is the matter with the place, not something else.
 	for p, want := range map[string]string{
-		"/dev/shm/kw": "noexec", "/var/run/kw": "/var/run is /run", "/var/lock/kw": "/var/lock is /run/lock",
+		"/dev/shm/kw": "empty after a reboot", "/var/run/kw": "/var/run is /run", "/var/lock/kw": "/var/lock is /run/lock",
 		"/run/kw": "empty after a reboot", "/run/credentials/kw": "no credentials of its own", "/sys/kw": "file system of the kernel",
 	} {
 		if h, _ := HiddenBy(p, RoleState); !strings.Contains(h.Why, want) || strings.Contains(h.Why, "PrivateDevices") {
@@ -315,9 +315,9 @@ var hardeningClasses = map[string]optionClass{
 	"ReadWritePaths":          {"{{state}}", false, "the one writable path; it hides nothing. That the directory must be there when the service starts is why a place a reboot empties is refused, by entries without an option"},
 	"ProtectSystem":           {"strict", false, "read-only, everything stays visible; the one writable path is ReadWritePaths"},
 	"ProtectHome":             {"read-only", false, "read-only: /home, /root and /run/user stay visible (yes or tmpfs would hide them)"},
-	"ProtectKernelTunables":   {"yes", false, "/proc/sys, /sys and some files of /proc become read-only and stay visible; nothing can be created in a kernel file system anyway"},
+	"ProtectKernelTunables":   {"yes", false, "/proc/sys, /sys and some files of /proc become read-only and stay visible; it implies MountAPIVFS, so the service gets its own /proc (table entry /proc); nothing can be created in a kernel file system anyway"},
 	"ProtectKernelLogs":       {"yes", false, "/proc/kmsg and /dev/kmsg: two kernel files, no directory a path could lie under"},
-	"ProtectControlGroups":    {"yes", false, "/sys/fs/cgroup becomes read-only and stays visible"},
+	"ProtectControlGroups":    {"yes", false, "/sys/fs/cgroup becomes read-only and stays visible; it implies MountAPIVFS, so the service gets its own /proc (table entry /proc)"},
 	"ProtectClock":            {"yes", false, "device access to the clock, no path of the file system"},
 	"ProtectHostname":         {"yes", false, "a UTS namespace, no path"},
 	"SuccessExitStatus":       {"", false, "an exit status"},

@@ -240,7 +240,7 @@ func TestCheckPlacementRefusesWhatTheSandboxHides(t *testing.T) {
 		{"binary under /dev", binary("/dev/kw/keepwatch"),
 			[]string{"the keepwatch binary /dev/kw/keepwatch is under /dev:", "PrivateDevices=yes"}},
 		{"binary under /dev/shm", binary("/dev/shm/keepwatch"),
-			[]string{"the keepwatch binary /dev/shm/keepwatch is under /dev/shm:", reboot, "noexec", "the scheduled run cannot start"}},
+			[]string{"the keepwatch binary /dev/shm/keepwatch is under /dev/shm:", reboot, "what keepwatch needs there is gone", "the scheduled run cannot start"}},
 		{"binary under the kernel modules", binary("/usr/lib/modules/keepwatch"),
 			[]string{"is under /usr/lib/modules:", "ProtectKernelModules=yes"}},
 		{"binary under /run", binary("/run/kwbin/keepwatch"),
