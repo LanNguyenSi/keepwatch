@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-10T12:00:00Z",
+  "host": "web-01",
+  "fail_on": "medium",
+  "exit_code": 1,
+  "counts": {
+    "total": 7,
+    "pass": 1,
+    "fail": 2,
+    "warn": 1,
+    "error": 1,
+    "skipped": 1,
+    "excepted": 1
+  },
+  "state": {
+    "used": true,
+    "baseline": false,
+    "previous_run_at": "2026-11-10T06:00:00Z"
+  },
+  "warnings": [
+    "state file /var/lib/keepwatch/state.json was not used: evil[click](http://evil.example/)![i](http://evil.example/p.png)\u003cscript\u003ealert(1)\u003c/script\u003e `tick` ``two`` | cell\\n# fake heading\\n- fake item\\x1b[2J\\x1b]0;title\\x07\\u202e reversed \\u0085 password=[REDACTED]"
+  ],
+  "changes": [
+    {
+      "kind": "new_failure",
+      "check_id": "ssh.password_authentication",
+      "check_kind": "sshd_effective",
+      "severity": "high",
+      "from": "pass",
+      "to": "fail",
+      "alert": true
+    },
+    {
+      "kind": "subject_new",
+      "check_id": "network.listeners",
+      "check_kind": "listeners",
+      "severity": "medium",
+      "from": "fail",
+      "to": "fail",
+      "subject": "evil[click](http://evil.example/)![i](http://evil.example/p.png)\u003cscript\u003ealert(1)\u003c/script\u003e `tick` ``two`` | cell\\n# fake heading\\n- fake item\\x1b[2J\\x1b]0;title\\x07\\u202e reversed \\u0085 password=[REDACTED]",
+      "alert": true
+    },
+    {
+      "kind": "subject_gone",
+      "check_id": "network.listeners",
+      "check_kind": "listeners",
+      "severity": "medium",
+      "from": "fail",
+      "to": "fail",
+      "subject": "tcp/0.0.0.0:7000",
+      "alert": false
+    },
+    {
+      "kind": "status_change",
+      "check_id": "updates.security_pending",
+      "check_kind": "security_updates",
+      "severity": "high",
+      "from": "pass",
+      "to": "error",
+      "alert": true
+    },
+    {
+      "kind": "status_change",
+      "check_id": "ssh.authorized_keys",
+      "check_kind": "authorized_keys",
+      "severity": "high",
+      "from": "pass",
+      "to": "warn",
+      "alert": true
+    },
+    {
+      "kind": "fixed",
+      "check_id": "disk.usage",
+      "check_kind": "disk_usage",
+      "severity": "medium",
+      "from": "fail",
+      "to": "pass",
+      "alert": false
+    },
+    {
+      "kind": "count_change",
+      "check_id": "docker.exposure",
+      "check_kind": "docker_exposure",
+      "severity": "high",
+      "from": "fail",
+      "to": "fail",
+      "old_total": 104,
+      "new_total": 108,
+      "alert": true
+    },
+    {
+      "kind": "check_added",
+      "check_id": "fail2ban.sshd_jail",
+      "check_kind": "fail2ban_jail",
+      "severity": "high",
+      "to": "pass",
+      "alert": false
+    },
+    {
+      "kind": "check_removed",
+      "check_id": "old.check",
+      "check_kind": "k",
+      "severity": "low",
+      "from": "fail",
+      "alert": false
+    }
+  ],
+  "still_failing": [
+    {
+      "check_id": "network.listeners",
+      "check_kind": "listeners",
+      "severity": "medium"
+    }
+  ],
+  "still_warning": [
+    {
+      "check_id": "ssh.authorized_keys",
+      "check_kind": "authorized_keys",
+      "severity": "high"
+    }
+  ],
+  "results": [
+    {
+      "check_id": "services.fail2ban_active",
+      "kind": "service_active",
+      "status": "pass",
+      "severity": "high",
+      "summary": "fail2ban.service is active",
+      "evidence": []
+    },
+    {
+      "check_id": "ssh.password_authentication",
+      "kind": "sshd_effective",
+      "status": "fail",
+      "severity": "high",
+      "summary": "passwordauthentication is yes",
+      "evidence": [
+        {
+          "subject": "passwordauthentication",
+          "detail": "effective value: yes; allowed: no",
+          "excepted": false
+        }
+      ]
+    },
+    {
+      "check_id": "network.listeners",
+      "kind": "listeners",
+      "status": "fail",
+      "severity": "medium",
+      "summary": "2 listeners are not allowed",
+      "evidence": [
+        {
+          "subject": "tcp/0.0.0.0:9000",
+          "detail": "process: evil[click](http://evil.example/)![i](http://evil.example/p.png)\u003cscript\u003ealert(1)\u003c/script\u003e `tick` ``two`` | cell\\n# fake heading\\n- fake item\\x1b[2J\\x1b]0;title\\x07\\u202e reversed \\u0085 password=[REDACTED]",
+          "excepted": false
+        },
+        {
+          "subject": "evil[click](http://evil.example/)![i](http://evil.example/p.png)\u003cscript\u003ealert(1)\u003c/script\u003e `tick` ``two`` | cell\\n# fake heading\\n- fake item\\x1b[2J\\x1b]0;title\\x07\\u202e reversed \\u0085 password=[REDACTED]",
+          "detail": "token=[REDACTED] was passed on the command line",
+          "excepted": false
+        },
+        {
+          "subject": "tcp/0.0.0.0:8080",
+          "detail": "process: web",
+          "excepted": true,
+          "exception_reason": "jump host until 2099"
+        }
+      ]
+    },
+    {
+      "check_id": "ssh.authorized_keys",
+      "kind": "authorized_keys",
+      "status": "warn",
+      "severity": "high",
+      "summary": "1 authorized_keys file could not be read",
+      "evidence": [
+        {
+          "subject": "deploy:/home/deploy/.ssh/authorized_keys",
+          "detail": "not read: permission denied",
+          "excepted": false
+        }
+      ]
+    },
+    {
+      "check_id": "updates.security_pending",
+      "kind": "security_updates",
+      "status": "error",
+      "severity": "high",
+      "summary": "apt-cache policy exited with status 100",
+      "evidence": []
+    },
+    {
+      "check_id": "docker.exposure",
+      "kind": "docker_exposure",
+      "status": "excepted",
+      "severity": "high",
+      "summary": "1 container is privileged (excepted: build host)",
+      "evidence": [
+        {
+          "subject": "builder",
+          "detail": "privileged",
+          "excepted": true,
+          "exception_reason": "build host"
+        }
+      ],
+      "exception_reasons": [
+        "build host"
+      ]
+    },
+    {
+      "check_id": "certs.expiry",
+      "kind": "cert_expiry",
+      "status": "skipped",
+      "severity": "medium",
+      "summary": "disabled in the configuration",
+      "evidence": []
+    }
+  ]
+}

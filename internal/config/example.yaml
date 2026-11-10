@@ -14,20 +14,26 @@
 host:
   profile: production
 
-# Directory keepwatch keeps its state in. Must be an absolute path.
+# Directory keepwatch keeps its state (the last run) in. Must be an
+# absolute path. It is created with mode 0700 if it does not exist;
+# otherwise it must be a real directory (not a symlink) owned by root that
+# group and other cannot write to.
 state_dir: /var/lib/keepwatch
 
-# Checks to run, keyed by check id. enabled defaults to true, severity is
-# an optional override of the probe default (one of info, low, medium,
-# high, critical), and params are passed through to the probe untouched.
+# Checks to run, keyed by check id (the ids of the built-in catalog, for
+# example ssh.permit_root_login or disk.usage). enabled defaults to true,
+# severity is an optional override of the catalog severity (one of info, low,
+# medium, high, critical), and params are merged over the catalog's
+# parameters of that check.
 checks:
-  sshd:
-    enabled: true
-    severity: high
+  ssh.permit_root_login:
+    severity: critical
+  disk.usage:
     params:
-      config: /etc/ssh/sshd_config
-  fail2ban:
-    severity: medium
+      warn_percent: 85
+      fail_percent: 95
+  certs.expiry:
+    enabled: false
 
 # The listener allowlist: anything listening on a port not listed here is
 # reported. port is 1-65535, proto is tcp or udp, and bind is an IP
@@ -54,10 +60,22 @@ authorized_keys:
 # expires is a YYYY-MM-DD date. An exception is active through its
 # expiry date and reported as expired from the day after.
 exceptions:
-  - check: sshd
-    match: port
+  - check: network.listeners
+    match: tcp/0.0.0.0:8080
     reason: temporary jump host
     expires: 2099-12-31
+
+# Redaction. Secrets in the output of a check (tokens, passwords, private
+# keys, URLs with credentials, ...) are replaced by [REDACTED] before
+# anything is printed, written or sent. These patterns (RE2 regular
+# expressions, at most 32 of at most 256 bytes each, none that matches the
+# empty string) are added to the built-in ones. If a pattern has a capturing
+# group only the text of the first group is replaced, otherwise the whole
+# match.
+# redact:
+#   patterns:
+#     - 'corp-[0-9]{4}'
+#     - 'session=([a-z0-9]+)'
 
 # Notification channels. When ntfy is set, url and topic are required.
 # url must be https, or http only for a loopback host, and any URL port

@@ -1,0 +1,20 @@
+keepwatch check: host web-01, 2026-11-10T12:00:00Z
+7 checks: 1 pass, 2 fail, 1 warn, 1 error, 1 skipped, 1 excepted
+fail-on medium, exit code 1
+state: state not used (--no-state): no comparison with the previous run
+
+findings:
+  [FAIL] ssh.password_authentication (high) passwordauthentication is yes
+      - passwordauthentication: effective value: yes; allowed: no
+  [FAIL] network.listeners (medium) 2 listeners are not allowed
+      - tcp/0.0.0.0:9000: process: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
+      - evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]: token=[REDACTED] was passed on the command line
+      - tcp/0.0.0.0:8080: process: web [excepted: jump host until 2099]
+  [WARN] ssh.authorized_keys (high) 1 authorized_keys file could not be read
+      - deploy:/home/deploy/.ssh/authorized_keys: not read: permission denied
+  [ERROR] updates.security_pending (high) apt-cache policy exited with status 100
+  [EXCEPTED] docker.exposure (high) 1 container is privileged (excepted: build host)
+      - builder: privileged [excepted: build host]
+
+passing (1): services.fail2ban_active
+skipped (1): certs.expiry

@@ -1,0 +1,51 @@
+# keepwatch check
+
+- **Host:** ` web-01 `
+- **Generated:** ` 2026-11-10T12:00:00Z `
+- **Checks:** ` 7 checks: 1 pass, 2 fail, 1 warn, 1 error, 1 skipped, 1 excepted `
+- **Fail on:** ` medium `, **exit code:** 1
+- **State:** ` baseline run, no changes are reported: no previous state (first run) `
+
+## Findings
+
+### FAIL ` ssh.password_authentication ` (` high `)
+
+` passwordauthentication is yes `
+
+- ` passwordauthentication `: ` effective value: yes; allowed: no `
+
+### FAIL ` network.listeners ` (` medium `)
+
+` 2 listeners are not allowed `
+
+- ` tcp/0.0.0.0:9000 `: ``` process: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED] ```
+- ``` evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED] ```: ` token=[REDACTED] was passed on the command line `
+- ` tcp/0.0.0.0:8080 `: ` process: web ` (excepted: ` jump host until 2099 `)
+
+### WARN ` ssh.authorized_keys ` (` high `)
+
+` 1 authorized_keys file could not be read `
+
+- ` deploy:/home/deploy/.ssh/authorized_keys `: ` not read: permission denied `
+
+### ERROR ` updates.security_pending ` (` high `)
+
+` apt-cache policy exited with status 100 `
+
+### EXCEPTED ` docker.exposure ` (` high `)
+
+` 1 container is privileged (excepted: build host) `
+
+- ` builder `: ` privileged ` (excepted: ` build host `)
+
+## All checks
+
+| Check | Status | Severity |
+|---|---|---|
+| ` services.fail2ban_active ` | ` pass ` | ` high ` |
+| ` ssh.password_authentication ` | ` fail ` | ` high ` |
+| ` network.listeners ` | ` fail ` | ` medium ` |
+| ` ssh.authorized_keys ` | ` warn ` | ` high ` |
+| ` updates.security_pending ` | ` error ` | ` high ` |
+| ` docker.exposure ` | ` excepted ` | ` high ` |
+| ` certs.expiry ` | ` skipped ` | ` medium ` |

@@ -1,0 +1,11 @@
+keepwatch check: host web-01, 2026-11-10T12:00:00Z
+1 check: 1 pass, 0 fail, 0 warn, 0 error, 0 skipped, 0 excepted
+fail-on medium, exit code 0
+state: changes since the previous run at 2026-11-10T11:00:00Z
+
+changes (0):
+  none
+
+no findings
+
+passing (1): a.one

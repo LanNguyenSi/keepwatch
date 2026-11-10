@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
 )
 
 var (
@@ -51,6 +53,8 @@ func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt o
 			cfg.Exceptions = v.exceptions(val)
 		case "notify":
 			cfg.Notify = v.notify(val)
+		case "redact":
+			cfg.Redact = v.redact(val)
 		default:
 			v.fail(k, "unknown key "+strconv.Quote(k.Value))
 		}
@@ -441,6 +445,53 @@ func (v *validator) exceptions(seq *yaml.Node) []Exception {
 		out = append(out, e)
 	}
 	return out
+}
+
+// redact validates the redact section: patterns is a list of regular
+// expressions, each compiled here so that a bad one is a config error with
+// file and line and never a surprise in the middle of a run. The limits are
+// the redact package's: at most redact.MaxPatterns patterns, each at most
+// redact.MaxPatternLen bytes, valid RE2 syntax, and none that matches the
+// empty string. The limit on the count applies to the merged list.
+func (v *validator) redact(n *yaml.Node) Redact {
+	var r Redact
+	if isNull(n) { // a null section counts as absent
+		return r
+	}
+	if !isMapping(n) {
+		v.fail(n, "redact: expected a mapping")
+		return r
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, val := n.Content[i], n.Content[i+1]
+		if k.Value != "patterns" {
+			v.fail(k, "redact: unknown key "+strconv.Quote(k.Value))
+			continue
+		}
+		if isNull(val) { // a null list counts as absent
+			continue
+		}
+		if !isSequence(val) {
+			v.fail(val, "redact.patterns: expected a list of regular expressions")
+			continue
+		}
+		for j, p := range val.Content {
+			path := fmt.Sprintf("redact.patterns[%d]", j)
+			if !isScalar(p) || p.ShortTag() != "!!str" {
+				v.fail(p, path+": expected a string")
+				continue
+			}
+			if err := redact.ValidatePattern(p.Value); err != nil {
+				v.fail(p, path+": "+err.Error())
+				continue
+			}
+			r.Patterns = append(r.Patterns, p.Value)
+		}
+		if len(val.Content) > redact.MaxPatterns {
+			v.fail(val, fmt.Sprintf("redact.patterns: %d patterns, the limit is %d", len(val.Content), redact.MaxPatterns))
+		}
+	}
+	return r
 }
 
 func (v *validator) notify(n *yaml.Node) Notify {

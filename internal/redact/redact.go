@@ -1,0 +1,191 @@
+// Package redact removes secrets from text and makes untrusted text safe to
+// print.
+//
+// Evidence in a keepwatch report comes from host output: process command
+// lines, file paths, container names. It can carry a token somebody put in a
+// command line, and text a local unprivileged user chose. Every string that
+// reaches a terminal, a file, a notification or a log goes through Clean:
+//
+//  1. Redact replaces secrets with [REDACTED] (built-in patterns, plus the
+//     patterns of the configuration's redact.patterns).
+//  2. Escape turns every control character into a visible escape sequence.
+//
+// The order matters: redaction runs on the original text, where a secret is
+// still in one piece and a multi-line private key block is still a block;
+// escaping runs last, so that the text that is shown can no longer hold a
+// character that moves the cursor, starts a terminal escape sequence, forges
+// a line or flips the direction of the text.
+//
+// Redaction is best effort. It catches the common shapes listed in the
+// README; it cannot know a secret that has no recognisable shape. Probes
+// keep secrets out of evidence in the first place (they never print file
+// contents, only fingerprints and counts); this package is the second line.
+package redact
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// Replacement is what a redacted secret is replaced with.
+const Replacement = "[REDACTED]"
+
+// Bounds for the patterns an operator adds in the configuration.
+const (
+	// MaxPatterns is the largest number of extra patterns.
+	MaxPatterns = 32
+	// MaxPatternLen is the longest extra pattern, in bytes.
+	MaxPatternLen = 256
+)
+
+// MaxFieldRunes bounds the text Clean returns for one field. A longer field
+// is cut and ends in "...". It keeps a hostile or accidental megabyte out of
+// reports and notifications.
+const MaxFieldRunes = 2000
+
+// ValidatePattern reports why p cannot be used as an extra redaction pattern:
+// empty, too long, not valid RE2 syntax, or able to match the empty string
+// (which would "redact" every position of every text).
+func ValidatePattern(p string) error {
+	if p == "" {
+		return errors.New("must not be empty")
+	}
+	if len(p) > MaxPatternLen {
+		return fmt.Errorf("is %d bytes long, the limit is %d", len(p), MaxPatternLen)
+	}
+	re, err := regexp.Compile(p)
+	if err != nil {
+		return fmt.Errorf("is not a valid regular expression: %v", err)
+	}
+	if re.MatchString("") {
+		return errors.New("matches the empty string")
+	}
+	return nil
+}
+
+// A rule replaces matches of re with repl (a regexp.Expand template).
+type rule struct {
+	re   *regexp.Regexp
+	repl string
+}
+
+// builtin lists the built-in patterns, specific shapes first. All use RE2
+// (linear time), none can backtrack.
+var builtin = []rule{
+	// PEM private key blocks, also a block cut off before its end line.
+	{regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), "[REDACTED private key]"},
+	// scheme://user:password@host and scheme://token@host
+	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]+@`), "${1}" + Replacement + "@"},
+	// Authorization: Bearer abc, Authorization=Basic abc, "authorization": "..."
+	{regexp.MustCompile(`(?i)\b(authorization["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s"',;]+)`), "${1}" + Replacement},
+	// a bare bearer token
+	{regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}`), "${1}" + Replacement},
+	// name=value and name: value, also in JSON ("name": "value"), when the
+	// name ends in a secret word (the word must be followed directly by the
+	// separator): "token_file" and "passwordauthentication" do not qualify
+	// and are left alone.
+	{regexp.MustCompile(`(?i)((?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\[REDACTED\]|[^\s"',;&]+)`), "${1}" + Replacement},
+	// --password hunter2, -token abc (a value that does not start with "-")
+	{regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)\s+)[^\s-]\S*`), "${1}" + Replacement},
+	// AWS access key ids
+	{regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), Replacement},
+	// GitHub tokens
+	{regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b`), Replacement},
+	// ntfy access tokens
+	{regexp.MustCompile(`\btk_[A-Za-z0-9]{29,}\b`), Replacement},
+	// Slack tokens
+	{regexp.MustCompile(`\bxox[abeprs]-[A-Za-z0-9-]{10,}`), Replacement},
+	// Google API keys
+	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`), Replacement},
+	// Stripe keys
+	{regexp.MustCompile(`\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b`), Replacement},
+	// JSON web tokens
+	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), Replacement},
+}
+
+// Redactor removes secrets from text. The zero value is not usable; use New
+// or Default. A Redactor is immutable and safe for concurrent use.
+type Redactor struct {
+	extra []*regexp.Regexp
+}
+
+var defaultRedactor = &Redactor{}
+
+// Default returns a Redactor with the built-in patterns only.
+func Default() *Redactor { return defaultRedactor }
+
+// New returns a Redactor with the built-in patterns and the given extra
+// patterns. Each extra pattern must pass ValidatePattern, and there may be at
+// most MaxPatterns of them. An extra pattern with a capturing group redacts
+// only the text of its first group; without one it redacts the whole match.
+func New(extra []string) (*Redactor, error) {
+	if len(extra) > MaxPatterns {
+		return nil, fmt.Errorf("%d redaction patterns, the limit is %d", len(extra), MaxPatterns)
+	}
+	r := &Redactor{}
+	for i, p := range extra {
+		if err := ValidatePattern(p); err != nil {
+			return nil, fmt.Errorf("redaction pattern %d %v", i+1, err)
+		}
+		r.extra = append(r.extra, regexp.MustCompile(p))
+	}
+	return r, nil
+}
+
+// Redact replaces secrets in s with [REDACTED]. It leaves every other
+// character alone, control characters included: use Clean for text that is
+// going to be shown.
+func (r *Redactor) Redact(s string) string {
+	for _, b := range builtin {
+		s = b.re.ReplaceAllString(s, b.repl)
+	}
+	for _, re := range r.extra {
+		s = replaceExtra(re, s)
+	}
+	return s
+}
+
+// replaceExtra replaces the first capturing group of each match of re, or the
+// whole match when re has no group (or the group did not take part). An empty
+// match is left alone.
+func replaceExtra(re *regexp.Regexp, s string) string {
+	var sb strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
+		start, end := m[0], m[1]
+		if len(m) >= 4 && m[2] >= 0 {
+			start, end = m[2], m[3]
+		}
+		if end <= start {
+			continue
+		}
+		sb.WriteString(s[last:start])
+		sb.WriteString(Replacement)
+		last = end
+	}
+	sb.WriteString(s[last:])
+	return sb.String()
+}
+
+// Clean returns s as text that is safe to show: secrets redacted, control
+// characters escaped (see Escape), and cut to MaxFieldRunes. The result is a
+// single line of valid UTF-8. A nil Redactor uses the built-in patterns.
+func (r *Redactor) Clean(s string) string {
+	if r == nil {
+		r = defaultRedactor
+	}
+	return truncate(Escape(r.Redact(s)), MaxFieldRunes)
+}
+
+func truncate(s string, runes int) string {
+	n := 0
+	for i := range s {
+		if n == runes {
+			return s[:i] + "..."
+		}
+		n++
+	}
+	return s
+}
