@@ -285,6 +285,37 @@ func TestCertExpiryFiles(t *testing.T) {
 	})
 }
 
+// Failing and warning certificates are cut on their own, and each list has its
+// own set.
+func TestCertExpiryCutListsKeepTheirSets(t *testing.T) {
+	files := map[string]string{}
+	soon, later := pemCert(t, "x", t0.Add(days(1))), pemCert(t, "y", t0.Add(days(20)))
+	for i := 0; i < 130; i++ {
+		files[fmt.Sprintf("/opt/w%03d.pem", i)] = later
+	}
+	probe := func() probes.Probe { return certProbe(t, map[string]any{"globs": []any{"/opt/*.pem"}}) }
+
+	o := execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Warn)
+	wantCapped(t, o.Evidence, o.Set, 130)
+
+	files["/opt/f1.pem"], files["/opt/f2.pem"] = soon, soon
+	o = execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Fail)
+	if o.Set != nil || len(o.Evidence) != 2 {
+		t.Fatalf("two failing certificates are not a cut list: %d items, set %v", len(o.Evidence), o.Set != nil)
+	}
+	wantCapped(t, o.Warnings, o.WarningsSet, 130)
+
+	for i := 0; i < 120; i++ {
+		files[fmt.Sprintf("/opt/f%03d.pem", i+10)] = soon
+	}
+	o = execCert(probe(), certFS(files))
+	wantStatus(t, o, result.Fail)
+	wantCapped(t, o.Evidence, o.Set, 122)
+	wantCapped(t, o.Warnings, o.WarningsSet, 130)
+}
+
 func TestCertExpiryManyFiles(t *testing.T) {
 	files := map[string]string{}
 	one := pemCert(t, "x", t0.Add(days(1)))

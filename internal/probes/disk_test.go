@@ -402,6 +402,23 @@ func TestDiskUsageWarningsAreLimited(t *testing.T) {
 	wantCapped(t, o.Warnings, o.WarningsSet, 130)
 }
 
+// A warn outcome (nothing fails) with a cut list carries the set in Set.
+func TestDiskUsageCutWarnListHasASet(t *testing.T) {
+	var lines []string
+	st := &statfsMap{by: map[string]probes.Statfs{}}
+	for i := 0; i < 130; i++ {
+		p := fmt.Sprintf("/w%03d", i)
+		lines = append(lines, mi(i+1, p, "ext4"))
+		st.by[p] = usage(85, 1)
+	}
+	o := execDisk(diskProbe(t, nil), mountFS(lines...), st)
+	wantStatus(t, o, result.Warn)
+	wantCapped(t, o.Evidence, o.Set, 130)
+	if o.WarningsSet != nil {
+		t.Error("a warn outcome has no separate warnings")
+	}
+}
+
 func TestDiskUsageParams(t *testing.T) {
 	bad := map[string]map[string]any{
 		"warn above fail":      {"warn_percent": 91},

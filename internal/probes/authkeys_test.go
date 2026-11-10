@@ -727,6 +727,19 @@ func TestAuthorizedKeysEvidenceIsLimited(t *testing.T) {
 		wantCapped(t, o.Evidence, o.Set, 150)
 		wantSummary(t, o, "and 51 more")
 	})
+	t.Run("an unexpected key next to many missing expected keys: the warnings have their own set", func(t *testing.T) {
+		fsys := keyHost(t, v, map[string]string{aliceAK: ed.line + "\n"})
+		var expected []string
+		for i := 0; i < 130; i++ {
+			expected = append(expected, fmt.Sprintf("SHA256:missing%03d", i))
+		}
+		o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": expected})
+		wantStatus(t, o, result.Fail)
+		if o.Set != nil || len(o.Evidence) != 1 {
+			t.Fatalf("one unexpected key is not a cut list: %d items, set %v", len(o.Evidence), o.Set != nil)
+		}
+		wantCapped(t, o.Warnings, o.WarningsSet, 130)
+	})
 	t.Run("many garbage lines", func(t *testing.T) {
 		fsys := keyHost(t, v, map[string]string{aliceAK: strings.Repeat("garbage\n", 5000) + ed.line + "\n"})
 		o := execKeys(keysProbe(t), sshdFixture(v, "sshd_T_default"), fsys, map[string][]string{"alice": {ed.fp}})
