@@ -300,7 +300,7 @@ type File struct {
 
 // Hardening of both services. The reason for every option is in the README.
 const (
-	memoryMax        = "1G"
+	memoryMax        = "1536M"
 	goMemLimit       = "384MiB"
 	cpuQuota         = "50%"
 	timeoutStartSec  = "10min"
@@ -331,9 +331,12 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 # AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
 RestrictAddressFamilies=` + addressFamilies + `
-# Two 64 MiB buffers of "ss" output (tcp and udp) with their copies peak at
-# 750-900 MiB without a soft limit (about 480 MiB with GOMEMLIMIT); the largest
-# state file is a 16 MiB read, around 100 MB.
+# Sized by the most memory the listeners check can use (two 64 MiB buffers of
+# "ss" output and their copies), measured as the peak of the unit's cgroup under
+# the GOMEMLIMIT below, with at least 1.5 times headroom. GOMEMLIMIT is not
+# needed to stay under MemoryMax, but it lowers the usual worst case
+# considerably; keep it unless the sizing is measured again. MemoryMax is the
+# backstop for a runaway check.
 MemoryMax=` + memoryMax + `
 Environment=GOMEMLIMIT=` + goMemLimit + `
 CPUQuota=` + cpuQuota + `
