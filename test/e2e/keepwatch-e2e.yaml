@@ -1,0 +1,20 @@
+# Test configuration of the end-to-end run.
+state_dir: /var/lib/keepwatch
+
+checks:
+  # Thresholds the runner's disk usage cannot reach, so the result does not
+  # depend on how full the machine that runs the test is.
+  disk.usage:
+    params:
+      warn_percent: 99
+      fail_percent: 100
+  # A container has no reboot semantics; the "reboot" scenario enables it
+  # with an extra drop-in and the marker file.
+  system.reboot_required:
+    enabled: false
+
+# Only sshd is allowed to listen.
+listeners:
+  allow:
+    - port: 22
+      proto: tcp

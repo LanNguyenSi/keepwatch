@@ -1,0 +1,374 @@
+{
+  "runs": [
+    {
+      "process_exit_code": 0,
+      "report": {
+        "changes": [],
+        "counts": {
+          "error": 0,
+          "excepted": 0,
+          "fail": 0,
+          "pass": 10,
+          "skipped": 7,
+          "total": 18,
+          "warn": 1
+        },
+        "exit_code": 0,
+        "fail_on": "medium",
+        "generated_at": "<timestamp>",
+        "host": "keepwatch-e2e",
+        "results": [
+          {
+            "check_id": "services.fail2ban_active",
+            "evidence": [],
+            "kind": "service_active",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "program \"systemctl\" is not installed, check skipped"
+          },
+          {
+            "check_id": "services.unattended_upgrades_active",
+            "evidence": [],
+            "kind": "service_active",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "program \"systemctl\" is not installed, check skipped"
+          },
+          {
+            "check_id": "packages.fail2ban_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "high",
+            "status": "pass",
+            "summary": "fail2ban <version> is installed"
+          },
+          {
+            "check_id": "packages.unattended_upgrades_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "unattended-upgrades <version> is installed"
+          },
+          {
+            "check_id": "packages.needrestart_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "low",
+            "status": "pass",
+            "summary": "needrestart <version> is installed"
+          },
+          {
+            "check_id": "ssh.password_authentication",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "high",
+            "status": "pass",
+            "summary": "sshd passwordauthentication is no"
+          },
+          {
+            "check_id": "ssh.permit_root_login",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "high",
+            "status": "pass",
+            "summary": "sshd permitrootlogin is no"
+          },
+          {
+            "check_id": "ssh.keyboard_interactive_authentication",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "sshd kbdinteractiveauthentication is no"
+          },
+          {
+            "check_id": "ssh.x11_forwarding",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "low",
+            "status": "pass",
+            "summary": "sshd x11forwarding is no"
+          },
+          {
+            "check_id": "fail2ban.sshd_jail",
+            "evidence": [],
+            "kind": "fail2ban_jail",
+            "severity": "high",
+            "status": "pass",
+            "summary": "fail2ban jail sshd is running"
+          },
+          {
+            "check_id": "network.listeners",
+            "evidence": [],
+            "kind": "listeners",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "2 listening sockets, all allowed"
+          },
+          {
+            "check_id": "system.reboot_required",
+            "evidence": [],
+            "kind": "reboot_required",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "disabled in the configuration"
+          },
+          {
+            "check_id": "network.firewall_default",
+            "evidence": [],
+            "kind": "firewall_default",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "none of nft, iptables and ip6tables is installed, check skipped"
+          },
+          {
+            "check_id": "updates.security_pending",
+            "evidence": [
+              {
+                "detail": "package lists have no InRelease file, so their age is unknown; limit is 48 hours",
+                "excepted": false,
+                "subject": "apt-lists"
+              }
+            ],
+            "kind": "security_updates",
+            "severity": "high",
+            "status": "warn",
+            "summary": "no pending security updates in the package lists, but the lists have no InRelease file, so their age is unknown, so newer updates may exist; 0 other upgrade(s) pending"
+          },
+          {
+            "check_id": "docker.exposure",
+            "evidence": [],
+            "kind": "docker_exposure",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "program \"docker\" is not installed and the daemon left no configuration, check skipped"
+          },
+          {
+            "check_id": "ssh.authorized_keys",
+            "evidence": [],
+            "kind": "authorized_keys",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "authorized_keys.expected is not configured, there is nothing to compare the keys with (ssh-keygen -lf <file> prints the fingerprints)"
+          },
+          {
+            "check_id": "disk.usage",
+            "evidence": [],
+            "kind": "disk_usage",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "<n> file system(s) below 99%"
+          },
+          {
+            "check_id": "certs.expiry",
+            "evidence": [],
+            "kind": "cert_expiry",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "no certificate file found (0 path(s), 1 pattern(s)), check skipped"
+          }
+        ],
+        "schema_version": 2,
+        "state": {
+          "baseline": true,
+          "reason": "no previous state (first run)",
+          "used": true
+        },
+        "still_failing": [],
+        "still_warning": [],
+        "warnings": []
+      },
+      "run": 1,
+      "stderr": ""
+    },
+    {
+      "process_exit_code": 0,
+      "report": {
+        "changes": [],
+        "counts": {
+          "error": 0,
+          "excepted": 0,
+          "fail": 0,
+          "pass": 10,
+          "skipped": 7,
+          "total": 18,
+          "warn": 1
+        },
+        "exit_code": 0,
+        "fail_on": "medium",
+        "generated_at": "<timestamp>",
+        "host": "keepwatch-e2e",
+        "results": [
+          {
+            "check_id": "services.fail2ban_active",
+            "evidence": [],
+            "kind": "service_active",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "program \"systemctl\" is not installed, check skipped"
+          },
+          {
+            "check_id": "services.unattended_upgrades_active",
+            "evidence": [],
+            "kind": "service_active",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "program \"systemctl\" is not installed, check skipped"
+          },
+          {
+            "check_id": "packages.fail2ban_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "high",
+            "status": "pass",
+            "summary": "fail2ban <version> is installed"
+          },
+          {
+            "check_id": "packages.unattended_upgrades_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "unattended-upgrades <version> is installed"
+          },
+          {
+            "check_id": "packages.needrestart_installed",
+            "evidence": [],
+            "kind": "package_installed",
+            "severity": "low",
+            "status": "pass",
+            "summary": "needrestart <version> is installed"
+          },
+          {
+            "check_id": "ssh.password_authentication",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "high",
+            "status": "pass",
+            "summary": "sshd passwordauthentication is no"
+          },
+          {
+            "check_id": "ssh.permit_root_login",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "high",
+            "status": "pass",
+            "summary": "sshd permitrootlogin is no"
+          },
+          {
+            "check_id": "ssh.keyboard_interactive_authentication",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "sshd kbdinteractiveauthentication is no"
+          },
+          {
+            "check_id": "ssh.x11_forwarding",
+            "evidence": [],
+            "kind": "sshd_effective",
+            "severity": "low",
+            "status": "pass",
+            "summary": "sshd x11forwarding is no"
+          },
+          {
+            "check_id": "fail2ban.sshd_jail",
+            "evidence": [],
+            "kind": "fail2ban_jail",
+            "severity": "high",
+            "status": "pass",
+            "summary": "fail2ban jail sshd is running"
+          },
+          {
+            "check_id": "network.listeners",
+            "evidence": [],
+            "kind": "listeners",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "2 listening sockets, all allowed"
+          },
+          {
+            "check_id": "system.reboot_required",
+            "evidence": [],
+            "kind": "reboot_required",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "disabled in the configuration"
+          },
+          {
+            "check_id": "network.firewall_default",
+            "evidence": [],
+            "kind": "firewall_default",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "none of nft, iptables and ip6tables is installed, check skipped"
+          },
+          {
+            "check_id": "updates.security_pending",
+            "evidence": [
+              {
+                "detail": "package lists have no InRelease file, so their age is unknown; limit is 48 hours",
+                "excepted": false,
+                "subject": "apt-lists"
+              }
+            ],
+            "kind": "security_updates",
+            "severity": "high",
+            "status": "warn",
+            "summary": "no pending security updates in the package lists, but the lists have no InRelease file, so their age is unknown, so newer updates may exist; 0 other upgrade(s) pending"
+          },
+          {
+            "check_id": "docker.exposure",
+            "evidence": [],
+            "kind": "docker_exposure",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "program \"docker\" is not installed and the daemon left no configuration, check skipped"
+          },
+          {
+            "check_id": "ssh.authorized_keys",
+            "evidence": [],
+            "kind": "authorized_keys",
+            "severity": "high",
+            "status": "skipped",
+            "summary": "authorized_keys.expected is not configured, there is nothing to compare the keys with (ssh-keygen -lf <file> prints the fingerprints)"
+          },
+          {
+            "check_id": "disk.usage",
+            "evidence": [],
+            "kind": "disk_usage",
+            "severity": "medium",
+            "status": "pass",
+            "summary": "<n> file system(s) below 99%"
+          },
+          {
+            "check_id": "certs.expiry",
+            "evidence": [],
+            "kind": "cert_expiry",
+            "severity": "medium",
+            "status": "skipped",
+            "summary": "no certificate file found (0 path(s), 1 pattern(s)), check skipped"
+          }
+        ],
+        "schema_version": 2,
+        "state": {
+          "baseline": false,
+          "previous_run_at": "<timestamp>",
+          "used": true
+        },
+        "still_failing": [],
+        "still_warning": [
+          {
+            "check_id": "updates.security_pending",
+            "check_kind": "security_updates",
+            "severity": "high"
+          }
+        ],
+        "warnings": []
+      },
+      "run": 2,
+      "stderr": ""
+    }
+  ]
+}

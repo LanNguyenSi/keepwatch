@@ -1,0 +1,5 @@
+# Runs the sshd jail without systemd: the jail reads a plain log file.
+[sshd]
+enabled = true
+backend = auto
+logpath = /var/log/auth.log

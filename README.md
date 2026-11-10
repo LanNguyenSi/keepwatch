@@ -25,6 +25,78 @@ make test     # go test -race ./...
 make lint     # gofmt, go vet, staticcheck
 ```
 
+## End-to-end tests
+
+```sh
+make e2e                              # Ubuntu 22.04 and 24.04, needs docker, jq and go
+test/e2e/run.sh 24.04                 # one release
+test/e2e/run.sh -update               # rewrite the golden files after a deliberate change
+```
+
+`test/e2e/` builds keepwatch for `linux/<arch of the docker daemon>`, copies it
+into a fresh container of an image per release (`keepwatch-e2e:22.04`,
+`keepwatch-e2e:24.04`; the Ubuntu base is pinned by digest, the packages are the
+current archive) and runs `keepwatch check --format json` in five scenarios:
+
+| Scenario | What it does | Expected exit codes |
+|---|---|---|
+| `hardened` | sshd with password, keyboard-interactive and root login off | 0 |
+| `open` | sshd with password login, keyboard-interactive, root login and X11 forwarding on; the four `ssh.*` checks fail | 1 |
+| `diff` | a run, then a TCP listener on port 8080 outside the allowlist, then a second run: `network.listeners` is a `new_failure` with an alert | 0, 1 |
+| `nochange` | two runs without a change: no changes | 0, 0 |
+| `reboot` | a run, then the reboot marker file, then a second run: `system.reboot_required` is a `new_failure` with an alert | 0, 1 |
+
+The reports are compared with `test/e2e/golden/<release>/<scenario>.json`, which
+also hold the exit code of every run and its stderr (empty). The container
+starts sshd and fail2ban by hand, because there is no systemd.
+
+The deployment targets are x86_64 servers. The optional workflow
+`.github/workflows/e2e.yml` (manual, and on pull requests that touch `test/e2e`,
+`internal`, `cmd`, `go.mod` or the Makefile; not a required check) runs the same
+target on an x86_64 runner. Locally on an arm64 machine the binary is built for
+arm64.
+
+### Container limits
+
+These are expected in the golden files, each with the reason keepwatch gives:
+
+| Check | Status | Why |
+|---|---|---|
+| `services.fail2ban_active`, `services.unattended_upgrades_active` | `skipped` | there is no systemd, so no `systemctl` |
+| `network.firewall_default` | `skipped` | neither nft, iptables nor ip6tables is installed in the image, a container has no firewall backend of its own |
+| `updates.security_pending` | `warn` | the image carries no apt package lists (no `InRelease`), so the age of the lists is unknown; a pending update would not be seen |
+| `docker.exposure` | `skipped` | no docker, no daemon configuration |
+| `ssh.authorized_keys` | `skipped` | the test configuration names no expected keys |
+| `certs.expiry` | `skipped` | the image holds no certificate |
+| `system.reboot_required` | `skipped` (disabled in the configuration) | a container has no kernel to reboot; only the `reboot` scenario enables the check, and there the `pass` of the first run only says that the marker file is absent |
+
+No golden file holds a `pass` that exists only because the container lacks the
+thing: the checks above are `skipped` or `warn` instead. The `pass` results are
+real findings about the container: the three packages are installed, the
+effective sshd options, the `sshd` jail of fail2ban is running (a drop-in
+points it at a plain log file instead of the journal), only sshd listens, and
+the file systems are below the thresholds. `disk.usage` is configured with
+thresholds of 99 and 100 percent, so a full runner cannot change the result.
+
+### Normalisation
+
+Before the comparison the report is rewritten in `test/e2e/normalize.jq`, and
+nothing else:
+
+| Field | Rewritten to | Why |
+|---|---|---|
+| `generated_at` | `<timestamp>` | the time of the run |
+| `state.previous_run_at` | `<timestamp>` | the time of the previous run |
+| `summary` of `packages.*_installed` (`fail2ban`, `unattended-upgrades`, `needrestart`): the version | `<version>` | apt installs the current archive version, which changes between image builds |
+| `summary` of `disk.usage`: the number of file systems | `<n>` | the number of mounts depends on the container runtime |
+
+The host name is not normalised: the container gets a fixed one. After the
+rewrite, `run.sh` compares what `test/e2e/signature.jq` extracts (check ids,
+kinds, statuses, severities, changes with their alert flag, subjects and
+status transitions, the lists of still failing and warning checks, the counts,
+the exit code and `fail_on`) from the raw and the rewritten report, and fails
+when they differ. A rewrite cannot hide a status or a check id.
+
 ## Configuration
 
 The main file is `/etc/keepwatch/keepwatch.yaml` (override with
