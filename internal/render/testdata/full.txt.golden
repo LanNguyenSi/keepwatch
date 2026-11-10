@@ -1,0 +1,38 @@
+keepwatch check: host web-01, 2026-11-10T12:00:00Z
+7 checks: 1 pass, 2 fail, 1 warn, 1 error, 1 skipped, 1 excepted
+fail-on medium, exit code 1
+state: changes since the previous run at 2026-11-10T06:00:00Z
+
+warnings:
+  - state file /var/lib/keepwatch/state.json was not used: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
+
+changes (11):
+  ! ssh.password_authentication (high): now failing (was pass)
+  ! network.listeners (medium): new item: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
+    network.listeners (medium): item gone: tcp/0.0.0.0:7000
+  ! updates.security_pending (high): pass -> error
+  ! ssh.authorized_keys (high): pass -> warn
+    disk.usage (medium): fixed (was failing)
+  ! docker.exposure (high): item count 104 -> 108
+  ! docker.exposure (high): 2 new items not shown (above the cutoff of a capped list)
+  ! disk.usage (high): severity medium -> high (status fail)
+    fail2ban.sshd_jail (high): new check, status pass
+    old.check (low): check removed (was fail)
+still failing (1): network.listeners
+still warning (1): ssh.authorized_keys
+
+findings:
+  [FAIL] ssh.password_authentication (high) passwordauthentication is yes
+      - passwordauthentication: effective value: yes; allowed: no
+  [FAIL] network.listeners (medium) 2 listeners are not allowed
+      - tcp/0.0.0.0:9000: process: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]
+      - evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED]: token=[REDACTED] was passed on the command line
+      - tcp/0.0.0.0:8080: process: web [excepted: jump host until 2099]
+  [WARN] ssh.authorized_keys (high) 1 authorized_keys file could not be read
+      - deploy:/home/deploy/.ssh/authorized_keys: not read: permission denied
+  [ERROR] updates.security_pending (high) apt-cache policy exited with status 100
+  [EXCEPTED] docker.exposure (high) 1 container is privileged (excepted: build host)
+      - builder: privileged [excepted: build host]
+
+passing (1): services.fail2ban_active
+skipped (1): certs.expiry

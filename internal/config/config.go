@@ -12,7 +12,7 @@
 // mapping (an empty or null document is fine) is an error; a file
 // never replaces another file's root. A section key with a null value
 // (host, checks, listeners, listeners.allow, authorized_keys,
-// exceptions, notify) counts as an absent section, and so do the
+// exceptions, notify, redact, redact.patterns) counts as an absent section, and so do the
 // optional nested mappings checks.<id>.params, authorized_keys.expected
 // and notify.ntfy when they are null. Entries of conf.d whose name
 // starts with a dot (.hidden.yaml, an editor lock symlink such as
@@ -99,6 +99,7 @@ type Config struct {
 	AuthorizedKeys AuthorizedKeys
 	Exceptions     []Exception
 	Notify         Notify
+	Redact         Redact
 
 	ownerOf OwnerOf // the owner lookup Load used; ReadToken reuses it
 }
@@ -138,6 +139,15 @@ type Exception struct {
 	Match   string
 	Reason  string
 	Expires time.Time // midnight, local zone, on the expiry date
+}
+
+// Redact configures the redaction of secrets in output. The built-in
+// patterns always apply; Patterns adds to them.
+type Redact struct {
+	// Patterns are extra regular expressions (RE2 syntax, see the redact
+	// package for the bounds). Lists from conf.d files are appended to the
+	// main file's list like every other list.
+	Patterns []string
 }
 
 // Notify configures the notification channels.

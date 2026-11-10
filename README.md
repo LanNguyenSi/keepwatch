@@ -83,6 +83,9 @@ More rules, all reported with `file:line`:
   user; it refuses to follow symlinks, and `--force` only replaces a
   regular file.
 
+- `redact.patterns` is an optional list of extra redaction patterns, see
+  [Redaction](#redaction).
+
 ```sh
 keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml
@@ -300,12 +303,255 @@ confirmed and says in its summary that the picture is partial.
 Each expired exception is reported as its own `exception_expired` result
 (severity low).
 
+## Running a check
+
+```sh
+keepwatch check [--config FILE] [--format text|json|markdown] [--no-state] [--fail-on SEVERITY]
+```
+
+`check` loads the configuration, runs every enabled check of the catalog,
+compares the result with the previous run, prints a report and stores the
+result as the new "previous run".
+
+| Flag | Meaning |
+|---|---|
+| `--config FILE` | main configuration file (default `/etc/keepwatch/keepwatch.yaml`) |
+| `--format` | `text` (default), `json` or `markdown` |
+| `--no-state` | only check: the state of the last run is neither read nor written, and the report has no comparison |
+| `--fail-on SEVERITY` | lowest severity that makes the exit code 1: `info`, `low`, `medium` (default), `high`, `critical` |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | no result counts at `--fail-on` |
+| 1 | at least one result counts at `--fail-on` |
+| 2 | usage error (unknown flag, bad `--format` or `--fail-on`, extra argument) |
+| 3 | keepwatch could not do its job: invalid configuration, a state directory that cannot be trusted or a state that cannot be saved, an interrupted run, a failed write of the report |
+
+What counts for exit code 1, per status, when the check's severity is at least
+`--fail-on`:
+
+| Status | Counts | Why |
+|---|---|---|
+| `fail` | yes | a deviation |
+| `error` | yes | the check could not be evaluated; an unknown state must not look green |
+| `warn` | only for the `authorized_keys` check | a warn there can stand for keys that were never examined; every other warn is a soft deviation and leaves the exit code at 0 |
+| `pass`, `skipped`, `excepted` | no | an excepted failure is covered by a dated exception with a reason |
+
+The expired-exception result (`exception_expired`) is a `fail` of severity low,
+so it counts only with `--fail-on low` or `--fail-on info`.
+
+The exit code depends on the current results only, never on the comparison with
+the last run: a timer that runs `check` every few hours sees exit 1 for as long
+as the host stays bad. The comparison decides what is worth a notification.
+Exit code 3 wins over 1: if the state could not be handled, the run is not
+reliable, even when the report (which is still printed) shows findings. The
+`exit_code` in a report is the one decided before the state is saved; a state
+that cannot be saved is found after the report was written (see "State"), so it
+is told on stderr and the process exits 3 although the report says 1 or 0.
+
+### The comparison with the last run
+
+Per check the report lists, in the order of the checks:
+
+- `new_failure`: the check fails now and did not before (from `pass`, `skipped`,
+  `excepted`, `warn` or `error`);
+- `fixed`: it failed and passes now;
+- `status_change`: every other change of status (`pass` to `error`, `fail` to
+  `warn`, `excepted` to `pass`, ...);
+- `severity_change`: the check has the same status (`fail`, `warn` or `error`) in
+  both runs and another severity, for example because a configuration override
+  changed it; it is an alert when the severity went up and the status counts
+  toward the exit code (see above), since a failure that was below `--fail-on`
+  can have crossed it;
+- `check_added` and `check_removed`: the catalog gained or lost the check;
+- for a check that is `fail` (or `warn`) in both runs: `subject_new` and
+  `subject_gone` for items that appeared or disappeared, and `count_change` when
+  the check lists a capped number of items (see below), and `hidden_new` for new
+  items that a capped list does not name (see below);
+- the checks that keep failing or warning unchanged ("still failing", "still
+  warning").
+
+A change is marked as an alert (worth a notification) when a check starts to
+fail or to be in `error`, when a new check is failing or in `error`, when a
+failing check has a new item (named or counted, `hidden_new`) or a larger item total, when a failing check or one
+in `error` gets a higher severity, and when an `authorized_keys` check starts to
+warn, is new and warns, or has a new warn item.
+Everything else (fixed, gone items, a status change to `skipped`, `excepted` or
+a `warn` of another check) is reported without the alert mark.
+
+Two rules keep the comparison honest:
+
+- An `error` is a partial picture: the check could not see everything. Its
+  evidence is never compared item by item; the change of status is reported once.
+- A check that has more than 100 items lists the first 99 sorted by subject and a
+  marker "(N more not shown)". The marker is not an item: a change of N never
+  produces new or gone subjects. The state keeps where the list was cut (the
+  subject of the last listed item, the "cutoff"), so a capped list is compared
+  as far as it can be: with a capped previous run, an item that is listed now
+  and sorts before the previous cutoff would have been listed before, so it is
+  `subject_new` (an alert) even when the total is the same; with a capped
+  current run, a previous item that is not listed now and sorts before the
+  current cutoff is `subject_gone`. Above the cutoff nothing is said about
+  single items, because an item that is listed now may have been hidden before
+  and one that is no longer listed may only be hidden now; there the totals are
+  compared instead (`count_change`, an alert when the total grew). When the
+  check is capped in both runs, the arithmetic still shows new items above the
+  cutoff: let G be the number of items of the previous run that were listed (at
+  or before the previous cutoff) and are gone now, and D the current total minus
+  the previous total. G + D is at least the number of new items, so when it is
+  larger than the number of `subject_new` entries for the check, the surplus N
+  is reported as one `hidden_new` change with the count N, an alert like
+  `subject_new`. For example, a listener below the cutoff stops and a new one
+  starts above it: `subject_gone` for the first and `hidden_new` 1 for the
+  second, although the total is the same. The limit: only the previous run is
+  known, so an item that appeared and went away again between two runs is
+  invisible, and so is a new hidden item that replaces an equally hidden one
+  that went away. `hidden_new` needs a cutoff in both runs; a state file that
+  holds none (an older version) falls back to the totals. The cutoff
+  is stored only when it is exactly the (cleaned) subject that the state holds
+  anyway; a subject that had to be escaped, redacted or cut for display has no
+  cutoff and no place in the order, and counts as "above the cutoff". A state
+  file of an older version has no cutoffs, so its capped lists are compared by
+  total only until the next run has written them. Known gaps of this
+  comparison, to be closed by comparing the complete set of item keys: a new
+  item whose subject had to be escaped or redacted is never placed, so when it
+  replaces an item that was already hidden it is not reported; `hidden_new` is
+  not computed when the list was capped before and is complete now; and a new
+  excepted item can make `hidden_new` count one item too many.
+
+Items are compared by the SHA-256 of their raw subject, so two subjects that
+look the same after cleaning (they differ in a control character, say) are still
+two items.
+
+### State
+
+The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
+with `schema_version` (2; a file of version 1 is still read), the time of the run
+and, per check, its id, kind, status, severity and failing items (hash and
+cleaned, redacted subject, and a mark if that subject is the raw one). For a
+check whose list was cut it also holds the cutoff described above, which must be the
+subject of one of that check's stored items, otherwise the file is not used. It holds no
+evidence detail text and no summaries, and nothing from a subject that is not
+already in it as displayed.
+
+keepwatch runs as root and the state decides what the operator is told, so it is
+checked:
+
+- `state_dir` is cleaned with `filepath.Clean` and must be absolute. It is created
+  with mode 0700 if it does not exist; otherwise it must be a real directory (not
+  a symlink) owned by root or the running user that group and other cannot write
+  to. Ancestors above it are not examined (known limit): they must be root-owned.
+- The state file is opened without following links and checked on the open
+  descriptor: a regular file of at most 4 MiB, owned by root or the running user,
+  not writable by group or other.
+- It is written atomically: a temporary file in the same directory (created
+  exclusively, mode 0600), flushed, renamed over `state.json`, then the directory
+  is flushed. If a step fails, the previous file stays and the temporary file is
+  removed.
+
+Recovery. A missing state file is a first run: a baseline, no changes are
+reported. A state file that is a symlink, foreign-owned, group- or
+other-writable, too large, truncated, not valid JSON, of another schema version
+or invalid is reported as a warning (stderr and in the report) and the run is a
+new baseline; it is never an abort and never a silent "nothing changed". The
+file is replaced at the end of the run, so nothing needs repairing; to start from
+scratch, delete `state.json`. A state directory that cannot be trusted (or a
+state that cannot be saved) is different: the report is still printed, state is
+not read or written, and the exit code is 3, because the next run could not be
+compared reliably.
+
+The report is built first, written to stdout, and only then is the state
+saved. A report that could not be written (a closed pipe, a full disk) therefore
+leaves the state as it was: the next run reports the same changes again instead
+of losing them, and the exit code is 3. A failed save cannot be part of the
+report any more; it is a warning on stderr and exit code 3.
+
+The state is written after a successful run, never after an interrupted one. A
+manual `keepwatch check` counts as a run: it moves the "previous run" forward,
+so a scheduled run after it reports changes only since that manual run. Use
+`--no-state` for a look that must not do that.
+
+### Output safety
+
+Text in a report comes from probes and can carry what a local user chose (a
+container name, a mount point, a file path) or a secret that someone put in a
+command line. Every string of a report is cleaned before it is printed, whatever
+the format:
+
+1. secrets are replaced with `[REDACTED]` (see [Redaction](#redaction));
+2. control characters are escaped into visible sequences: C0 controls and DEL
+   (`\n`, `\r`, `\t`, `\x1b`, ...), C1 controls (`\u0085`), Unicode format
+   characters including the bidirectional overrides, zero-width characters and
+   the byte order mark, line and paragraph separators (`\u2028`), the right-to-left override (`\u202e`), characters
+   that draw nothing and could make two names look alike (the Hangul and Khmer
+   fillers such as `\u3164`, the combining grapheme joiner `\u034f`, the braille
+   blank `\u2800`, the variation selectors `\ufe0f` and `\U000e0100`), private-use and
+   unassigned code points, and bytes that are not valid UTF-8 (`\xff`), so an
+   escape sequence cannot move the cursor, set a window title, forge a line,
+   reverse the text or hide a difference between two names;
+3. the result is cut at 2000 characters.
+
+JSON is produced by `encoding/json` only. In Markdown, untrusted text appears
+only in code spans whose fence is longer than any run of backticks in the text,
+so it cannot open a link, an image, HTML or a heading; pipes are escaped in table
+cells. In the text format every field is one line built by keepwatch.
+
+### Redaction
+
+Built-in patterns, applied before escaping, so a multi-line private key is still
+one block when it is matched:
+
+- PEM private key blocks (also one cut off before its end line);
+- `name=value`, `name: value` and `"name": "value"` when the name ends in
+  `password`, `passwd`, `passphrase`, `secret`, `token`, `api_key`, `access_key`,
+  `private_key`, `secret_key` (also `auth_`, `signing_`, `encryption_` and
+  `master_` plus `key`), `credential` or `credentials`, when it is `pass` or
+  `pwd` or ends in them after a separator (`DB_PASS=`, `MYSQL_PWD=`), and
+  `NAME_KEY=value` environment style (`token_file`, `passwordauthentication`
+  and `bypass` are left alone). A quoted value may hold escaped quotes
+  (`"a\"b"`) and a quote that is never closed runs to the end of the text;
+- `--password value` style flags (also when a NUL byte, as in a command line
+  read from `/proc`, separates the flag from its value), `Authorization: ...`
+  values, `Cookie:` and `Set-Cookie:` values (the rest of the line), bearer
+  tokens;
+- URLs with credentials (`scheme://user:password@host`, `scheme://token@host`);
+  the credentials end at the last `@` before the host, so a password with an `@`
+  in it is covered;
+- AWS access key ids, GitHub tokens (`ghp_`, `github_pat_`, ...), GitLab tokens
+  (`glpat-`), API keys of the `sk-` family (`sk-...`, `sk-ant-...`), ntfy tokens
+  (`tk_`), Slack tokens, Google API keys, Stripe keys and JSON web tokens.
+
+Redaction is best effort: it knows the shapes above and cannot know a secret that
+has none. The probes keep secrets out of evidence in the first place (they print
+fingerprints and counts, never file contents).
+
+Extra patterns go in the configuration:
+
+```yaml
+redact:
+  patterns:
+    - 'corp-[0-9]{4}'          # the whole match is replaced
+    - 'session=([a-z0-9]+)'    # a capturing group: only the group is replaced
+```
+
+Patterns use RE2 syntax (no backtracking, no lookahead). They are compiled when
+the configuration is loaded: at most 32 patterns of at most 256 bytes, none may
+match the empty string or compile to a program of more than 1000 instructions
+(a large repeat such as `(a|b|c|d|e){1000}` does; the text of a pattern is
+short, but its cost is paid on every byte of every field that is shown), and a
+bad one is a configuration error with file and line. Lists in `conf.d` files are appended to the main file's list. The redaction
+function (`redact.Redactor.Clean`) is what the notification code uses as well.
+
 ## Status
 
 Pre-MVP. The command line skeleton, the program execution layer, the
-strict configuration loader and the check engine with twelve check kinds exist;
-`config check` and `init` are implemented, while the commands (`check`,
-`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
+strict configuration loader, the check engine with twelve check kinds, the state
+of the last run, the comparison and the text, JSON and Markdown reports exist;
+`check`, `config check` and `init` are implemented, while the commands
+(`report`, `doctor`, `install`, `uninstall`) are stubs that exit with status 3.
+There is no notification yet.
 
 ## License
 

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-10T12:00:00Z",
+  "host": "web-01",
+  "fail_on": "medium",
+  "exit_code": 0,
+  "counts": {
+    "total": 1,
+    "pass": 1,
+    "fail": 0,
+    "warn": 0,
+    "error": 0,
+    "skipped": 0,
+    "excepted": 0
+  },
+  "state": {
+    "used": true,
+    "baseline": false,
+    "previous_run_at": "2026-11-10T11:00:00Z"
+  },
+  "warnings": [],
+  "changes": [],
+  "still_failing": [],
+  "still_warning": [],
+  "results": [
+    {
+      "check_id": "a.one",
+      "kind": "k",
+      "status": "pass",
+      "severity": "low",
+      "summary": "fine",
+      "evidence": []
+    }
+  ]
+}
