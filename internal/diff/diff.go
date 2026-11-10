@@ -39,6 +39,15 @@
 // compared too, and a larger total is reported as count_change. The hidden
 // count itself never produces subject changes.
 //
+// When a check is capped in both runs, the arithmetic can still show new items
+// that the lists do not name: the items of the previous run that were listed
+// and are gone now, plus the growth of the total, minus the new items that
+// were named, is a number of new items above the cutoff. That number is
+// reported as one hidden_new change, an alert like subject_new. Only the
+// previous run is known: an item that appeared and went away between two runs
+// is invisible, and so is a new hidden item that replaces an equally hidden
+// one that went away.
+//
 // Which changes are worth an alert is decided here (Change.Alert); the exit
 // code of `keepwatch check` does not depend on the diff, only on the current
 // results (see the cli package).
@@ -64,6 +73,10 @@ const (
 	SubjectNew   Kind = "subject_new"
 	SubjectGone  Kind = "subject_gone"
 	CountChange  Kind = "count_change"
+	// HiddenNew is a number of new items that keepwatch cannot name: the
+	// arithmetic of two capped lists says they exist, but they sit above
+	// the cutoff, where the list does not show them (see Change.HiddenNew).
+	HiddenNew Kind = "hidden_new"
 	// SeverityChange is a changed severity of a check whose status is the
 	// same in both runs (and fail, warn or error).
 	SeverityChange Kind = "severity_change"
@@ -89,6 +102,8 @@ type Change struct {
 	Subject string
 	// OldTotal and NewTotal are the item totals of a count_change.
 	OldTotal, NewTotal int
+	// HiddenNew is the number of new items of a hidden_new change.
+	HiddenNew int
 	// FromSeverity and ToSeverity are the severities of a severity_change.
 	FromSeverity, ToSeverity result.Severity
 	// Alert is true for a change worth waking someone for: a check that
@@ -247,6 +262,7 @@ func itemChanges(p, c *state.Check) []Change {
 	curSet, curAll := failing(c), keys(c)
 
 	var out []Change
+	newItems := 0 // listed items that the previous run did not have at all
 	for _, it := range c.Items {
 		if it.Excepted || prevSet[it.Key] {
 			continue
@@ -255,6 +271,9 @@ func itemChanges(p, c *state.Check) []Change {
 		// would have listed it.
 		if !prevAll[it.Key] && !wasVisible(p, it) {
 			continue
+		}
+		if !prevAll[it.Key] {
+			newItems++
 		}
 		ch := base
 		ch.Kind, ch.Subject, ch.Alert = SubjectNew, it.Subject, alert
@@ -279,6 +298,11 @@ func itemChanges(p, c *state.Check) []Change {
 		}
 		return out[i].Subject < out[j].Subject
 	})
+	if n := hiddenNew(p, c, newItems, curAll); n > 0 {
+		ch := base
+		ch.Kind, ch.HiddenNew, ch.Alert = HiddenNew, n, alert
+		out = append(out, ch)
+	}
 	if (p.Capped() || c.Capped()) && p.Total() != c.Total() {
 		ch := base
 		ch.Kind, ch.OldTotal, ch.NewTotal = CountChange, p.Total(), c.Total()
@@ -286,6 +310,37 @@ func itemChanges(p, c *state.Check) []Change {
 		out = append(out, ch)
 	}
 	return out
+}
+
+// hiddenNew returns how many new items a check has that the diff cannot name.
+// It applies to a check that is capped in both runs and has a cutoff in both.
+// Let G be the number of items of the previous run that were listed (placed at
+// or before the previous cutoff, stored exactly), are not in the current
+// items although this run would have listed them (at or before the current
+// cutoff), and so are really gone; and D the current total minus the previous
+// one. The current total is the previous one plus the new items minus all
+// gone ones, and at least G items are gone, so at least G+D items are new.
+// newItems of them are named (subject_new, items the previous run did not
+// have at all); the surplus is new items above the cutoff, where the list
+// does not show them. It is zero when the surplus is not positive.
+//
+// The limit: only the previous run is known. An item that appeared and
+// disappeared between two runs is in neither, and an item that is new but
+// hidden while an equal number of hidden items is gone cannot be seen at all.
+func hiddenNew(p, c *state.Check, newItems int, curAll map[string]bool) int {
+	if !p.Capped() || !c.Capped() || p.Cutoff == nil || c.Cutoff == nil {
+		return 0
+	}
+	gone := 0
+	for _, it := range p.Items {
+		if !curAll[it.Key] && wasVisible(p, it) && wasVisible(c, it) {
+			gone++
+		}
+	}
+	if n := gone + c.Total() - p.Total() - newItems; n > 0 {
+		return n
+	}
+	return 0
 }
 
 // wasVisible reports whether run r, in which item it is not listed, would have

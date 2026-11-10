@@ -368,13 +368,14 @@ Per check the report lists, in the order of the checks:
 - `check_added` and `check_removed`: the catalog gained or lost the check;
 - for a check that is `fail` (or `warn`) in both runs: `subject_new` and
   `subject_gone` for items that appeared or disappeared, and `count_change` when
-  the check lists a capped number of items (see below);
+  the check lists a capped number of items (see below), and `hidden_new` for new
+  items that a capped list does not name (see below);
 - the checks that keep failing or warning unchanged ("still failing", "still
   warning").
 
 A change is marked as an alert (worth a notification) when a check starts to
 fail or to be in `error`, when a new check is failing or in `error`, when a
-failing check has a new item or a larger item total, when a failing check or one
+failing check has a new item (named or counted, `hidden_new`) or a larger item total, when a failing check or one
 in `error` gets a higher severity, and when an `authorized_keys` check starts to
 warn, is new and warns, or has a new warn item.
 Everything else (fixed, gone items, a status change to `skipped`, `excepted` or
@@ -395,7 +396,20 @@ Two rules keep the comparison honest:
   current cutoff is `subject_gone`. Above the cutoff nothing is said about
   single items, because an item that is listed now may have been hidden before
   and one that is no longer listed may only be hidden now; there the totals are
-  compared instead (`count_change`, an alert when the total grew). The cutoff
+  compared instead (`count_change`, an alert when the total grew). When the
+  check is capped in both runs, the arithmetic still shows new items above the
+  cutoff: let G be the number of items of the previous run that were listed (at
+  or before the previous cutoff) and are gone now, and D the current total minus
+  the previous total. G + D is at least the number of new items, so when it is
+  larger than the number of `subject_new` entries for the check, the surplus N
+  is reported as one `hidden_new` change with the count N, an alert like
+  `subject_new`. For example, a listener below the cutoff stops and a new one
+  starts above it: `subject_gone` for the first and `hidden_new` 1 for the
+  second, although the total is the same. The limit: only the previous run is
+  known, so an item that appeared and went away again between two runs is
+  invisible, and so is a new hidden item that replaces an equally hidden one
+  that went away. `hidden_new` needs a cutoff in both runs; a state file that
+  holds none (an older version) falls back to the totals. The cutoff
   is stored only when it is exactly the (cleaned) subject that the state holds
   anyway; a subject that had to be escaped, redacted or cut for display has no
   cutoff and no place in the order, and counts as "above the cutoff". A state
@@ -412,7 +426,8 @@ The state is `state.json` in `state_dir` (default `/var/lib/keepwatch`): JSON
 with `schema_version` (2; a file of version 1 is still read), the time of the run
 and, per check, its id, kind, status, severity and failing items (hash and
 cleaned, redacted subject, and a mark if that subject is the raw one). For a
-check whose list was cut it also holds the cutoff described above. It holds no
+check whose list was cut it also holds the cutoff described above, which must be the
+subject of one of that check's stored items, otherwise the file is not used. It holds no
 evidence detail text and no summaries, and nothing from a subject that is not
 already in it as displayed.
 

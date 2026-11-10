@@ -68,21 +68,72 @@ func TestCappedListsAreComparedBelowTheCutoff(t *testing.T) {
 			want: []string{"subject_gone a d", "count_change a 9>5"}},
 		{name: "grow with a new item below the cutoff",
 			prev: prev, cur: list(8, "b", "c", "d", "f"),
-			want: []string{"subject_new a c ALERT", "count_change a 9>12 ALERT"}},
+			want: []string{"subject_new a c ALERT", "hidden_new a 2 ALERT", "count_change a 9>12 ALERT"}},
 		{name: "grow above the cutoff only",
 			prev: prev, cur: list(9, "b", "d", "f", "h"),
-			want: []string{"count_change a 9>13 ALERT"}},
+			want: []string{"hidden_new a 4 ALERT", "count_change a 9>13 ALERT"}},
 		{name: "a new item at the cutoff itself is the cutoff item, so not new",
 			prev: prev, cur: list(5, "b", "d", "f", "h")},
 		{name: "an item just above the cutoff may have been hidden: it is not new",
 			prev: prev, cur: list(5, "b", "d", "f", "i"),
-			want: []string{"subject_gone a h"}},
+			want: []string{"subject_gone a h", "hidden_new a 1 ALERT"}},
 		{name: "an item just below the cutoff would have been listed: it is new, and h left the window",
 			prev: prev, cur: list(5, "b", "d", "f", "g"),
 			want: []string{"subject_new a g ALERT"}},
 		{name: "a new item that is not stored exactly cannot be placed",
 			prev: prev, cur: list(5, "b", "c~", "f", "h"),
+			want: []string{"subject_gone a d", "hidden_new a 1 ALERT"}},
+		{name: "swap above the cutoff, same total: a visible item is gone, so a hidden one is new",
+			prev: prev, cur: list(5, "b", "f", "h", "i"),
+			want: []string{"subject_gone a d", "hidden_new a 1 ALERT"}},
+		{name: "swap below the cutoff, same total: named, not counted twice",
+			prev: prev, cur: list(5, "b", "c", "d", "f"),
+			want: []string{"subject_new a c ALERT"}},
+		{name: "grow with a visible item gone: the growth and the gone item are new",
+			prev: prev, cur: list(9, "b", "f", "h", "i"),
+			want: []string{"subject_gone a d", "hidden_new a 5 ALERT", "count_change a 9>13 ALERT"}},
+		{name: "grow with a named new item and a gone item: only the surplus is hidden",
+			prev: prev, cur: list(7, "b", "c", "f", "h"),
+			want: []string{"subject_new a c ALERT", "subject_gone a d", "hidden_new a 2 ALERT", "count_change a 9>11 ALERT"}},
+		{name: "shrink with a visible item gone: the shrink absorbs it",
+			prev: prev, cur: list(3, "b", "f", "h", "i"),
+			want: []string{"subject_gone a d", "count_change a 9>7"}},
+		{name: "shrink by more than the gone items: nothing hidden",
+			prev: prev, cur: list(1, "b", "f", "h", "i"),
+			want: []string{"subject_gone a d", "count_change a 9>5"}},
+		{name: "an item pushed out of the window by a new one is not gone, and nothing is hidden",
+			prev: prev, cur: list(6, "a", "b", "d", "f"),
+			want: []string{"subject_new a a ALERT", "count_change a 9>10 ALERT"}},
+		{name: "an item that becomes excepted is still counted: no hidden new item",
+			prev: prev, cur: list(5, "b", "d!", "f", "h"),
 			want: []string{"subject_gone a d"}},
+		{name: "a gone item that is not stored exactly cannot be counted: no hidden_new",
+			prev: list(5, "b", "d~", "f", "h"), cur: list(5, "b", "f", "h", "i")},
+		{name: "a cutoff on a complete current list is not a capped list: no hidden_new",
+			prev: prev, cur: func() state.Check { c := list(0, "b", "f", "h", "i"); c.Cutoff = ptr("i"); return c }(),
+			want: []string{"subject_gone a d", "count_change a 9>4"}},
+		{name: "a cutoff on a complete current list with more items than before: no hidden_new",
+			prev: prev, cur: func() state.Check {
+				c := list(0, "b", "f", "h", "i", "j", "k", "l", "m", "n", "o")
+				c.Cutoff = ptr("o")
+				return c
+			}(),
+			want: []string{"subject_gone a d", "count_change a 9>10 ALERT"}},
+		{name: "an item stored beyond the previous cutoff was not visible: it is not counted as gone",
+			prev: func() state.Check { c := list(5, "b", "d", "f", "h"); c.Cutoff = ptr("f"); return c }(), cur: list(5, "b", "d", "f", "i"),
+			want: []string{"subject_gone a h"}},
+		{name: "a cutoff on a complete previous list is not a capped list: no hidden_new",
+			prev: func() state.Check { c := list(0, "b", "d", "f", "h"); c.Cutoff = ptr("h"); return c }(), cur: list(5, "b", "f", "h", "i"),
+			want: []string{"subject_new a i ALERT", "subject_gone a d", "count_change a 4>9 ALERT"}},
+		{name: "no cutoff in the previous run: no hidden_new, the totals speak",
+			prev: noCutoff(prev), cur: list(9, "b", "f", "h", "i"),
+			want: []string{"count_change a 9>13 ALERT"}},
+		{name: "no cutoff in the current run: no hidden_new",
+			prev: prev, cur: func() state.Check { c := list(9, "b", "f", "h", "i"); c.Cutoff = nil; return c }(),
+			want: []string{"count_change a 9>13 ALERT"}},
+		{name: "capped only in the previous run: no hidden_new",
+			prev: prev, cur: list(0, "b", "f", "h", "i"),
+			want: []string{"subject_gone a d", "count_change a 9>4"}},
 		{name: "an item gone that is not stored exactly cannot be placed",
 			prev: list(5, "b", "d~", "f", "h"), cur: list(5, "b", "c", "f", "h"),
 			want: []string{"subject_new a c ALERT"}},
@@ -266,6 +317,24 @@ func TestCappedSwapFromProbeOutputToDiff(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "subject_new net.listeners tcp/198.51.100.1:,new ALERT" || got[1] != "subject_gone net.listeners tcp/198.51.100.1:-010" {
 		t.Errorf("changes: %q", got)
+	}
+
+	// A listener below the cutoff stops and a new one starts above it: the
+	// stop is seen, the start is not, and the arithmetic says it is there.
+	hid := append([]string{}, all[:50]...)
+	hid = append(hid, all[51:]...)
+	hid = append(hid, "tcp/198.51.100.1:~new")
+	sort.Strings(hid)
+	rep = Compute(build(all), build(hid))
+	got = nil
+	for _, c := range rep.Changes {
+		got = append(got, show(c))
+	}
+	if len(got) != 2 || got[0] != "subject_gone net.listeners tcp/198.51.100.1:-050" || got[1] != "hidden_new net.listeners 1 ALERT" {
+		t.Errorf("changes: %q", got)
+	}
+	if len(rep.Alerts(result.Info)) != 1 {
+		t.Errorf("alerts = %+v", rep.Alerts(result.Info))
 	}
 
 	// A swap above the cutoff: the listed part is the same.

@@ -107,6 +107,8 @@ type Check struct {
 	// when that last subject is exactly the display subject that is stored
 	// anyway (valid UTF-8, nothing escaped, redacted or cut), so it adds no
 	// text that could hold a secret. A hash would not do: it keeps no order.
+	// A stored cutoff must equal the subject of one exact item of the
+	// check, otherwise the file is invalid.
 	Cutoff *string `json:"cutoff,omitempty"`
 }
 
@@ -365,6 +367,9 @@ func validate(s *State) error {
 		if len(c.Items) > maxItems {
 			return problemf("%s: %d items, at most %d are accepted", where, len(c.Items), maxItems)
 		}
+		if c.Cutoff != nil && !hasExactItem(c.Items, *c.Cutoff) {
+			return problemf("%s: the cutoff is not the subject of an item", where)
+		}
 		keys := map[string]bool{}
 		for j, it := range c.Items {
 			if !keyRe.MatchString(it.Key) || keys[it.Key] {
@@ -377,6 +382,18 @@ func validate(s *State) error {
 		}
 	}
 	return nil
+}
+
+// hasExactItem reports whether one of the items is stored with the given raw
+// subject. A cutoff is the subject of the last listed item, so a stored cutoff
+// that names no item is a corrupted or forged file.
+func hasExactItem(items []Item, subject string) bool {
+	for _, it := range items {
+		if it.Exact && it.Subject == subject {
+			return true
+		}
+	}
+	return false
 }
 
 // Marshal encodes a state the way Save writes it.

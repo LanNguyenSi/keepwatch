@@ -10,7 +10,7 @@
 
 - ``` state file /var/lib/keepwatch/state.json was not used: evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED] ```
 
-## Changes (10)
+## Changes (11)
 
 - **ALERT** ` ssh.password_authentication ` (` high `): ` now failing (was pass) `
 - **ALERT** ` network.listeners ` (` medium `): ` new item `: ``` evil[click](http://evil.example/)![i](http://evil.example/p.png)<script>alert(1)</script> `tick` ``two`` | cell\n# fake heading\n- fake item\x1b[2J\x1b]0;title\x07\u202e reversed \u0085 password=[REDACTED] ```
@@ -19,6 +19,7 @@
 - **ALERT** ` ssh.authorized_keys ` (` high `): ` pass -> warn `
 - ` disk.usage ` (` medium `): ` fixed (was failing) `
 - **ALERT** ` docker.exposure ` (` high `): ` item count 104 -> 108 `
+- **ALERT** ` docker.exposure ` (` high `): ` 2 new items not shown (above the cutoff of a capped list) `
 - **ALERT** ` disk.usage ` (` high `): ` severity medium -> high (status fail) `
 - ` fail2ban.sshd_jail ` (` high `): ` new check, status pass `
 - ` old.check ` (` low `): ` check removed (was fail) `

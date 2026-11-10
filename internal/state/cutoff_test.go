@@ -2,6 +2,8 @@ package state
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -140,7 +142,7 @@ func TestCutoffSurvivesSaveAndLoad(t *testing.T) {
 func TestStateFileOfVersion1IsReadWithoutCutoffs(t *testing.T) {
 	key := SubjectKey("a")
 	v1 := fmt.Sprintf(`{"schema_version": 1, "run_at": "2026-11-10T12:00:00Z", "checks": [
-	  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": 3, "cutoff": "zzz",
+	  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": 3, "cutoff": "a",
 	   "items": [{"key": %q, "subject": "a", "exact": true}]}]}`, key)
 	st, err := parse([]byte(v1))
 	if err != nil {
@@ -156,7 +158,7 @@ func TestStateFileOfVersion1IsReadWithoutCutoffs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the same content as version 2 is rejected: %v", err)
 	}
-	if c := st.Checks[0]; c.Cutoff == nil || *c.Cutoff != "zzz" || !c.Items[0].Exact {
+	if c := st.Checks[0]; c.Cutoff == nil || *c.Cutoff != "a" || !c.Items[0].Exact {
 		t.Errorf("version 2 state lost its cutoff: %v %+v", c.Cutoff, c.Items[0])
 	}
 }
@@ -171,5 +173,62 @@ func TestStateFileOfAnotherVersionIsNotRead(t *testing.T) {
 		if _, err := parse([]byte(b)); err == nil {
 			t.Errorf("schema version %d is accepted", v)
 		}
+	}
+}
+
+// A stored cutoff is the subject of the last listed item, so it must equal the
+// subject of one item of that check, stored exactly. Anything else is a
+// corrupted or forged file: it is rejected, and the run starts a new baseline.
+func TestCutoffMustBeTheSubjectOfAnExactItem(t *testing.T) {
+	item := func(subject string, exact bool) string {
+		return fmt.Sprintf(`{"key": %q, "subject": %q, "exact": %v}`, SubjectKey(subject), subject, exact)
+	}
+	file := func(cutoff string, hidden int, items ...string) string {
+		return fmt.Sprintf(`{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": [
+		  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": %d, "cutoff": %s,
+		   "items": [%s]}]}`, hidden, cutoff, strings.Join(items, ","))
+	}
+	tests := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"cutoff equals an exact item", file(`"b"`, 3, item("a", true), item("b", true)), true},
+		{"cutoff equals the first exact item, not the last", file(`"a"`, 3, item("a", true), item("b", true)), true},
+		{"cutoff names no item", file(`"zzz"`, 3, item("a", true), item("b", true)), false},
+		{"cutoff equals an item that is not stored exactly", file(`"b"`, 3, item("a", true), item("b", false)), false},
+		{"cutoff differs in case", file(`"B"`, 3, item("a", true), item("b", true)), false},
+		{"cutoff of a check without items", file(`"b"`, 3), false},
+		{"empty cutoff, no item with an empty subject", file(`""`, 3, item("a", true)), false},
+		{"no cutoff is fine", file(`null`, 3, item("a", true)), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parse([]byte(tc.body))
+			if (err == nil) != tc.ok {
+				t.Errorf("parse error = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
+// The invalid file leads to a problem and no state through Load (the caller
+// warns and starts a new baseline), never to a diff against a cutoff that
+// points nowhere.
+func TestLoadTurnsABadCutoffIntoAProblem(t *testing.T) {
+	body := fmt.Sprintf(`{"schema_version": 2, "run_at": "2026-11-10T12:00:00Z", "checks": [
+	  {"id": "a.b", "kind": "k", "status": "fail", "severity": "low", "hidden": 3, "cutoff": "zzz",
+	   "items": [{"key": %q, "subject": "a", "exact": true}]}]}`, SubjectKey("a"))
+	s, dir := newStore(t)
+	mustSave(t, s, sample())
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != nil || !strings.Contains(r.Problem, "cutoff") {
+		t.Errorf("Load = %+v, want a problem about the cutoff and no state", r)
 	}
 }

@@ -90,6 +90,16 @@
       "alert": true
     },
     {
+      "kind": "hidden_new",
+      "check_id": "docker.exposure",
+      "check_kind": "docker_exposure",
+      "severity": "high",
+      "from": "fail",
+      "to": "fail",
+      "hidden_new": 2,
+      "alert": true
+    },
+    {
       "kind": "severity_change",
       "check_id": "disk.usage",
       "check_kind": "disk_usage",

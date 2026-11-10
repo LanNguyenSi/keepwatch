@@ -48,6 +48,8 @@ func show(c Change) string {
 	switch c.Kind {
 	case SubjectNew, SubjectGone:
 		s += " " + c.Subject
+	case HiddenNew:
+		s += fmt.Sprintf(" %d", c.HiddenNew)
 	case CountChange:
 		s += fmt.Sprintf(" %d>%d", c.OldTotal, c.NewTotal)
 	case SeverityChange:
