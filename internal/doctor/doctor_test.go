@@ -795,6 +795,15 @@ func TestNotifyFindingPrintsOnlyTheOrigin(t *testing.T) {
 	if !strings.Contains(out, "ntfy is configured (address not shown)") || strings.Contains(out, "kwSECRET") {
 		t.Errorf("an unparsable URL:\n%s", out)
 	}
+	// parseable, but without a scheme or a host
+	for _, raw := range []string{"relative/kwSECRET", "//ntfy.example.org/kwSECRET", "https:///kwSECRET"} {
+		r := newRig(t)
+		r.cfg.Notify.Ntfy = &config.Ntfy{URL: raw, Topic: "t"}
+		out := dump(r.run())
+		if !strings.Contains(out, "ntfy is configured (address not shown)") || strings.Contains(out, "kwSECRET") {
+			t.Errorf("%s:\n%s", raw, out)
+		}
+	}
 }
 
 // A service whose last run ended with a failure result is a problem even when

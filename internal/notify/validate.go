@@ -30,7 +30,8 @@ func ValidateURL(raw string) error {
 		return errors.New("notify.ntfy.url must not hold a query or a fragment")
 	}
 	if p := u.Port(); p != "" {
-		// url.Parse accepts digits only, so a failed Atoi (too large) leaves 0.
+		// url.Parse accepts digits only; on overflow Atoi returns the largest int,
+		// which is outside the range as well.
 		if port, _ := strconv.Atoi(p); port < 1 || port > 65535 {
 			return errors.New("notify.ntfy.url: the port must be between 1 and 65535")
 		}

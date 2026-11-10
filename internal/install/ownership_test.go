@@ -78,8 +78,10 @@ func TestOwnedSetCoversTheFilesTheWritersProduce(t *testing.T) {
 
 var fileNameLiteral = regexp.MustCompile(`^\.?[A-Za-z0-9_-][A-Za-z0-9._-]*\.json$|^\.[A-Za-z0-9._-]*\.tmp-$`)
 
-// Any file name literal in the packages that write state_dir is owned: a new
-// writer cannot add a file without this test noticing.
+// Any *.json or .*.tmp- name literal in the packages state and history (the
+// writers of state_dir) is owned. Names of another shape and writers in other
+// packages are not scanned; the test above catches files that a run really
+// writes.
 func TestEveryFileNameTheStateWritersMentionIsOwned(t *testing.T) {
 	fset := token.NewFileSet()
 	found := 0
