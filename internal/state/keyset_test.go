@@ -43,6 +43,10 @@ func TestACappedCheckSurvivesSaveAndLoad(t *testing.T) {
 			t.Fatalf("total %d: %v", total, err)
 		}
 		a, b := st.Checks[0], got.Checks[0]
+		// The state keeps exactly the set the probe built, whatever its size.
+		if probeSet := capped(total)[99].Set; a.Total != probeSet.Total || a.Digest != probeSet.Digest || !slices.Equal(a.Keys, probeSet.Keys) {
+			t.Errorf("total %d: the state's set differs from the probe's", total)
+		}
 		if a.Total != b.Total || a.Digest != b.Digest || !slices.Equal(a.Keys, b.Keys) || len(a.Items) != len(b.Items) {
 			t.Errorf("total %d: the check changed in the round trip", total)
 		}
