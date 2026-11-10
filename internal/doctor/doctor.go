@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -359,7 +360,7 @@ func (d Deps) notify(out reporter, cfg *config.Config) {
 		out.add(Warn, "notify", "no notification channel is configured (notify.ntfy), results are only shown, nobody is told of changes")
 		return
 	}
-	out.add(OK, "notify", "ntfy is configured (%s); \"keepwatch doctor --send-test\" delivers a test message", cfg.Notify.Ntfy.URL)
+	out.add(OK, "notify", "ntfy is configured (%s); \"keepwatch doctor --send-test\" delivers a test message", origin(cfg.Notify.Ntfy.URL))
 }
 
 func (d Deps) state(out reporter, cfg *config.Config, unitsInstalled bool) {
@@ -571,4 +572,15 @@ func exitMeaning(status string) string {
 		return ": the sandbox could not be set up, for example ReadWritePaths names a missing directory"
 	}
 	return ""
+}
+
+// origin returns scheme://host[:port] of a URL and nothing else: the user
+// info, the path and the query may hold credentials or the topic, and doctor's
+// output does not go through the redactor.
+func origin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "address not shown"
+	}
+	return u.Scheme + "://" + u.Host
 }

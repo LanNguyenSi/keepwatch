@@ -332,6 +332,10 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 // crash) is harmless and never read.
 const tempPrefix = ".state.json.tmp-"
 
+// TempPrefix is tempPrefix for the code that removes what a crash left behind
+// (uninstall --purge), so that the name is written in one place.
+const TempPrefix = tempPrefix
+
 func tempName() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

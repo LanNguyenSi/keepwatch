@@ -79,7 +79,7 @@ type InstallOptions struct {
 	Spec   Spec
 	DryRun bool
 	// ConfigFound is false when the configuration file does not exist; install
-	// then warns that the service has nothing to read yet.
+	// then refuses, because the services have nothing to read.
 	ConfigFound bool
 }
 
@@ -110,6 +110,10 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	// The service runs this file as root: nobody else may be able to change it.
 	if err := TrustedPath(d.FS, o.Spec.Binary, KindFile); err != nil {
 		return refuse("the keepwatch binary %s cannot be trusted to run as root: %v\nput it where only root can change it and run install from there, for example: install -o root -g root -m 0755 keepwatch /usr/local/bin/ && /usr/local/bin/keepwatch install", o.Spec.Binary, err)
+	}
+	// The services read this file on every run: without it each run exits 3.
+	if !o.ConfigFound {
+		return refuse("the configuration file %s does not exist, so every scheduled run would exit 3: create it first with \"keepwatch init\" (add --config %s if it is not the default path), edit it, and run install again", o.Spec.ConfigPath, o.Spec.ConfigPath)
 	}
 	if !o.DryRun && d.Geteuid() != 0 {
 		return refuse("install writes below /etc and runs systemctl, run it as root (or use --dry-run or --print)")
@@ -174,9 +178,6 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	}
 
 	changed := false
-	if !o.ConfigFound {
-		say("warning: %s does not exist; create it with \"keepwatch init\" before the first run", o.Spec.ConfigPath)
-	}
 	for _, da := range dirs {
 		if !da.make {
 			continue

@@ -146,8 +146,12 @@ More rules, all reported with `file:line`:
   owned by root or the running user and not writable by group or
   other; deeper ancestor directories are not checked (known limit).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
-  http only for loopback; a URL port must be 1-65535). It is the address of
-  the server, not of the topic: see [Notifications](#notifications).
+  http only for loopback; no credentials, query or fragment; a URL port must
+  be 1-65535). It is the address of the server, not of the topic: see
+  [Notifications](#notifications). `notify.ntfy.topic` is required too, 1 to 64
+  characters of `A-Z a-z 0-9 _ -`. Both are checked by the same rule that the
+  notifier applies, so a configuration that loads always builds a notifier; the
+  error names the file and line and never repeats the URL, which may hold credentials.
 - `notify.ntfy.token_file` must be a regular file, at most 4096 bytes,
   with exactly one hard link, mode 0600 or stricter, owned by the
   running user and not empty; it is validated without reading and
@@ -596,8 +600,8 @@ notify:
 
 The message is posted to `<url>/<topic>` (a path prefix in `url`, for a server behind a
 reverse proxy at `/ntfy`, is kept). `url` must be https, or http for a loopback host,
-and holds no credentials, query or fragment; a bad `url` or `topic`, or `--notify`
-without `notify.ntfy`, is exit code 3 before any check runs. The token is read from
+and holds no credentials, query or fragment; a bad `url` or `topic` is a configuration error
+(`config check` finds it), and `--notify` without `notify.ntfy` is exit code 3 before any check runs. The token is read from
 `token_file` every time a message is sent (through the same checks as at load time:
 regular file, mode 0600, owned by the running user, no symlink) and goes only into the
 `Authorization: Bearer` header; a token with a space, a control or a non-ASCII
@@ -851,9 +855,10 @@ says which component failed and how to fix it, for example `install -o root -g r
 Limits: POSIX ACLs, file capabilities and bind mounts over a checked directory are
 not examined.
 
-It reads `state_dir` from the configuration file if there is one (an invalid
-configuration is refused, because the service would fail with it); without a
-file it uses `/var/lib/keepwatch` and says that `keepwatch init` is still to do.
+It reads `state_dir` and whether `notify.ntfy` is set from the configuration file. A
+missing file is refused (exit 2, also with `--dry-run`, nothing written) with the hint to
+create it with `keepwatch init` first, because every scheduled run would exit 3; so is an
+invalid one, for the same reason.
 `ReadWritePaths` in the units is that directory, so after changing `state_dir`
 run `install` again (`doctor` tells when the two differ).
 
@@ -903,7 +908,7 @@ What `install` does to the files it writes:
 Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
 failed after work had started (a `systemctl` command, a write; what was done is
 printed and a second run continues), 2 refused or usage error (not root, systemd
-not running, bad flag, a file that is not keepwatch's, an invalid configuration;
+not running, bad flag, a file that is not keepwatch's, a missing or invalid configuration;
 nothing was changed, except that `uninstall --purge` exits 2 after doing what it
 could when it refuses a configuration it cannot prove is keepwatch's), 3 internal error.
 
@@ -959,9 +964,10 @@ configuration and state stay. `--dry-run` lists what would be done.
 
 `--purge` additionally removes keepwatch's own files and nothing else:
 
-- in the state directory: `state.json`, leftover `.state.json.tmp-*` files and the
-  probe and temporary files that `doctor` and the atomic writer leave after a crash,
-  then the directory if it is empty;
+- in the state directory: `state.json` and `history.json`, leftover
+  `.state.json.tmp-*` and `.history.json.tmp-*` files and the probe and temporary files
+  that `doctor` and the atomic writer leave after a crash, then the directory if it is
+  empty (a test ties this list to the file names the writers use);
 - the main configuration file, the `*.yaml` files in the `conf.d` directory next to
   it, then `conf.d` and the configuration directory if each is empty.
 
@@ -1008,8 +1014,9 @@ probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
 through `notify.ntfy` (the same notifier `check --notify` uses, with its timeout and
 one retry). The finding `send-test` is `ok` when the message was delivered, and a
 problem (exit 1) with the delivery error when it was not, when `notify.ntfy` is not
-configured or when the configuration is not valid. The error never holds the server
-address, the topic or the token. The message passes the redactor. Nothing is written to
+configured or when the configuration is not valid. The error never holds the topic or the
+token; it may hold the address of the server ("no answer: dial tcp 127.0.0.1:80: connection
+refused"). The `notify` line of the report shows only `scheme://host[:port]` of the URL. The message passes the redactor. Nothing is written to
 `state_dir`: a test message touches neither the state nor the history.
 
 ## Status

@@ -25,6 +25,8 @@ type rig struct {
 	out  *bytes.Buffer
 	deps install.Deps
 	uid  int
+	// noConfig: the configuration file does not exist.
+	noConfig bool
 }
 
 func newRig() *rig {
@@ -52,6 +54,7 @@ func (r *rig) install(t testing.TB, o install.InstallOptions) error {
 		o.Spec = spec(t)
 	}
 	r.out.Reset()
+	o.ConfigFound = !r.noConfig
 	return install.Install(context.Background(), r.deps, o)
 }
 
@@ -239,13 +242,24 @@ func TestInstallDryRunNeedsNoRoot(t *testing.T) {
 	}
 }
 
-func TestInstallWarnsWhenTheConfigurationIsMissing(t *testing.T) {
-	r := newRig()
-	if err := r.install(t, install.InstallOptions{ConfigFound: false}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(r.out.String(), "keepwatch init") {
-		t.Errorf("no hint to run init:\n%s", r.out)
+// Without the configuration file every scheduled run would exit 3: install
+// refuses, also as a dry run, and writes nothing.
+func TestInstallRefusesWhenTheConfigurationIsMissing(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		r := newRig()
+		r.noConfig = true
+		err := r.install(t, install.InstallOptions{DryRun: dry})
+		if !errors.Is(err, install.ErrRefused) {
+			t.Fatalf("dry=%v: err = %v, want ErrRefused", dry, err)
+		}
+		for _, want := range []string{cfgPath, "does not exist", "keepwatch init", "install again"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("dry=%v: the message lacks %q: %v", dry, want, err)
+			}
+		}
+		if len(r.fs.Log) != 0 || len(r.sd.Runner.Calls) != 0 {
+			t.Errorf("dry=%v: a refused install did something: %v %v", dry, r.fs.Log, r.sd.Runner.Calls)
+		}
 	}
 }
 
@@ -690,6 +704,17 @@ func TestPurge(t *testing.T) {
 			if !r.fs.Exists(p) {
 				t.Errorf("%s was removed without --purge", p)
 			}
+		}
+	})
+	t.Run("history.json and its temporary files are keepwatch's own", func(t *testing.T) {
+		r := setup()
+		r.fs.AddFile(stateDir+"/history.json", 0o600, 0, "{}")
+		r.fs.AddFile(stateDir+"/.history.json.tmp-0123456789abcdef", 0o600, 0, "x")
+		if err := r.uninstall(install.UninstallOptions{Purge: true}); err != nil {
+			t.Fatalf("%v\n%s", err, r.out)
+		}
+		if r.fs.Exists(stateDir) {
+			t.Errorf("the state directory stays because of the history:\n%s", r.out)
 		}
 	})
 	t.Run("a probe file or temporary file left by a crash is keepwatch's own", func(t *testing.T) {

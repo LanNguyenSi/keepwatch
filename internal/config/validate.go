@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/LanNguyenSi/keepwatch/internal/notify"
 	"github.com/LanNguyenSi/keepwatch/internal/redact"
 )
 
@@ -540,8 +540,8 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 		case "topic":
 			if s, present, ok := v.str(val, "notify.ntfy.topic"); ok && present {
 				sawTopic = true
-				if s == "" {
-					v.fail(val, "notify.ntfy.topic: must not be empty")
+				if err := notify.ValidateTopic(s); err != nil {
+					v.fail(val, err.Error())
 				} else {
 					nf.Topic = s
 				}
@@ -575,39 +575,12 @@ func (v *validator) ntfy(n *yaml.Node) (*Ntfy, bool) {
 	return nf, true
 }
 
+// ntfyURL applies notify.ValidateURL, the rule NewNtfy applies too. Its
+// message does not hold the URL, which may carry credentials.
 func (v *validator) ntfyURL(n *yaml.Node, raw string) {
-	u, err := url.Parse(raw)
-	// u.Hostname is the host without its port: an authority like ":443"
-	// has a Host but no host. A Host ending in ':' carries an empty
-	// port ("https://host:/x"), which is not a valid URL either.
-	if err != nil || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
-		v.fail(n, "notify.ntfy.url: "+strconv.Quote(raw)+" is not a valid absolute URL")
-		return
+	if err := notify.ValidateURL(raw); err != nil {
+		v.fail(n, err.Error())
 	}
-	if p := u.Port(); p != "" {
-		port, err := strconv.Atoi(p)
-		if err != nil || port < 1 || port > 65535 {
-			v.fail(n, "notify.ntfy.url: port must be between 1 and 65535, got "+p)
-			return
-		}
-	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !isLoopback(u.Hostname()) {
-			v.fail(n, "notify.ntfy.url: http is only allowed for loopback hosts, got "+strconv.Quote(u.Hostname()))
-		}
-	default:
-		v.fail(n, "notify.ntfy.url: scheme "+strconv.Quote(u.Scheme)+" is not http or https")
-	}
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // checkTokenFile validates the token file's existence, type, size,

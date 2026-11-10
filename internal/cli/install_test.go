@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,7 @@ func TestInstallEndToEndOnTheFakeHost(t *testing.T) {
 func TestInstallExitCodes(t *testing.T) {
 	t.Run("not root is 2", func(t *testing.T) {
 		h := newHost(t)
+		h.withConfigFile()
 		h.uid = 1000
 		if code, _, stderr := runCmd("install"); code != ExitUsage || !strings.Contains(stderr, "root") {
 			t.Errorf("exit = %d stderr = %q", code, stderr)
@@ -173,6 +175,7 @@ func TestInstallExitCodes(t *testing.T) {
 	})
 	t.Run("a file without the marker is 2 and nothing is written", func(t *testing.T) {
 		h := newHost(t)
+		h.withConfigFile()
 		h.fs.AddFile("/etc/systemd/system/"+install.CheckService, 0o644, 0, "[Unit]\n")
 		code, _, stderr := runCmd("install")
 		if code != ExitUsage || !strings.Contains(stderr, install.CheckService) || !strings.Contains(stderr, "not written by keepwatch") {
@@ -214,6 +217,7 @@ func TestInstallExitCodes(t *testing.T) {
 	})
 	t.Run("a failing systemctl is 1", func(t *testing.T) {
 		h := newHost(t)
+		h.withConfigFile()
 		h.sd.Fail["enable"] = execx.Result{ExitCode: 1, Stderr: []byte("denied")}
 		if code, _, stderr := runCmd("install"); code != ExitError || !strings.Contains(stderr, "denied") {
 			t.Errorf("exit = %d stderr = %q", code, stderr)
@@ -231,16 +235,21 @@ func TestInstallExitCodes(t *testing.T) {
 			t.Errorf("wrote %v", h.fs.Log)
 		}
 	})
-	t.Run("a missing configuration is a warning, not an error", func(t *testing.T) {
+	t.Run("a missing configuration is refused with exit 2 and the hint, also as a dry run", func(t *testing.T) {
 		h := newHost(t)
-		code, stdout, _ := runCmd("install")
-		if code != ExitOK || !strings.Contains(stdout, "keepwatch init") {
-			t.Errorf("exit = %d\n%s", code, stdout)
+		for _, args := range [][]string{{"install"}, {"install", "--dry-run"}} {
+			code, stdout, stderr := runCmd(args...)
+			if code != ExitUsage || !strings.Contains(stderr, "keepwatch init") || !strings.Contains(stderr, "does not exist") || stdout != "" {
+				t.Errorf("%v: exit = %d stderr = %q stdout = %q", args, code, stderr, stdout)
+			}
 		}
-		_ = h
+		if len(h.fs.Log) != 0 || len(h.sd.Runner.Calls) != 0 {
+			t.Errorf("a refused install did something: %v %v", h.fs.Log, h.sd.Runner.Calls)
+		}
 	})
 	t.Run("dry run lists and changes nothing", func(t *testing.T) {
 		h := newHost(t)
+		h.withConfigFile()
 		h.uid = 1000
 		code, stdout, _ := runCmd("install", "--dry-run")
 		if code != ExitOK || !strings.Contains(stdout, "would create") || len(h.fs.Log) != 0 {
@@ -556,16 +565,6 @@ func TestInstallAddsNotifyOnlyWhenConfigured(t *testing.T) {
 			t.Errorf("no word about not notifying:\n%s", stdout)
 		}
 	})
-	t.Run("no configuration file: no --notify", func(t *testing.T) {
-		h := newHost(t)
-		withNtfy(t, h) // not read: there is no file
-		if code, _, _ := runCmd("install"); code != ExitOK {
-			t.Fatal("install failed")
-		}
-		if strings.Contains(unitText(h, install.CheckService), "--notify") {
-			t.Error("--notify without a configuration file")
-		}
-	})
 	t.Run("ntfy added later: install again updates the services, and doctor warned before", func(t *testing.T) {
 		h := newHost(t)
 		h.withConfigFile()
@@ -622,5 +621,75 @@ func TestDefaultHostAccessIsTheRealOne(t *testing.T) {
 	}
 	if h.geteuid() != os.Geteuid() {
 		t.Errorf("geteuid = %d", h.geteuid())
+	}
+}
+
+// A configuration whose notify.ntfy cannot be turned into a notifier is refused
+// where it is written down: config check, install and doctor all go through the
+// real loader, which applies the rule of notify.NewNtfy. Before, such a
+// configuration passed all three and then every scheduled run exited 3.
+func TestABadNtfyConfigurationIsRefusedEverywhere(t *testing.T) {
+	cases := []struct {
+		name, url, topic, want string
+	}{
+		{"topic with a dot", "https://ntfy.example.org", "kw.alerts", "notify.ntfy.topic must be 1 to 64 characters"},
+		{"topic too long", "https://ntfy.example.org", strings.Repeat("a", 65), "notify.ntfy.topic must be 1 to 64 characters"},
+		{"credentials and a query", "http://kwuser:kwSECRETpass@127.0.0.1:80/?auth=QXV0aFNlY3JldA", "alerts", "must not hold credentials"},
+		{"query only", "https://ntfy.example.org/?auth=kwSECRETq", "alerts", "query or a fragment"},
+		{"fragment", "https://ntfy.example.org/#kwSECRETf", "alerts", "query or a fragment"},
+		{"http to a remote host", "http://ntfy.example.org", "alerts", "http is only allowed for loopback hosts"},
+		{"port out of range", "https://ntfy.example.org:99999", "alerts", "port must be between 1 and 65535"},
+		{"not https", "ftp://ntfy.example.org", "alerts", "the scheme must be https"},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		real := dir + "/keepwatch.yaml"
+		doc := "notify:\n  ntfy:\n    url: " + strconv.Quote(c.url) + "\n    topic: " + strconv.Quote(c.topic) + "\n"
+		if err := os.WriteFile(real, []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := newHost(t)
+		h.withConfigFile()
+		old := opsFor
+		opsFor = func(e env) hostOps {
+			o := old(e)
+			o.loadConfig = func(string) (*config.Config, error) { return config.Load(real) }
+			return o
+		}
+		t.Cleanup(func() { opsFor = old })
+		noSecret := func(what, text string) {
+			t.Helper()
+			for _, secret := range []string{"kwSECRET", "kwuser", "QXV0aFNlY3JldA"} {
+				if strings.Contains(text, secret) {
+					t.Errorf("%s %s: the output holds %q:\n%s", c.name, what, secret, text)
+				}
+			}
+		}
+
+		code, stdout, stderr := runCmd("config", "check", "--config", real)
+		if code != ExitError || !strings.Contains(stderr, "keepwatch.yaml:") || !strings.Contains(stderr, c.want) || stdout != "" {
+			t.Errorf("%s: config check: exit = %d stderr = %q", c.name, code, stderr)
+		}
+		noSecret("config check", stderr)
+
+		code, stdout, stderr = runCmd("install")
+		if code != ExitUsage || !strings.Contains(stderr, c.want) || stdout != "" {
+			t.Errorf("%s: install: exit = %d stderr = %q", c.name, code, stderr)
+		}
+		noSecret("install", stderr)
+		if len(h.fs.Log) != 0 || len(h.sd.Runner.Calls) != 0 {
+			t.Errorf("%s: a refused install did something: %v %v", c.name, h.fs.Log, h.sd.Runner.Calls)
+		}
+
+		for _, args := range [][]string{{"doctor"}, {"doctor", "--send-test"}} {
+			code, stdout, _ = runCmd(args...)
+			if code != ExitError || !strings.Contains(stdout, "PROBLEM config:") || !strings.Contains(stdout, c.want) {
+				t.Errorf("%s: %v: exit = %d\n%s", c.name, args, code, stdout)
+			}
+			noSecret(strings.Join(args, " "), stdout)
+		}
 	}
 }

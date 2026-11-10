@@ -7,15 +7,33 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	"github.com/LanNguyenSi/keepwatch/internal/history"
+	"github.com/LanNguyenSi/keepwatch/internal/state"
 )
 
-// File names keepwatch owns inside the state directory. stateFile is
-// state.FileName; tempPrefix starts the name of the temporary file the state
-// writer leaves behind after a crash (kept in step with package state).
-const (
-	stateFile  = "state.json"
-	tempPrefix = ".state.json.tmp-"
+// The names keepwatch owns inside the state directory come from the packages
+// that write them (state, history), so a name is written in one place. A test
+// scans those packages for any other file name literal.
+var (
+	ownedStateNames    = []string{state.FileName, history.FileName}
+	ownedStatePrefixes = []string{state.TempPrefix, history.TempPrefix, ProbePrefix, tmpWritePrefix}
 )
+
+// ownedInStateDir reports whether name is a file keepwatch writes in state_dir.
+func ownedInStateDir(name string) bool {
+	for _, n := range ownedStateNames {
+		if name == n {
+			return true
+		}
+	}
+	for _, p := range ownedStatePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // ProbePrefix starts the name of the file `keepwatch doctor` creates inside
 // state_dir to prove it is writable; one left behind by a crash is keepwatch's
@@ -251,9 +269,7 @@ func (d Deps) purge(o UninstallOptions, rec Installed, say func(string, ...any),
 		}
 	}
 	if stateDir != "" {
-		do(stateDir, "state", func(n string) bool {
-			return n == stateFile || strings.HasPrefix(n, tempPrefix) || strings.HasPrefix(n, ProbePrefix) || strings.HasPrefix(n, tmpWritePrefix)
-		})
+		do(stateDir, "state", ownedInStateDir)
 	}
 
 	if trusted {

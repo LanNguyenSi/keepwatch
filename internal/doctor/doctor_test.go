@@ -766,3 +766,50 @@ func TestLastRunFailureNamesTheExitStatus(t *testing.T) {
 		t.Errorf("an unknown status:\n%s", dump(rep))
 	}
 }
+
+// doctor's output does not go through the redactor: of the ntfy URL it prints
+// scheme://host[:port] and nothing else.
+func TestNotifyFindingPrintsOnlyTheOrigin(t *testing.T) {
+	cases := map[string]string{
+		"http://kwuser:kwSECRETpass@127.0.0.1:80/kw-topic?auth=QXV0aFNlY3JldA#frag": "http://127.0.0.1:80",
+		"https://ntfy.example.org/ntfy/kw-topic":                                    "https://ntfy.example.org",
+		"https://[2001:db8::1]:8443/x":                                              "https://[2001:db8::1]:8443",
+		"https://kwuser:kwSECRETpass@ntfy.example.org":                              "https://ntfy.example.org",
+	}
+	for raw, want := range cases {
+		r := newRig(t)
+		r.cfg.Notify.Ntfy = &config.Ntfy{URL: raw, Topic: "kw-topic"}
+		out := dump(r.run())
+		if !has(r.run(), doctor.OK, "notify", "ntfy is configured ("+want+")") {
+			t.Errorf("%s:\n%s", raw, out)
+		}
+		for _, secret := range []string{"kwSECRET", "kwuser", "QXV0aFNlY3JldA", "kw-topic", "frag"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s: the output holds %q:\n%s", raw, secret, out)
+			}
+		}
+	}
+	r := newRig(t)
+	r.cfg.Notify.Ntfy = &config.Ntfy{URL: "::not a url::kwSECRET", Topic: "t"}
+	out := dump(r.run())
+	if !strings.Contains(out, "ntfy is configured (address not shown)") || strings.Contains(out, "kwSECRET") {
+		t.Errorf("an unparsable URL:\n%s", out)
+	}
+}
+
+// A service whose last run ended with a failure result is a problem even when
+// systemd no longer calls it failed (a later stop leaves it inactive).
+func TestLastRunResultWithoutAFailedActiveState(t *testing.T) {
+	for _, svc := range []string{install.CheckService, install.ReportService} {
+		r := newRig(t)
+		r.sd.Props[svc] = map[string]string{"Result": "exit-code", "ExecMainStatus": "3", "ActiveState": "inactive"}
+		if rep := r.run(); !has(rep, doctor.Problem, "last run", svc, "result exit-code") {
+			t.Errorf("%s:\n%s", svc, dump(rep))
+		}
+	}
+	r := newRig(t)
+	r.sd.Props[install.CheckService] = map[string]string{"Result": "success", "ExecMainStatus": "1", "ActiveState": "inactive"}
+	if rep := r.run(); rep.Problems() != 0 {
+		t.Errorf("a successful run with findings is not a problem:\n%s", dump(rep))
+	}
+}
