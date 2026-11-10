@@ -408,6 +408,38 @@ func TestUnits(t *testing.T) {
 			t.Errorf("doctor wrote: %v", r.fs.Log[logs:])
 		}
 	})
+	t.Run("the binary of the unit", func(t *testing.T) {
+		cases := map[string]struct {
+			set   func(r *rig)
+			level doctor.Level
+			parts []string
+		}{
+			"missing": {func(r *rig) { r.fs.Remove("/usr/local/bin/keepwatch") }, doctor.Problem, []string{"/usr/local/bin/keepwatch", "does not exist"}},
+			"owned by a user": {func(r *rig) { r.fs.AddFile("/usr/local/bin/keepwatch", 0o755, 1000, "") }, doctor.Problem,
+				[]string{"cannot be trusted", "uid 1000", "install -o root -g root -m 0755"}},
+			"group writable":     {func(r *rig) { r.fs.AddFile("/usr/local/bin/keepwatch", 0o775, 0, "") }, doctor.Problem, []string{"writable by group or other"}},
+			"directory writable": {func(r *rig) { r.fs.AddDir("/usr/local/bin", 0o777, 0) }, doctor.Problem, []string{"/usr/local/bin has permissions 0777"}},
+			"ancestor is a link": {func(r *rig) { r.fs.Remove("/usr/local"); r.fs.AddSymlink("/usr/local", "/srv") }, doctor.Problem, []string{"symbolic link"}},
+		}
+		for name, c := range cases {
+			r := newRig(t)
+			c.set(r)
+			rep := r.run()
+			for _, svc := range []string{install.CheckService, install.ReportService} {
+				if !has(rep, c.level, "units", append([]string{svc}, c.parts...)...) {
+					t.Errorf("%s: %s not reported:\n%s", name, svc, dump(rep))
+				}
+			}
+			if name == "missing" && strings.Contains(dump(rep), "cannot be trusted") {
+				t.Errorf("a missing binary is reported as untrusted:\n%s", dump(rep))
+			}
+		}
+		r := newRig(t)
+		r.fs.AddFile(unit(install.CheckService), 0o644, 0, "# keepwatch-managed-unit: x\n[Service]\nType=oneshot\n")
+		if rep := r.run(); !has(rep, doctor.Problem, "units", install.CheckService, "no ExecStart program") {
+			t.Errorf("a unit without ExecStart:\n%s", dump(rep))
+		}
+	})
 	t.Run("unit directory is a symlink", func(t *testing.T) {
 		r := newRig(t)
 		r.fs.Remove(install.DefaultUnitDir)
@@ -441,7 +473,7 @@ func TestOSStateProber(t *testing.T) {
 		t.Helper()
 		ents, _ := os.ReadDir(d)
 		for _, e := range ents {
-			if strings.HasPrefix(e.Name(), ".keepwatch-doctor-probe") {
+			if strings.HasPrefix(e.Name(), ".keepwatch-") {
 				t.Errorf("probe file %s left behind", e.Name())
 			}
 		}

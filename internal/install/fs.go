@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"syscall"
 )
@@ -74,6 +75,9 @@ type OSFS struct {
 	// OwnerOK reports whether uid may own a directory install works in. Nil
 	// means root or the running user.
 	OwnerOK func(uid int) bool
+
+	afterMkdir  func(path string) // tests swap the new directory here
+	beforeChmod func(path string) // tests swap it between the look and the open
 }
 
 func infoOf(fi fs.FileInfo) Info {
@@ -93,23 +97,48 @@ func (OSFS) Lstat(path string) (Info, error) {
 	return infoOf(fi), nil
 }
 
-// Mkdir implements FS.
-func (OSFS) Mkdir(path string, perm fs.FileMode) error {
-	if err := os.Mkdir(path, perm); err != nil {
-		return err
-	}
-	// Defeat the umask on the directory just created.
-	fi, err := os.Lstat(path)
+// Mkdir implements FS. The directory is created through an os.Root of its
+// parent and its mode is set with fchmod on a descriptor, not with a path-based
+// chmod that would follow a link. os.Root follows a link whose target stays
+// inside the parent even with O_NOFOLLOW, so the descriptor must be the very
+// directory that was looked at: a name swapped for a link or another directory
+// between the look and the open is refused.
+func (o OSFS) Mkdir(path string, perm fs.FileMode) error {
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%s: not a directory after it was created", path)
+	defer root.Close()
+	name := filepath.Base(path)
+	if err := root.Mkdir(name, perm); err != nil {
+		return err
 	}
-	if fi.Mode().Perm() != perm {
-		return os.Chmod(path, perm)
+	if o.afterMkdir != nil {
+		o.afterMkdir(path)
 	}
-	return nil
+	li, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if infoOf(li).UID != os.Geteuid() {
+		return fmt.Errorf("%s: is not the directory that was just created", path)
+	}
+	if o.beforeChmod != nil {
+		o.beforeChmod(path)
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("%s: cannot be opened after it was created: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(li, fi) {
+		return fmt.Errorf("%s: changed while it was being opened", path)
+	}
+	return f.Chmod(perm) // defeats the umask
 }
 
 // Rmdir implements FS.
@@ -243,7 +272,7 @@ func (d *osDir) WriteFile(name string, data []byte, perm fs.FileMode) (err error
 	if _, err = rand.Read(rnd[:]); err != nil {
 		return err
 	}
-	tmp := ".keepwatch-tmp-" + hex.EncodeToString(rnd[:])
+	tmp := tmpWritePrefix + hex.EncodeToString(rnd[:])
 	f, err := d.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err

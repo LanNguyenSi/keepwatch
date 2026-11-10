@@ -665,6 +665,17 @@ func TestPurge(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a probe file or temporary file left by a crash is keepwatch's own", func(t *testing.T) {
+		r := setup()
+		r.fs.AddFile(stateDir+"/"+install.ProbePrefix+"0123456789abcdef", 0o600, 0, "x")
+		r.fs.AddFile(stateDir+"/.keepwatch-tmp-0123456789abcdef", 0o600, 0, "x")
+		if err := r.uninstall(install.UninstallOptions{Purge: true}); err != nil {
+			t.Fatalf("%v\n%s", err, r.out)
+		}
+		if r.fs.Exists(stateDir) {
+			t.Errorf("the state directory stays because of its own leftovers:\n%s", r.out)
+		}
+	})
 	t.Run("a custom configuration path purges its own directory only", func(t *testing.T) {
 		r := newRig()
 		r.fs.AddDir("/srv", 0o755, 0)

@@ -37,13 +37,15 @@ type MemFS struct {
 	FailOpenDir map[string]error
 }
 
-// NewMemFS returns a file system with a root-owned "/" and /etc, /run, /var
-// and /var/lib directories.
+// NewMemFS returns a file system with a root-owned "/", the directories /etc,
+// /run, /var, /var/lib and /usr/local/bin, and a root-owned keepwatch binary in
+// the last.
 func NewMemFS() *MemFS {
 	m := &MemFS{nodes: map[string]*node{}, FailWrite: map[string]error{}, FailOpenDir: map[string]error{}}
-	for _, d := range []string{"/", "/etc", "/etc/systemd", "/etc/systemd/system", "/run", "/run/systemd", "/run/systemd/system", "/var", "/var/lib"} {
+	for _, d := range []string{"/", "/etc", "/etc/systemd", "/etc/systemd/system", "/run", "/run/systemd", "/run/systemd/system", "/var", "/var/lib", "/usr", "/usr/local", "/usr/local/bin"} {
 		m.nodes[d] = &node{mode: fs.ModeDir | 0o755}
 	}
+	m.nodes["/usr/local/bin/keepwatch"] = &node{mode: 0o755}
 	return m
 }
 

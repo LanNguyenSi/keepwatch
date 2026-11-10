@@ -180,6 +180,17 @@ func TestInstallExitCodes(t *testing.T) {
 			t.Errorf("wrote %v", h.fs.Log)
 		}
 	})
+	t.Run("a binary a user can change is 2 and nothing is written", func(t *testing.T) {
+		h := newHost(t)
+		h.fs.AddFile("/usr/local/bin/keepwatch", 0o755, 1000, "")
+		code, _, stderr := runCmd("install")
+		if code != ExitUsage || !strings.Contains(stderr, "cannot be trusted to run as root") || !strings.Contains(stderr, "install -o root -g root") {
+			t.Errorf("exit = %d stderr = %q", code, stderr)
+		}
+		if len(h.fs.Log) != 0 {
+			t.Errorf("wrote %v", h.fs.Log)
+		}
+	})
 	t.Run("a failing systemctl is 1", func(t *testing.T) {
 		h := newHost(t)
 		h.sd.Fail["enable"] = execx.Result{ExitCode: 1, Stderr: []byte("denied")}

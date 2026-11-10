@@ -107,6 +107,10 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	if o.DryRun {
 		would = "would "
 	}
+	// The service runs this file as root: nobody else may be able to change it.
+	if err := TrustedPath(d.FS, o.Spec.Binary, KindFile); err != nil {
+		return refuse("the keepwatch binary %s cannot be trusted to run as root: %v\nput it where only root can change it and run install from there, for example: install -o root -g root -m 0755 keepwatch /usr/local/bin/ && /usr/local/bin/keepwatch install", o.Spec.Binary, err)
+	}
 	if !o.DryRun && d.Geteuid() != 0 {
 		return refuse("install writes below /etc and runs systemctl, run it as root (or use --dry-run or --print)")
 	}

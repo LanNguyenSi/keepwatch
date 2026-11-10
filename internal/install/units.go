@@ -341,6 +341,7 @@ WantedBy=timers.target
 // Installed describes what an installed service file says; doctor compares it
 // with the configuration.
 type Installed struct {
+	Binary         string
 	ReadWritePaths string
 	ConfigPath     string
 }
@@ -354,7 +355,10 @@ func Inspect(content []byte) Installed {
 		case strings.HasPrefix(line, "ReadWritePaths="):
 			in.ReadWritePaths = strings.TrimPrefix(line, "ReadWritePaths=")
 		case strings.HasPrefix(line, "ExecStart="):
-			f := strings.Fields(line)
+			f := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
+			if len(f) > 0 {
+				in.Binary = f[0]
+			}
 			for i := 0; i+1 < len(f); i++ {
 				if f[i] == "--config" {
 					in.ConfigPath = f[i+1]

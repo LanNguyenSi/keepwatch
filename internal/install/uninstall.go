@@ -17,6 +17,14 @@ const (
 	tempPrefix = ".state.json.tmp-"
 )
 
+// ProbePrefix starts the name of the file `keepwatch doctor` creates inside
+// state_dir to prove it is writable; one left behind by a crash is keepwatch's
+// own. tmpWritePrefix starts the temporary names of Dir.WriteFile.
+const (
+	ProbePrefix    = ".keepwatch-doctor-probe-"
+	tmpWritePrefix = ".keepwatch-tmp-"
+)
+
 // UninstallOptions are the inputs of Uninstall.
 type UninstallOptions struct {
 	DryRun bool
@@ -178,7 +186,9 @@ func (d Deps) purge(o UninstallOptions, say func(string, ...any), would string) 
 			}
 		}
 	}
-	do(o.StateDir, "state", func(n string) bool { return n == stateFile || strings.HasPrefix(n, tempPrefix) })
+	do(o.StateDir, "state", func(n string) bool {
+		return n == stateFile || strings.HasPrefix(n, tempPrefix) || strings.HasPrefix(n, ProbePrefix) || strings.HasPrefix(n, tmpWritePrefix)
+	})
 
 	cfgDir := filepath.Dir(o.ConfigPath)
 	confd := filepath.Join(cfgDir, "conf.d")

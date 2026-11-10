@@ -431,6 +431,7 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 			continue
 		}
 		in := install.Inspect(content)
+		d.binary(out, p, in.Binary)
 		if stateDir != "" && in.ReadWritePaths != stateDir {
 			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", p, in.ReadWritePaths, stateDir)
 		}
@@ -470,5 +471,22 @@ func (d Deps) units(ctx context.Context, out reporter, configPath, stateDir stri
 		if v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success") {
 			out.add(Problem, "last run", "%s did not succeed (result %s, exit status %s); see \"journalctl -u %s\"", s, v["Result"], v["ExecMainStatus"], s)
 		}
+	}
+}
+
+// binary checks the program the installed service runs as root: it must be
+// there and only root may be able to change it or anything above it.
+func (d Deps) binary(out reporter, unit, bin string) {
+	if bin == "" {
+		out.add(Problem, "units", "%s has no ExecStart program that doctor can read; run \"keepwatch install\" again", unit)
+		return
+	}
+	err := install.TrustedPath(d.FS, bin, install.KindFile)
+	switch {
+	case err == nil:
+	case install.IsMissing(err):
+		out.add(Problem, "units", "%s runs %s, which does not exist (%v): the scheduled run fails; install the binary there or run \"keepwatch install\" from the new location", unit, bin, err)
+	default:
+		out.add(Problem, "units", "%s runs %s as root, but it cannot be trusted: %v. Anybody who can change it or a directory above it gets root; install it for example with \"install -o root -g root -m 0755 keepwatch /usr/local/bin/\" and run \"keepwatch install\" again", unit, bin, err)
 	}
 }

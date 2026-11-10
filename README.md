@@ -837,6 +837,16 @@ them), so install it where it stays, for example `/usr/local/bin`. A binary belo
 `/tmp`, `/var/tmp` or `/dev/shm` is refused: the services have a private `/tmp`
 and would not find it.
 
+The services run that binary as root, so `install` refuses (exit 2) a binary that
+anybody but root could change: every component of its path, from `/`, must be
+looked at with `lstat` and be no symbolic link, be owned by root and not be
+writable by group or other, and the file itself must be a regular file. The message
+says which component failed and how to fix it, for example `install -o root -g root
+-m 0755 keepwatch /usr/local/bin/` and then `/usr/local/bin/keepwatch install`.
+`doctor` applies the same rule to the `ExecStart` program of the installed units.
+Limits: POSIX ACLs, file capabilities and bind mounts over a checked directory are
+not examined.
+
 It reads `state_dir` from the configuration file if there is one (an invalid
 configuration is refused, because the service would fail with it); without a
 file it uses `/var/lib/keepwatch` and says that `keepwatch init` is still to do.
@@ -965,7 +975,7 @@ probe file, created and removed inside `state_dir`. Exit codes: 0 no problem
 | ssh | `/run/sshd` exists when an `sshd` check is enabled. Ubuntu 24.04 starts `ssh.service` (which creates it) only at the first login when `ssh.socket` is used, and until then `sshd -T` fails and the five ssh checks are `error` | missing: problem, with the cause and `systemctl start ssh` as the remedy (keepwatch does not create it) |
 | notify | a notification channel is configured | none: warn |
 | state | `state_dir` is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable | unusable or not writable: problem; missing yet, or a state file that will not be used: warn |
-| units | the four unit files are installed with the marker; `ReadWritePaths` equals `state_dir`; `--config` matches | missing, foreign, or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
+| units | the four unit files are installed with the marker; the `ExecStart` program exists and only root can change it or anything above it; `ReadWritePaths` equals `state_dir`; `--config` matches | missing, foreign, a program anybody else can change (or that is missing), or `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd): problem; another `--config`: warn |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
 | last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output) | failed: problem |
 

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"syscall"
 
+	"github.com/LanNguyenSi/keepwatch/internal/install"
 	"github.com/LanNguyenSi/keepwatch/internal/state"
 )
 
@@ -45,29 +45,24 @@ func OSStateProber(dir string) StateStatus {
 	return st
 }
 
-// writeProbe creates and removes a file inside dir without following links.
+// writeProbe creates and removes a file inside dir. It goes through a
+// directory that install.OSFS opened and checked (a real directory, not
+// writable by others, trusted owner, the very directory that was checked), so
+// the file cannot land anywhere else. A crash between the two steps leaves a
+// file named with install.ProbePrefix, which `uninstall --purge` removes.
 func writeProbe(dir string) error {
-	root, err := os.OpenRoot(dir)
+	d, err := (install.OSFS{}).OpenDir(dir)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer d.Close()
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return err
 	}
-	name := ".keepwatch-doctor-probe-" + hex.EncodeToString(b[:])
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-	if err != nil {
+	name := install.ProbePrefix + hex.EncodeToString(b[:])
+	if err := d.WriteFile(name, []byte("x"), 0o600); err != nil {
 		return err
 	}
-	_, werr := f.Write([]byte("x"))
-	cerr := f.Close()
-	rerr := root.Remove(name)
-	for _, e := range []error{werr, cerr, rerr} {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
+	return d.Remove(name)
 }
