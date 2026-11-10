@@ -1061,7 +1061,9 @@ configuration it examines:
   the check service decides and the other one is a problem in the same way.
 
 A `--config` in a unit that is not a clean absolute path is a problem and is never
-loaded.
+loaded. Limit: `doctor` reads the unit files, not drop-ins. A drop-in (for example
+`keepwatch-check.service.d/*.conf`) that replaces `ExecStart` or adds a hardening
+option is not looked at; the line about the last run is what shows its effect.
 
 | Area | What it checks | Level |
 |---|---|---|
