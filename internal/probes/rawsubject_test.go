@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/diff"
+	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
 	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
 	"github.com/LanNguyenSi/keepwatch/internal/redact"
@@ -282,7 +283,7 @@ func TestSummariesAreRedactedBeforeTheyAreCut(t *testing.T) {
 			return rawSubjectCases()[4].run(t, f)
 		}},
 	}
-	offsets := []int{20, 45, 65, 85, 105, 125, 160, 190, 265}
+	offsets := []int{5, 10, 15, 20, 45, 65, 85, 105, 125, 160, 190, 265}
 	for _, r := range roles {
 		for _, off := range offsets {
 			forms := map[string]string{"token": strings.Repeat("a", off) + "-" + tokenSecret}
@@ -322,3 +323,158 @@ func TestSummariesAreRedactedBeforeTheyAreCut(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// Every cause and detail that names a path, a host, a mount or a command is
+// redacted by the report before it is cut, whatever the probe's own limits:
+// the probe shows the whole text, escaped, and does not cut it.
+func TestCausesAndDetailsAreRedactedBeforeTheyAreCut(t *testing.T) {
+	const secret = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+	none := func() *fake.FakeRunner { return newRunner().AddResult(dockerPs, inline("", 0)) }
+	cmd := func(args ...string) string { return "/usr/bin/dockerd\x00" + strings.Join(args, "\x00") + "\x00" }
+	dockerCmd := func(t *testing.T, fsys probestest.FakeFS) probes.Outcome {
+		return exec(dockerProbe(t), none(), fsys)
+	}
+	certPath := func(f string) string { return "/opt/certs/" + f + ".pem" }
+	certList := func(t *testing.T, f string, fsys probes.FS) probes.Outcome {
+		return execCert(certProbe(t, map[string]any{"paths": []any{certPath(f)}, "globs": []any{}}), fsys)
+	}
+	diskWith := func(t *testing.T, f string, st func(point string) *statfsMap) probes.Outcome {
+		point := "/mnt/" + f
+		return execDisk(diskProbe(t, map[string]any{"fstypes": []any{"ext4"}}), mountFS(mi(7, point, "ext4")), st(point))
+	}
+	ed := loadKey(t, "ubuntu2404", "ed25519")
+	roles := []struct {
+		name   string
+		status result.Status
+		run    func(t *testing.T, f string) probes.Outcome
+	}{
+		{"cert glob that fails", result.Error, func(t *testing.T, f string) probes.Outcome {
+			fsys := certFS(map[string]string{})
+			fsys.GlobErr = errors.New("boom " + f)
+			return execCert(certProbe(t, map[string]any{"paths": []any{}, "globs": []any{"/opt/certs/" + f + "/*.pem"}}), fsys)
+		}},
+		{"cert file behind a link", result.Fail, func(t *testing.T, f string) probes.Outcome {
+			fsys := resolvingFS{FakeFS: certFS(map[string]string{certPath("link"): pemCert(t, "site.example.test", time.Now().Add(-days(3)))}), to: "/opt/archive/" + f + ".pem"}
+			return certList(t, "link", fsys)
+		}},
+		{"cert file that is too large", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return certList(t, f, certFS(map[string]string{certPath(f): strings.Repeat("x", 2<<20)}))
+		}},
+		{"cert file that cannot be read", result.Error, func(t *testing.T, f string) probes.Outcome {
+			fsys := certFS(map[string]string{})
+			fsys.Errs = map[string]error{certPath(f): errors.New("denied " + f)}
+			return certList(t, f, fsys)
+		}},
+		{"cert file that is no certificate", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return certList(t, f, certFS(map[string]string{certPath(f): "not a certificate"}))
+		}},
+		{"disk statfs error text", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return diskWith(t, f, func(p string) *statfsMap { return &statfsMap{errs: map[string]error{p: errors.New("boom " + f)}} })
+		}},
+		{"disk inconsistent statfs numbers", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return diskWith(t, f, func(p string) *statfsMap {
+				return &statfsMap{by: map[string]probes.Statfs{p: {BlockSize: 4096, Blocks: 1, Bfree: 2, Bavail: 2}}}
+			})
+		}},
+		{"docker pid file that cannot be read", result.Error, func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", "")
+			fsys.Errs = map[string]error{"/run/docker.pid": errors.New("denied " + f)}
+			return dockerCmd(t, fsys)
+		}},
+		{"docker host on the command line that is not understood", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return dockerCmd(t, dockerHost("", cmd("-H", "ftp://"+f)))
+		}},
+		{"docker tls flag with a bad value", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return dockerCmd(t, dockerHost("", cmd("--tls="+f)))
+		}},
+		{"docker group of flags that cannot be read", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return dockerCmd(t, dockerHost("", cmd("-zH"+f)))
+		}},
+		{"docker config file that is not absolute", result.Error, func(t *testing.T, f string) probes.Outcome {
+			return dockerCmd(t, dockerHost("", cmd("--config-file", "rel/"+f)))
+		}},
+		{"docker config file that cannot be read", result.Error, func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("--config-file", "/etc/"+f+".json"))
+			fsys.Errs = map[string]error{"/etc/" + f + ".json": errors.New("denied " + f)}
+			return dockerCmd(t, fsys)
+		}},
+		{"docker config file that does not parse", result.Error, func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("--config-file", "/etc/"+f+".json"))
+			fsys.Files["/etc/"+f+".json"] = "{"
+			return dockerCmd(t, fsys)
+		}},
+		{"docker host in daemon.json that is not understood", result.Error, func(t *testing.T, f string) probes.Outcome {
+			b, _ := json.Marshal(map[string]any{"hosts": []string{"ftp://" + f}})
+			return dockerCmd(t, dockerHost(string(b), ""))
+		}},
+		{"docker container that mounts a socket", result.Fail, func(t *testing.T, f string) probes.Outcome {
+			ids := idsN(1)
+			r := newRunner().AddResult(dockerPs, psOut(ids)).AddResult(inspectArgv(ids...), inline(inspectDoc(ids, func(_ int, c map[string]any) {
+				c["Mounts"] = []any{map[string]any{"Type": "bind", "Source": "/run/" + f + "/docker.sock"}}
+			}), 0))
+			return exec(dockerProbe(t), r, probestest.FakeFS{})
+		}},
+		{"docker container with a long name", result.Fail, func(t *testing.T, f string) probes.Outcome {
+			ids := idsN(1)
+			r := newRunner().AddResult(dockerPs, psOut(ids)).AddResult(inspectArgv(ids...), inline(inspectDoc(ids, func(_ int, c map[string]any) {
+				c["Name"] = "/" + f + " with spaces"
+				hostConfig(c)["Privileged"] = true
+			}), 0))
+			return exec(dockerProbe(t), r, probestest.FakeFS{})
+		}},
+		{"authorized_keys command", result.Warn, func(t *testing.T, f string) probes.Outcome {
+			fsys := probestest.FakeFS{Files: map[string]string{"/etc/passwd": "alice:x:1001:1001::/home/alice:/bin/bash\n"}}
+			return execKeys(keysProbe(t), sshdWith("authorizedkeysfile .ssh/authorized_keys", "authorizedkeyscommand "+f), fsys, map[string][]string{"alice": {}})
+		}},
+		{"authorized_keys key in a file with a long path", result.Fail, func(t *testing.T, f string) probes.Outcome {
+			fsys := probestest.FakeFS{
+				Files: map[string]string{"/etc/passwd": "alice:x:1001:1001::/home/alice:/bin/bash\n"},
+				Homes: map[string]string{"/home/alice\x00.ssh/" + f: ed.line + "\n"},
+			}
+			return execKeys(keysProbe(t), sshdWith("authorizedkeysfile .ssh/"+f, "authorizedkeyscommand none"), fsys, map[string][]string{"alice": {}})
+		}},
+		{"authorized_keys file that cannot be read", result.Warn, func(t *testing.T, f string) probes.Outcome {
+			fsys := probestest.FakeFS{
+				Files: map[string]string{"/etc/passwd": "alice:x:1001:1001::/home/alice:/bin/bash\n"},
+				Errs:  map[string]error{"/home/alice\x00.ssh/" + f: errors.New("io " + f)},
+			}
+			return execKeys(keysProbe(t), sshdWith("authorizedkeysfile .ssh/"+f, "authorizedkeyscommand none"), fsys, map[string][]string{"alice": {}})
+		}},
+	}
+	for _, r := range roles {
+		for _, off := range []int{5, 10, 15, 20, 45, 65, 85, 105, 125, 160, 190, 265} {
+			frag := strings.Repeat("a", off) + "-" + secret
+			t.Run(r.name+"/"+strconv.Itoa(off), func(t *testing.T) {
+				o := r.run(t, frag)
+				if o.Status != r.status {
+					t.Fatalf("status %s (%s), want %s", o.Status, o.Summary, r.status)
+				}
+				texts := []string{o.Summary}
+				for _, e := range append(append([]result.Evidence(nil), o.Evidence...), o.Warnings...) {
+					texts = append(texts, e.Detail)
+				}
+				whole := false
+				for _, tx := range texts {
+					whole = whole || strings.Contains(tx, secret)
+					if shown := redact.Default().Clean(tx); strings.Contains(shown, "ZZZZZ") || strings.Contains(shown, "ghp_Z") {
+						t.Fatalf("the shown text holds part of the secret: %q", shown)
+					}
+				}
+				if !whole {
+					t.Fatalf("no text holds the whole secret, so a probe cut it or the case does not reach the text: %q", texts)
+				}
+			})
+		}
+	}
+}
+
+// resolvingFS reads every trusted file as if it were a link to the path in to.
+type resolvingFS struct {
+	probestest.FakeFS
+	to string
+}
+
+func (r resolvingFS) ReadTrusted(p string, max int64) ([]byte, string, error) {
+	b, _, err := r.FakeFS.ReadTrusted(p, max)
+	return b, r.to, err
+}
