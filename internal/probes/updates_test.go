@@ -580,8 +580,10 @@ func TestSecurityUpdatesPolicyIsUnderstoodOrError(t *testing.T) {
 			})
 		}
 		for name, res := range map[string]execx.Result{
-			"truncated": {Stdout: []byte(good), Truncated: true},
-			"signaled":  {Stdout: []byte(good), Signaled: true, ExitCode: -1},
+			"truncated":                 {Stdout: []byte(good), Truncated: true},
+			"signaled":                  {Stdout: []byte(good), Signaled: true, ExitCode: -1},
+			"pipes cut":                 {Stdout: []byte(good), IOIncomplete: true},
+			"pipes cut after a failure": {Stdout: []byte(good), ExitCode: 100, IOIncomplete: true},
 		} {
 			t.Run(name, func(t *testing.T) {
 				o := execAt(updatesProbe(t, nil), newRunner().AddResult(aptArgv, inline(sim, 0)).AddResult(pa, res), lists(time.Hour), t0)

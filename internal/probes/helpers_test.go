@@ -121,6 +121,15 @@ func commonFailures(t *testing.T, p probes.Probe, argv []string, program string,
 		{"not allowlisted", func(f *fake.FakeRunner) { f.AddError(argv, execx.ErrNotAllowed) }, result.Error, "allowlist"},
 		{"timeout", func(f *fake.FakeRunner) { f.AddError(argv, execx.ErrTimeout) }, result.Error, "timed out"},
 		{"io timeout", func(f *fake.FakeRunner) { f.AddError(argv, execx.ErrIOTimeout) }, result.Error, "incomplete"},
+		{"pipes cut, exit 0", func(f *fake.FakeRunner) {
+			f.AddResult(argv, execx.Result{Stdout: []byte("x"), IOIncomplete: true})
+		}, result.Error, "incomplete"},
+		{"pipes cut, exit 1", func(f *fake.FakeRunner) {
+			f.AddResult(argv, execx.Result{Stdout: []byte("x"), ExitCode: 1, IOIncomplete: true})
+		}, result.Error, "incomplete"},
+		{"pipes cut, exit 3", func(f *fake.FakeRunner) {
+			f.AddResult(argv, execx.Result{Stdout: []byte("x"), ExitCode: 3, IOIncomplete: true})
+		}, result.Error, "incomplete"},
 		{"other error", func(f *fake.FakeRunner) { f.AddError(argv, os.ErrPermission) }, result.Error, "failed"},
 		{"truncated", func(f *fake.FakeRunner) {
 			f.AddResult(argv, execx.Result{Stdout: []byte("x"), Truncated: true})
@@ -170,9 +179,11 @@ func TestPlausibleOutputIsNotTrusted(t *testing.T) {
 	for kind, g := range good {
 		p := prepare(t, kind, g.params)
 		for name, res := range map[string]execx.Result{
-			"truncated": {Stdout: []byte(g.stdout), Truncated: true},
-			"signaled":  {Stdout: []byte(g.stdout), Signaled: true, ExitCode: -1},
-			"killed":    {Stdout: []byte(g.stdout), ExitCode: -1},
+			"truncated":                 {Stdout: []byte(g.stdout), Truncated: true},
+			"pipes cut":                 {Stdout: []byte(g.stdout), IOIncomplete: true},
+			"pipes cut after a failure": {Stdout: []byte(g.stdout), IOIncomplete: true, ExitCode: 1},
+			"signaled":                  {Stdout: []byte(g.stdout), Signaled: true, ExitCode: -1},
+			"killed":                    {Stdout: []byte(g.stdout), ExitCode: -1},
 		} {
 			t.Run(kind+"/"+name, func(t *testing.T) {
 				o := exec(p, newRunner().AddResult(g.argv, res), probestest.MemFS{})

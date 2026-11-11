@@ -235,15 +235,17 @@ func TestRebootRequiredCombinations(t *testing.T) {
 	})
 	t.Run("every needrestart failure keeps the marker", func(t *testing.T) {
 		failures := map[string]*fake.FakeRunner{
-			"timeout":         newRunner().AddError(needrestartArgv, execx.ErrTimeout),
-			"io timeout":      newRunner().AddError(needrestartArgv, execx.ErrIOTimeout),
-			"not allowlisted": newRunner().AddError(needrestartArgv, execx.ErrNotAllowed),
-			"truncated":       newRunner().AddResult(needrestartArgv, execx.Result{Stdout: []byte(needrestartOut("1")), Truncated: true}),
-			"killed":          newRunner().AddResult(needrestartArgv, execx.Result{ExitCode: -1, Signaled: true}),
-			"exit 255":        newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 255)),
-			"garbage":         newRunner().AddResult(needrestartArgv, inline("<html>502</html>\n", 0)),
-			"duplicate key":   newRunner().AddResult(needrestartArgv, inline(needrestartOut("1")+"NEEDRESTART-KSTA: 3\n", 0)),
-			"bad ksta":        newRunner().AddResult(needrestartArgv, inline(needrestartOut("+1"), 0)),
+			"timeout":           newRunner().AddError(needrestartArgv, execx.ErrTimeout),
+			"io timeout":        newRunner().AddError(needrestartArgv, execx.ErrIOTimeout),
+			"not allowlisted":   newRunner().AddError(needrestartArgv, execx.ErrNotAllowed),
+			"pipes cut":         newRunner().AddResult(needrestartArgv, execx.Result{Stdout: []byte(needrestartOut("1")), IOIncomplete: true}),
+			"pipes cut, exit 1": newRunner().AddResult(needrestartArgv, execx.Result{Stdout: []byte(needrestartOut("1")), ExitCode: 1, IOIncomplete: true}),
+			"truncated":         newRunner().AddResult(needrestartArgv, execx.Result{Stdout: []byte(needrestartOut("1")), Truncated: true}),
+			"killed":            newRunner().AddResult(needrestartArgv, execx.Result{ExitCode: -1, Signaled: true}),
+			"exit 255":          newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 255)),
+			"garbage":           newRunner().AddResult(needrestartArgv, inline("<html>502</html>\n", 0)),
+			"duplicate key":     newRunner().AddResult(needrestartArgv, inline(needrestartOut("1")+"NEEDRESTART-KSTA: 3\n", 0)),
+			"bad ksta":          newRunner().AddResult(needrestartArgv, inline(needrestartOut("+1"), 0)),
 		}
 		for name, r := range failures {
 			t.Run(name, func(t *testing.T) {

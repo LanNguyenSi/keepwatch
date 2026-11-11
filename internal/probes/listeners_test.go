@@ -387,6 +387,12 @@ func TestListenersProcessRunFailureOnlyHidesNames(t *testing.T) {
 		{"not allowlisted", func(r *fake.FakeRunner) { r.AddError(ssTCPp, execx.ErrNotAllowed) }},
 		{"not found", func(r *fake.FakeRunner) { r.AddError(ssTCPp, execx.ErrNotFound) }},
 		{"other error", func(r *fake.FakeRunner) { r.AddError(ssTCPp, os.ErrPermission) }},
+		{"pipes cut, exit 0", func(r *fake.FakeRunner) {
+			r.AddResult(ssTCPp, execx.Result{Stdout: []byte("LISTEN 0 5 0.0.0.0:9000 0.0.0.0:* users:((\"w\",pid=1,fd=3))\n"), IOIncomplete: true})
+		}},
+		{"pipes cut, exit 1", func(r *fake.FakeRunner) {
+			r.AddResult(ssTCPp, execx.Result{Stdout: []byte("LISTEN 0 5 0.0.0.0:9000 0.0.0.0:* users:((\"w\",pid=1,fd=3))\n"), ExitCode: 1, IOIncomplete: true})
+		}},
 		{"truncated", func(r *fake.FakeRunner) {
 			r.AddResult(ssTCPp, execx.Result{Stdout: []byte("LISTEN 0 5 0.0.0.0:9000 0.0.0.0:* users:((\"w\",pid=1,fd=3))\n"), Truncated: true})
 		}},
