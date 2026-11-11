@@ -1,0 +1,13 @@
+# gitleaks config: default rules plus a path allowlist for test fixtures
+# that contain fake secrets on purpose.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures with intentionally fake secrets"
+paths = [
+  '''^internal/redact/redact_test\.go$''',
+  '''^internal/notify/validate_test\.go$''',
+  '''^internal/cli/notify_test\.go$''',
+  '''^internal/cli/install_test\.go$'''
+]

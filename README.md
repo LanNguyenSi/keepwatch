@@ -23,6 +23,7 @@ make build    # bin/keepwatch (host) and bin/keepwatch-linux-amd64, static
 ```sh
 make test     # go test -race ./...
 make lint     # gofmt, go vet, staticcheck
+go run github.com/zricethezav/gitleaks/v8@v8.28.0 git . --config .gitleaks.toml --redact --no-banner   # secret scan, full history
 ```
 
 ## End-to-end tests
