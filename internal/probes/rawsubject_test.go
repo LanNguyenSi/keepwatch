@@ -231,3 +231,21 @@ func (r resolvingFS) ReadTrusted(p string, max int64) ([]byte, string, error) {
 	b, _, err := r.FakeFS.ReadTrusted(p, max)
 	return b, r.to, err
 }
+
+// The configuration errors of cert_expiry name the value as the operator
+// wrote it, quoted by %q and not cut: doctor prints them without the
+// redactor, and the check command runs them through it.
+func TestCertConfigErrorsNameTheWholeValue(t *testing.T) {
+	long := strings.Repeat("a", 300) + ".ghp_" + strings.Repeat("Z", 36)
+	k, _ := probes.Lookup("cert_expiry")
+	for name, params := range map[string]map[string]any{
+		"not a clean path":    {"paths": []any{"/opt//" + long}, "globs": []any{}},
+		"not absolute":        {"paths": []any{}, "globs": []any{"rel/" + long}},
+		"not a valid pattern": {"paths": []any{}, "globs": []any{"/opt/[" + long}},
+	} {
+		_, err := k.Prepare(params)
+		if err == nil || !strings.Contains(err.Error(), long) {
+			t.Errorf("%s: error %v does not name the whole value", name, err)
+		}
+	}
+}
