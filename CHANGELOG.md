@@ -15,7 +15,7 @@ reports of what changed, notifications and a scheduled install.
 
 ### Added
 
-- `keepwatch check`: sixteen checks of twelve kinds (services, packages, effective sshd
+- `keepwatch check`: eighteen checks of twelve kinds (services, packages, effective sshd
   settings, fail2ban jails, listening sockets against an allowlist, reboot
   required, firewall default policy, pending security updates, Docker
   exposure, authorized keys, disk usage, certificate expiry), with severities,
