@@ -53,13 +53,11 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# Release notes come from CHANGELOG.md through --release-notes.
 changelog:
-  use: git
-  sort: asc
-  filters:
-    exclude:
-      - "^Merge "
+  disable: true
 
+# The workflow publishes the draft after the provenance attestation exists.
 release:
-  draft: false
+  draft: true
   prerelease: auto
