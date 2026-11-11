@@ -137,7 +137,8 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 			detail += fmt.Sprintf(", %d%% of the inodes used", inodes)
 			worst = max(worst, inodes)
 		}
-		ev := result.Evidence{Subject: clean(m.point, 200), Detail: fmt.Sprintf("%s (%s)", detail, m.fstype)}
+		// the raw mount point: it is the key of the item, only the report cleans it
+		ev := result.Evidence{Subject: m.point, Detail: fmt.Sprintf("%s (%s)", detail, m.fstype)}
 		switch {
 		case worst >= d.fail:
 			fails = append(fails, ev)

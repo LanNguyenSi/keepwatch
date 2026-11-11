@@ -88,8 +88,11 @@ func TestDiskUsageCapturedMountinfo(t *testing.T) {
 			if len(st.called) != 9 {
 				t.Fatalf("statfs called for %q", st.called)
 			}
-			if !eq(subjects(o), []string{"/mnt/kw-nl?line"}) {
-				t.Fatalf("a newline in a mount point must not reach the evidence: %q", subjects(o))
+			if !eq(subjects(o), []string{"/mnt/kw-nl\nline"}) {
+				t.Fatalf("the subject is the mount point as it is, a newline included: %q", subjects(o))
+			}
+			if strings.ContainsAny(o.Summary, "\n") {
+				t.Fatalf("a newline in a mount point must not reach the summary: %q", o.Summary)
 			}
 		})
 	}
@@ -351,8 +354,11 @@ func TestDiskUsageMountinfoIsParsedStrictly(t *testing.T) {
 		if !eq(s.called, []string{"/a b\tc\nd\\e"}) {
 			t.Fatalf("called %q", s.called)
 		}
-		if strings.ContainsAny(o.Evidence[0].Subject, "\n\t") {
-			t.Fatalf("subject %q", o.Evidence[0].Subject)
+		if o.Evidence[0].Subject != "/a b\tc\nd\\e" {
+			t.Fatalf("the subject is the decoded mount point, %q", o.Evidence[0].Subject)
+		}
+		if strings.ContainsAny(o.Summary, "\n\t") {
+			t.Fatalf("summary %q", o.Summary)
 		}
 	})
 	t.Run("read errors", func(t *testing.T) {

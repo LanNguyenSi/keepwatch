@@ -176,8 +176,10 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 		if cn == "" {
 			cn = "(no common name)"
 		}
+		// The subject is the path as it is: it is the key of the item, so it is
+		// neither cleaned nor cut here (the report does that for display).
 		ev := result.Evidence{
-			Subject: clean(f, 200),
+			Subject: f,
 			Detail:  fmt.Sprintf("CN %s, not after %s, %s%s", cn, cert.NotAfter.UTC().Format("2006-01-02"), daysLeft(left), resolvedNote(f, resolved)),
 		}
 		if left < c.fail {

@@ -536,8 +536,7 @@ Two rules keep the comparison honest:
     and a new one starts above it: `subject_gone` for the first and `hidden_new` 1
     for the second, although the total is the same. A subject that the report
     has to escape, redact or cut for display is still compared by the subject the
-    check produced, not by its display text (see below for which checks keep the
-    subject as it is).
+    check produced, not by its display text (see below).
   - A set has more than 10,000 keys: its keys are not stored, only its total and
     the digest. Equal digests mean the same list. Different digests are one
     `set_changed` change with both totals, an alert: that something changed is
@@ -549,18 +548,16 @@ Two rules keep the comparison honest:
   of the listed part (because new items sort before it) is a failing item again
   and is reported as new.
 
-Items are compared by the SHA-256 of the subject the check produced. For the
-listeners (address and port), the authorized key fingerprints, the container
-names and ids of `docker_exposure` and the package names of `security_updates`
-that is the raw subject, so two subjects that look the same after the report
-cleans them (they differ in a control character, say) are still two items. The
-checks that name a path, a mount point or a free text clean the subject before
-it becomes one (non-printable characters become `?`, long names are cut):
-`cert_expiry` (file path), `disk_usage` (mount point), the TCP findings of
-`docker_exposure` and the path, pattern and line warnings of `authorized_keys`
-(its other warnings, such as an expected user or key not found, keep the raw text).
-There, two names that differ only in a control character, or only after the cut,
-are one item, and a change between them is not seen.
+Items are compared by the SHA-256 of the subject the check produced, and every
+check produces the raw subject: the listener address and port, the file path of
+`cert_expiry`, the mount point of `disk_usage`, the TCP findings and container
+names and ids of `docker_exposure`, the path, pattern and line warnings and key
+fingerprints of `authorized_keys`, and the package names of `security_updates`.
+Only what is shown is cleaned: the report, the state and the notifications
+redact secrets, escape control characters and cut long names. So two subjects
+that look the same after that (they differ in a control character, say, or only
+past the length the report shows) are still two items, and swapping one for the
+other is a change.
 
 ### State
 

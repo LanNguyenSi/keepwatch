@@ -177,6 +177,11 @@ func Programs(names ...string) ([]string, error) {
 // maxPartialSubjects bounds the subjects named in a partial summary.
 const maxPartialSubjects = 5
 
+// maxSummarySubject is the most runes of one subject a summary shows. A
+// subject is the check's raw key (see result.Evidence); a summary is text for
+// reading, so it shows the cleaned and cut form, which is never compared.
+const maxSummarySubject = 200
+
 // partialError builds the outcome of a check that reads several sources and
 // could not read all of them. The status is error: part of the host was not
 // examined, so the check cannot say that it is fine. The failing items that
@@ -193,7 +198,7 @@ func partialError(causes []string, confirmed []result.Evidence) Outcome {
 			names = append(names, fmt.Sprintf("and %d more", len(confirmed)-i))
 			break
 		}
-		names = append(names, e.Subject)
+		names = append(names, clean(e.Subject, maxSummarySubject))
 	}
 	return Outcome{
 		Status:   result.Error,

@@ -56,8 +56,13 @@ func ParseSeverity(s string) (Severity, error) {
 //
 // Subject is a stable identifier of what was examined (for example
 // "tcp/0.0.0.0:8080", "passwordauthentication" or "fail2ban.service"). It
-// is what an exception's match compares against, exactly. Detail is free
-// text derived from host output and must be treated as untrusted.
+// is what an exception's match compares against, exactly, and what the key of
+// the item is made from (SubjectKey), so it is the raw identifier and is never
+// cleaned or cut by a probe: two items that differ only in a control
+// character, or only past the length a report shows, are two items. The
+// report, the state and the summaries clean, redact and cut it for display.
+// Detail is free text derived from host output and must be treated as
+// untrusted.
 type Evidence struct {
 	Subject         string `json:"subject"`
 	Detail          string `json:"detail"`

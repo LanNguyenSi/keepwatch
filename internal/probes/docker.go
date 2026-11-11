@@ -170,7 +170,7 @@ func (d *dockerRun) names() string {
 			n = append(n, "...")
 			break
 		}
-		n = append(n, e.Subject)
+		n = append(n, clean(e.Subject, maxSummarySubject))
 	}
 	return strings.Join(n, ", ")
 }
@@ -224,9 +224,11 @@ type tcpHost struct {
 	tls          tlsInfo
 }
 
+// addTCP adds a TCP finding. Its subject is the source and the host as they
+// are: it is the key of the item, only the report cleans and cuts it.
 func (d *dockerRun) addTCP(h tcpHost) {
 	d.ev = append(d.ev, result.Evidence{
-		Subject: clean(h.source+" "+h.host, 120),
+		Subject: h.source + " " + h.host,
 		Detail:  fmt.Sprintf("the docker daemon listens on TCP (%s)", h.tls),
 	})
 }

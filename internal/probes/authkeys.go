@@ -200,7 +200,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		for _, pattern := range files {
 			rel, abs, perr := expandKeyPath(pattern, a)
 			if perr != nil {
-				warns = append(warns, result.Evidence{Subject: a.name + ":" + clean(pattern, 60), Detail: perr.Error()})
+				warns = append(warns, result.Evidence{Subject: a.name + ":" + pattern, Detail: perr.Error()})
 				continue
 			}
 			shown := rel
@@ -219,13 +219,13 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 				if errors.Is(rerr, errNoCapability) {
 					return *errorOutcome("%v", rerr)
 				}
-				warns = append(warns, result.Evidence{Subject: a.name + ":" + clean(shown, 80), Detail: "not read: " + keyReadReason(rerr)})
+				warns = append(warns, result.Evidence{Subject: a.name + ":" + shown, Detail: "not read: " + keyReadReason(rerr)})
 				continue
 			}
 			keys, bad := parseAuthorizedKeys(string(data))
 			for _, line := range bad {
 				ev := result.Evidence{
-					Subject: fmt.Sprintf("%s:%s:%d", a.name, clean(shown, 80), line.n),
+					Subject: fmt.Sprintf("%s:%s:%d", a.name, shown, line.n),
 					Detail:  "line is not a public key: " + line.why,
 				}
 				if line.keyish {
@@ -299,7 +299,7 @@ func subjectList(ev []result.Evidence, n int) string {
 			s = append(s, "...")
 			break
 		}
-		s = append(s, e.Subject)
+		s = append(s, clean(e.Subject, maxSummarySubject))
 	}
 	return strings.Join(s, ", ")
 }
