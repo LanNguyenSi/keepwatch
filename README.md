@@ -462,7 +462,11 @@ check deserves attention, because it can stand for keys that were not checked.
 `disk_usage` examines the mounts of the given file system types (`fstypes`
 replaces the default list ext4, xfs, btrfs, vfat, zfs; network and pseudo file
 systems are left out so that a hung NFS cannot block the run) for blocks and
-inodes, computed like `df`. Each statfs call has a timeout.
+inodes, computed like `df`. Each statfs call has a timeout. Mounts that share
+one device (the major:minor of mountinfo) are judged once, at the entry with
+the shortest mount point (the first one in mountinfo order on a tie): a bind
+mount, such as the ones a systemd sandbox adds for `/tmp`, `/var/tmp` and a
+state directory of the file system it already sees, is not counted again.
 
 `cert_expiry` reads certificate files (`paths`, and files matching `globs`;
 setting `paths` does not remove the default glob, `globs: []` does) and examines
@@ -1184,8 +1188,6 @@ With these options every check returned the same status, severity, summary and
 evidence subjects as a direct run as root, on Ubuntu 22.04 (systemd 249) and 24.04
 (systemd 255), except for the following.
 
-- `disk.usage` counts more file systems in the service than in a direct run: the
-  sandbox adds bind mounts of devices that are already counted.
 - `updates.security_pending` agrees only because the apt simulation runs with
   `APT::Get::Always-Include-Phased-Updates=true` (see `security_updates` under
   Checks). apt's own phasing differs between a service and a direct run, and

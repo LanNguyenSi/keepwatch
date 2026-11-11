@@ -136,7 +136,8 @@ checks:
 		return probes.Statfs{BlockSize: 4096, Blocks: 1000, Bfree: 1000 - pct*10, Bavail: 1000 - pct*10, Files: 1000, Ffree: 1000 - pct*10}
 	}
 	add := func(point string, pct uint64) {
-		fmt.Fprintf(&mounts, "%d 1 8:1 / %s rw - ext4 /dev/x rw\n", len(st)+1, point)
+		// one device per mount: disk.usage judges each device once
+		fmt.Fprintf(&mounts, "%d 1 8:%d / %s rw - ext4 /dev/x rw\n", len(st)+1, len(st)+1, point)
 		st[point] = use(pct)
 	}
 	add("/full", 95)
@@ -176,7 +177,8 @@ checks:
 	var mounts strings.Builder
 	st := map[string]probes.Statfs{}
 	add := func(point string, pct uint64) {
-		fmt.Fprintf(&mounts, "%d 1 8:1 / %s rw - ext4 /dev/x rw\n", len(st)+1, point)
+		// one device per mount: disk.usage judges each device once
+		fmt.Fprintf(&mounts, "%d 1 8:%d / %s rw - ext4 /dev/x rw\n", len(st)+1, len(st)+1, point)
 		st[point] = probes.Statfs{BlockSize: 4096, Blocks: 1000, Bfree: 1000 - pct*10, Bavail: 1000 - pct*10, Files: 1000, Ffree: 1000 - pct*10}
 	}
 	for i := 0; i < 130; i++ {
@@ -217,7 +219,8 @@ checks:
 	st := map[string]probes.Statfs{}
 	for i := 0; i < 130; i++ {
 		p := fmt.Sprintf("/w%03d", i)
-		fmt.Fprintf(&mounts, "%d 1 8:1 / %s rw - ext4 /dev/x rw\n", i+1, p)
+		// one device per mount: disk.usage judges each device once
+		fmt.Fprintf(&mounts, "%d 1 8:%d / %s rw - ext4 /dev/x rw\n", i+1, i+1, p)
 		st[p] = probes.Statfs{BlockSize: 4096, Blocks: 1000, Bfree: 150, Bavail: 150, Files: 1000, Ffree: 150}
 	}
 	f := newFixture(t, fake.New(nil), "")
