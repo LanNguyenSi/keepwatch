@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
-	"github.com/LanNguyenSi/keepwatch/internal/redact"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -47,7 +46,7 @@ func runWith(ctx context.Context, env *Env, argv []string, opts execx.Opts, keep
 	case errors.Is(err, execx.ErrIOTimeout):
 		return res, errorOutcome("%s output may be incomplete: pipes still held open after exit", argv[0])
 	default:
-		return res, errorOutcome("running %s failed: %s", argv[0], clean(err.Error(), 200))
+		return res, errorOutcome("running %s failed: %s", argv[0], err.Error())
 	}
 	switch {
 	case res.Signaled || res.ExitCode < 0:
@@ -70,7 +69,7 @@ func unexpectedExit(prog string, res execx.Result) *Outcome {
 		msg = firstLine(res.Stdout)
 	}
 	if msg != "" {
-		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, clean(msg, 200))
+		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, msg)
 	}
 	return errorOutcome("%s exited with status %d", prog, res.ExitCode)
 }
@@ -82,14 +81,6 @@ func firstLine(b []byte) string {
 	}
 	return s
 }
-
-// show makes a subject, a path or another name taken from the host safe to
-// put into a summary or a detail: the same escaping the report applies to the
-// evidence (redact.Escape), and no cut. A probe must not cut such text: the
-// report redacts a summary after the probe built it, and a secret cut in the
-// middle no longer matches its pattern. The report cuts the whole field after
-// it redacted it.
-func show(s string) string { return redact.Escape(s) }
 
 // clean makes host-supplied text safe to show: control characters, invalid
 // UTF-8 and non-printable runes become "?", and the text is cut to max

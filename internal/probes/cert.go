@@ -73,16 +73,16 @@ func (certExpiry) Prepare(params map[string]any) (Probe, error) {
 	p := newParams(params)
 	absPath := func(s string) error {
 		if !strings.HasPrefix(s, "/") || filepath.Clean(s) != s || strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f }) || len(s) > 4096 {
-			return fmt.Errorf("%q is not a clean absolute path", clean(s, 80))
+			return fmt.Errorf("%q is not a clean absolute path", s)
 		}
 		return nil
 	}
 	globPat := func(s string) error {
 		if !strings.HasPrefix(s, "/") || strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f }) || len(s) > 4096 {
-			return fmt.Errorf("%q is not an absolute pattern", clean(s, 80))
+			return fmt.Errorf("%q is not an absolute pattern", s)
 		}
 		if _, err := filepath.Match(s, ""); err != nil {
-			return fmt.Errorf("%q is not a valid pattern: %v", clean(s, 80), err)
+			return fmt.Errorf("%q is not a valid pattern: %v", s, err)
 		}
 		return nil
 	}
@@ -117,7 +117,7 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 	for _, g := range c.globs {
 		matches, err := env.glob(g)
 		if err != nil {
-			return *errorOutcome("glob %s: %s", show(g), show(err.Error()))
+			return *errorOutcome("glob %s: %s", g, err.Error())
 		}
 		for _, m := range matches {
 			cand[m] = true
@@ -151,17 +151,17 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 			case errors.Is(err, fs.ErrNotExist) && !listed[f]:
 				continue // vanished between the glob and the read
 			case errors.Is(err, fs.ErrNotExist):
-				causes = append(causes, fmt.Sprintf("%s does not exist", show(f)))
+				causes = append(causes, fmt.Sprintf("%s does not exist", f))
 			case errors.Is(err, ErrTooLarge):
-				causes = append(causes, fmt.Sprintf("%s is larger than %d KiB", show(f), maxCertFile>>10))
+				causes = append(causes, fmt.Sprintf("%s is larger than %d KiB", f, maxCertFile>>10))
 			default:
-				causes = append(causes, fmt.Sprintf("%s: %s", show(f), show(err.Error())))
+				causes = append(causes, fmt.Sprintf("%s: %s", f, err.Error()))
 			}
 			continue
 		}
 		cert, err := firstCertificate(data)
 		if err != nil {
-			causes = append(causes, fmt.Sprintf("%s: %v", show(f), err))
+			causes = append(causes, fmt.Sprintf("%s: %v", f, err))
 			continue
 		}
 		read++
@@ -172,7 +172,7 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 		if left >= c.warn {
 			continue
 		}
-		cn := clean(cert.Subject.CommonName, 80)
+		cn := cert.Subject.CommonName
 		if cn == "" {
 			cn = "(no common name)"
 		}
@@ -218,14 +218,14 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 			Set:      set,
 		}
 	}
-	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d certificate(s) valid for at least %s; soonest: %s, %s", read, daysText(c.warn), show(soonestPath), daysLeft(soonest))}
+	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d certificate(s) valid for at least %s; soonest: %s, %s", read, daysText(c.warn), soonestPath, daysLeft(soonest))}
 }
 
 func resolvedNote(path, resolved string) string {
 	if resolved == "" || resolved == path {
 		return ""
 	}
-	return ", file " + show(resolved)
+	return ", file " + resolved
 }
 
 func daysText(d time.Duration) string { return fmt.Sprintf("%d day(s)", int(d/(24*time.Hour))) }

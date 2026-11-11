@@ -193,7 +193,7 @@ func partialError(causes []string, confirmed []result.Evidence) Outcome {
 			names = append(names, fmt.Sprintf("and %d more", len(confirmed)-i))
 			break
 		}
-		names = append(names, show(e.Subject))
+		names = append(names, e.Subject)
 	}
 	return Outcome{
 		Status:   result.Error,

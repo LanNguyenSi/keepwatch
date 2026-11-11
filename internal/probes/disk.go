@@ -98,7 +98,7 @@ type mount struct{ point, fstype string }
 func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	b, err := env.FS.ReadFile(mountinfoFile, maxMountinfo)
 	if err != nil {
-		return *errorOutcome("cannot read %s: %s", mountinfoFile, clean(err.Error(), 120))
+		return *errorOutcome("cannot read %s: %s", mountinfoFile, err.Error())
 	}
 	mounts, err := parseMountinfo(string(b))
 	if err != nil {
@@ -123,12 +123,12 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	for _, m := range wanted {
 		st, serr := statfsWithTimeout(ctx, env.statfs(), m.point, timeout)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %s", show(m.point), show(serr.Error())))
+			causes = append(causes, fmt.Sprintf("statfs %s: %s", m.point, serr.Error()))
 			continue
 		}
 		blocks, inodes, serr := usagePercent(st)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %v", show(m.point), serr))
+			causes = append(causes, fmt.Sprintf("statfs %s: %v", m.point, serr))
 			continue
 		}
 		worst := blocks

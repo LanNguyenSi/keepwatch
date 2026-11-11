@@ -226,7 +226,7 @@ func TestCertExpiryFiles(t *testing.T) {
 		fsys := certFS(map[string]string{"/opt/a.pem": good("evil\x1b[31m name\nsecond line", days(5))})
 		o := execCert(certProbe(t, map[string]any{"paths": []any{"/opt/a.pem"}, "globs": []any{}}), fsys)
 		wantStatus(t, o, result.Fail)
-		if strings.ContainsAny(o.Evidence[0].Detail, "\n\x1b") {
+		if strings.ContainsAny(shown(o.Evidence[0].Detail), "\n\x1b") || !strings.Contains(o.Evidence[0].Detail, "CN evil\x1b[31m name\nsecond line") {
 			t.Fatalf("detail %q", o.Evidence[0].Detail)
 		}
 		fsys = certFS(map[string]string{"/opt/a.pem": good("", days(5))})

@@ -552,7 +552,7 @@ func TestDockerContainerNamesAreSanitised(t *testing.T) {
 	bySubject := map[string]string{}
 	for _, e := range o.Evidence {
 		bySubject[e.Subject] = e.Detail
-		if strings.ContainsAny(e.Subject+e.Detail, "\n\x1b") {
+		if strings.ContainsAny(shown(e.Subject+e.Detail), "\n\x1b") {
 			t.Fatalf("control character in %+v", e)
 		}
 	}

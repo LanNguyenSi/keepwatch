@@ -175,7 +175,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		if strings.TrimSpace(cmdVals[0]) != "none" {
 			cmdWarn = append(cmdWarn, result.Evidence{
 				Subject: "authorizedkeyscommand",
-				Detail:  "AuthorizedKeysCommand is set (" + show(cmdVals[0]) + "); the keys it supplies cannot be checked",
+				Detail:  "AuthorizedKeysCommand is set (" + cmdVals[0] + "); the keys it supplies cannot be checked",
 			})
 		}
 	}
@@ -239,7 +239,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 			}
 			for _, k := range keys {
 				if _, dup := found[k.fp]; !dup {
-					found[k.fp] = fmt.Sprintf("%s key in %s line %d", k.typ, show(shown), k.line)
+					found[k.fp] = fmt.Sprintf("%s key in %s line %d", k.typ, shown, k.line)
 				}
 			}
 		}
@@ -299,7 +299,7 @@ func subjectList(ev []result.Evidence, n int) string {
 			s = append(s, "...")
 			break
 		}
-		s = append(s, show(e.Subject))
+		s = append(s, e.Subject)
 	}
 	return strings.Join(s, ", ")
 }
@@ -312,7 +312,7 @@ func keyReadReason(err error) string {
 	case strings.Contains(err.Error(), "escapes"):
 		return "a symbolic link or path leads out of the home directory"
 	}
-	return show(err.Error())
+	return err.Error()
 }
 
 var userNameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}\$?$`)
@@ -323,7 +323,7 @@ var userNameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}\$?$`)
 func keyAccounts(env *Env, expected map[string]map[string]bool) ([]account, []result.Evidence, error) {
 	b, err := env.FS.ReadFile(passwdFile, maxPasswd)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read %s: %s", passwdFile, clean(err.Error(), 120))
+		return nil, nil, fmt.Errorf("cannot read %s: %s", passwdFile, err.Error())
 	}
 	var warns []result.Evidence
 	byName := map[string]account{}
@@ -404,7 +404,7 @@ func expandKeyPath(pattern string, a account) (rel, abs string, err error) {
 		case 'U':
 			b.WriteString(strconv.FormatUint(uint64(a.uid), 10))
 		default:
-			return "", "", fmt.Errorf("pattern uses the token %%%s, which keepwatch does not expand", clean(string(pattern[i]), 4))
+			return "", "", fmt.Errorf("pattern uses the token %%%s, which keepwatch does not expand", string(pattern[i]))
 		}
 	}
 	p := b.String()
@@ -435,7 +435,7 @@ func parseSSHDRaw(out string) (map[string][]string, error) {
 		}
 		kw, rest, _ := strings.Cut(line, " ")
 		if !sshdKeyword.MatchString(kw) {
-			return nil, fmt.Errorf("line %d is not a keyword line: %q", i+1, clean(line, 60))
+			return nil, fmt.Errorf("line %d is not a keyword line: \"%s\"", i+1, line)
 		}
 		values[kw] = append(values[kw], strings.TrimSpace(rest))
 	}

@@ -79,8 +79,9 @@ var dockerPidFiles = []string{"/run/docker.pid", "/var/run/docker.pid"}
 // element is docker.sock; a mount of the directory that holds it is not
 // recognised). One evidence item per container with the reasons in the detail;
 // the subject is the container name. The name is text a user of the Docker
-// API chooses, so it is cut and sanitised, and a name that does not look like a
-// Docker name is replaced by "id:" and the first twelve characters of the id.
+// API chooses, so a name that does not look like a Docker name is replaced by
+// "id:" and the first twelve characters of the id, and shown in the detail as
+// the host gave it (the report cleans it).
 // An exception matches that subject, and so it covers every reason the
 // container has now or later (a limit, see the README). Required fields that are missing in the
 // inspect output are an error, never "not privileged". At most 500 running
@@ -170,7 +171,7 @@ func (d *dockerRun) names() string {
 			n = append(n, "...")
 			break
 		}
-		n = append(n, show(e.Subject))
+		n = append(n, e.Subject)
 	}
 	return strings.Join(n, ", ")
 }
@@ -179,7 +180,7 @@ func (d *dockerRun) noteText() string {
 	if len(d.notes) == 0 {
 		return ""
 	}
-	return " (" + clean(strings.Join(d.notes, "; "), 300) + ")"
+	return " (" + strings.Join(d.notes, "; ") + ")"
 }
 
 func (d *dockerRun) passText() string {
@@ -241,7 +242,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 		}
 		d.pidSeen = true
 		if err != nil {
-			d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", pf, show(err.Error())))
+			d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", pf, err.Error()))
 			return nil
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
@@ -262,7 +263,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 			d.causes = append(d.causes, err.Error())
 			return nil
 		case err != nil:
-			d.causes = append(d.causes, fmt.Sprintf("cannot examine process %d: %s", pid, clean(err.Error(), 120)))
+			d.causes = append(d.causes, fmt.Sprintf("cannot examine process %d: %s", pid, err.Error()))
 			return nil
 		case uid != 0:
 			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, which is owned by uid %d and not by root: the pid file is stale, the running daemon was not examined", pid, uid))
@@ -274,10 +275,10 @@ func (d *dockerRun) readCmdline() []tcpHost {
 			d.notes = append(d.notes, "the docker pid file is stale (no such process), the running daemon was not examined")
 			return nil
 		case err != nil:
-			d.causes = append(d.causes, fmt.Sprintf("cannot read the name of process %d: %s", pid, clean(err.Error(), 120)))
+			d.causes = append(d.causes, fmt.Sprintf("cannot read the name of process %d: %s", pid, err.Error()))
 			return nil
 		case strings.TrimSpace(string(comm)) != "dockerd":
-			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, which is %q and not dockerd: the pid file is stale, the running daemon was not examined", pid, clean(strings.TrimSpace(string(comm)), 20)))
+			d.causes = append(d.causes, fmt.Sprintf("the docker pid file names process %d, which is \"%s\" and not dockerd: the pid file is stale, the running daemon was not examined", pid, strings.TrimSpace(string(comm))))
 			return nil
 		}
 		raw, err := d.env.FS.ReadFile(proc+"/cmdline", maxCmdline)
@@ -286,7 +287,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 			d.notes = append(d.notes, "the docker pid file is stale (no such process), the running daemon was not examined")
 			return nil
 		case err != nil:
-			d.causes = append(d.causes, fmt.Sprintf("cannot read the command line of process %d: %s", pid, clean(err.Error(), 120)))
+			d.causes = append(d.causes, fmt.Sprintf("cannot read the command line of process %d: %s", pid, err.Error()))
 			return nil
 		}
 		args := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
@@ -326,7 +327,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 	add := func(v string) error {
 		tcp, known := dockerTCPHost(v)
 		if !known {
-			return fmt.Errorf("host %q is not understood", show(v))
+			return fmt.Errorf("host \"%s\" is not understood", v)
 		}
 		if tcp {
 			hosts = append(hosts, tcpHost{source: "dockerd", host: v})
@@ -363,7 +364,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 			case "tls", "tlsverify":
 				on := !hasVal || val == "true"
 				if hasVal && val != "true" && val != "false" {
-					return nil, "", tls, fmt.Errorf("--%s=%s is not understood", name, show(val))
+					return nil, "", tls, fmt.Errorf("--%s=%s is not understood", name, val)
 				}
 				if name == "tlsverify" {
 					tls.verify = on
@@ -403,7 +404,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 					group = group[1:]
 				default:
 					if strings.Contains(a, "H") {
-						return nil, "", tls, fmt.Errorf("the flags %q cannot be read, and may hold -H", show(a))
+						return nil, "", tls, fmt.Errorf("the flags \"%s\" cannot be read, and may hold -H", a)
 					}
 					break letters
 				}
@@ -417,7 +418,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 // exists.
 func (d *dockerRun) readConfig(file string) ([]tcpHost, bool) {
 	if !pathOK(file) {
-		d.causes = append(d.causes, fmt.Sprintf("the daemon config file %q is not an absolute path", show(file)))
+		d.causes = append(d.causes, fmt.Sprintf("the daemon config file \"%s\" is not an absolute path", file))
 		return nil, true
 	}
 	b, err := d.env.FS.ReadFile(file, maxDockerConfig)
@@ -425,12 +426,12 @@ func (d *dockerRun) readConfig(file string) ([]tcpHost, bool) {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false
 	case err != nil:
-		d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", show(file), show(err.Error())))
+		d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", file, err.Error()))
 		return nil, true
 	}
 	hosts, err := parseDaemonJSON(b)
 	if err != nil {
-		d.causes = append(d.causes, fmt.Sprintf("%s: %v", show(file), err))
+		d.causes = append(d.causes, fmt.Sprintf("%s: %v", file, err))
 		return nil, true
 	}
 	return hosts, true
@@ -466,7 +467,7 @@ func parseDaemonJSON(b []byte) ([]tcpHost, error) {
 	for _, h := range hosts {
 		tcp, known := dockerTCPHost(h)
 		if !known {
-			return nil, fmt.Errorf("host %q is not understood", show(h))
+			return nil, fmt.Errorf("host \"%s\" is not understood", h)
 		}
 		if tcp {
 			out = append(out, tcpHost{source: "daemon.json", host: h, tls: tls})
@@ -508,7 +509,7 @@ func (d *dockerRun) containers(ctx context.Context) bool {
 			continue
 		}
 		if !hexID.MatchString(line) {
-			d.causes = append(d.causes, fmt.Sprintf("docker ps printed %q, not a container id", clean(line, 40)))
+			d.causes = append(d.causes, fmt.Sprintf("docker ps printed \"%s\", not a container id", line))
 			return true
 		}
 		ids = append(ids, line)
@@ -629,7 +630,7 @@ func containerSubject(c inspected) (string, string) {
 	if dockerNameRe.MatchString(name) {
 		return name, ""
 	}
-	return "id:" + c.ID[:12], fmt.Sprintf("name %q (sanitised); ", show(name))
+	return "id:" + c.ID[:12], fmt.Sprintf("name \"%s\"; ", name)
 }
 
 var dockerSocketPaths = map[string]bool{"/var/run/docker.sock": true, "/run/docker.sock": true}
@@ -676,7 +677,7 @@ func containerReasons(c inspected) ([]string, error) {
 	}
 	sort.Strings(paths)
 	for _, s := range paths {
-		r = append(r, "docker socket mounted ("+show(s)+")")
+		r = append(r, "docker socket mounted ("+s+")")
 	}
 	return r, nil
 }
