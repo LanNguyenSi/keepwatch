@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a new check or capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What problem on your server does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: The check, flag or behaviour you have in mind, and what it would read or run on the host.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

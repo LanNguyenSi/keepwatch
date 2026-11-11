@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a defect in keepwatch
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through private vulnerability reporting, not a
+        public issue; see SECURITY.md. Remove secrets (ntfy token, hostnames
+        you do not want public) from everything you paste below.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - a check (probe or verdict)
+        - report or change diff
+        - notification (ntfy)
+        - install, uninstall or doctor
+        - configuration
+        - docs
+        - other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Expected vs. actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Commands you ran and the relevant configuration, redacted.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Report, log or doctor output, redacted.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: keepwatch version
+      description: Output of `keepwatch version`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: "Ubuntu 24.04, amd64"
+    validations:
+      required: true

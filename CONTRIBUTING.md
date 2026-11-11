@@ -1,5 +1,8 @@
 # Contributing
 
+Participation in this project is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Build and test
 
 ```sh
