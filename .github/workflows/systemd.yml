@@ -1,0 +1,35 @@
+name: Sandbox measurement
+
+# Runs `make systemd` (see "Sandbox measurement" in the README): Ubuntu 22.04
+# and 24.04 containers with systemd as PID 1 on an x86_64 runner. The committed
+# files in test/systemd are compared with what the sandbox does there, so they
+# cannot rot, and the weekly run notices a systemd that hides a new directory.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  # Every pull request: the answers depend on the whole binary (the
+  # configuration loader refuses some paths before the placement rules do).
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: systemd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  systemd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: sandbox measurement
+        run: make systemd
