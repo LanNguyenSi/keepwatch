@@ -1,13 +1,48 @@
-# gitleaks config: default rules plus a path allowlist for test fixtures
-# that contain fake secrets on purpose.
+# gitleaks config: default rules plus a value-scoped allowlist for the four
+# test fixtures that contain fake secrets on purpose. A finding is ignored
+# only when its matched text contains one of the known fake values below, so
+# a real secret added to these files later is still reported in every scan
+# mode.
+#
+# Why the entry has no "paths" list: gitleaks v8.28.0 evaluates allowlist
+# paths at file level in "dir" scans (PathAllowed skips the whole file
+# regardless of condition), so a paths+regexes AND entry would keep ignoring
+# these files wholesale in working-tree scans. Verified empirically: with a
+# paths+regexes+AND entry a planted GitHub token in an allowlisted test file
+# went undetected by "dir"; without paths it is detected. The regexes are
+# specific enough to occur only in the four files named below.
+#
+# Known fake values and the file each one lives in:
+#   QXV0aFNlY3JldA                       internal/cli/install_test.go (fake basic-auth query)
+#   QXV0aFNlY3JldA                       internal/notify/validate_test.go (same fake URL)
+#   tk_0123456789abcdefghijklmnopqrs      internal/cli/notify_test.go (testToken)
+#   hunter2 in ENCRYPTION_KEY=hunter2    internal/redact/redact_test.go (redaction fixture)
+#   hunter2 in SECRET_KEY=hunter2        internal/redact/redact_test.go (redaction fixture)
+#   hunter2 in SIGNING_KEY=hunter2       internal/redact/redact_test.go (redaction fixture)
+#   hunter2 in passwd=hunter2            internal/redact/redact_test.go (redaction fixture)
+#   abcDEF123456                         internal/redact/redact_test.go (x-api-key / APIKEY fixture)
+#   abc123def456                         internal/redact/redact_test.go (private_key fixture)
+#   b3BlbnNzaC1rZXktdjEAAAAABG5vbmU       internal/redact/redact_test.go (fakeKey body)
+#   -----BEGIN PRIVATE KEY----- head      internal/redact/redact_test.go (cut-off fake key)
+#   -----BEGIN RSA PRIVATE KEY----- head  internal/redact/redact_test.go (fake RSA key)
+
 [extend]
 useDefault = true
 
-[allowlist]
-description = "test fixtures with intentionally fake secrets"
-paths = [
-  '''^internal/redact/redact_test\.go$''',
-  '''^internal/notify/validate_test\.go$''',
-  '''^internal/cli/notify_test\.go$''',
-  '''^internal/cli/install_test\.go$'''
+[[allowlists]]
+description = "fake secret values in test fixtures, matched by value only"
+condition = "AND"
+regexTarget = "match"
+regexes = [
+  '''QXV0aFNlY3JldA''',
+  '''tk_0123456789abcdefghijklmnopqrs''',
+  '''ENCRYPTION_KEY=hunter2''',
+  '''SECRET_KEY=hunter2''',
+  '''SIGNING_KEY=hunter2''',
+  '''passwd=hunter2''',
+  '''abcDEF123456''',
+  '''abc123def456''',
+  '''b3BlbnNzaC1rZXktdjEAAAAABG5vbmU''',
+  '''-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBg''',
+  '''-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA'''
 ]
