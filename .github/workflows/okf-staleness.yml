@@ -18,6 +18,10 @@ name: OKF staleness
 # protection: a PR that removes or renames docs/okf goes red here by
 # design (tool-error posture, exit 2), and warn-only must stay
 # non-blocking.
+#
+# Deviation: okf-kit's citations-resolve rule skips `.go` files, so in
+# this repo the job catches STALE docs and structure errors, not broken
+# line citations into Go code.
 
 on:
   pull_request:

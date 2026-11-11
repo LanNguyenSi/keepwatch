@@ -15,8 +15,8 @@ sources:
 
 Every program keepwatch starts goes through `execx` and nothing else: the
 package is the single seam, never invokes a shell, and only runs allowlisted
-programs (`internal/execx/execx.go:1#"single seam"`); `os/exec` is
-imported nowhere else in the tree. The probe rule that rests on this is
+programs (`internal/execx/execx.go:1#"single seam"`); no production
+package outside `execx` imports `os/exec`. The probe rule that rests on this is
 stated in `internal/probes/probes.go` (read-only probes, programs only
 through the injected Runner); what the engine and `doctor` must get right
 when they build and question that seam is what this note collects.
@@ -63,7 +63,7 @@ period is one variable (`internal/execx/execx.go:12-13#"A variable so tests can 
 both the timeout/cancel path and the path after `Run` returns SIGKILL the
 whole group (`internal/execx/kill_unix.go:11-20#"kills the whole group"`,
 `internal/execx/kill_unix.go:22-30#"never outlive the call"`), and the same
-duration bounds `os/exec`'s own `WaitDelay` (`internal/execx/kill_unix.go:19`).
+duration bounds `os/exec`'s own `WaitDelay` (`internal/execx/kill_unix.go:19#"cmd.WaitDelay = waitDelay"`).
 A timeout is distinguishable from parent cancellation: hitting `Opts.Timeout`
 returns `ErrTimeout`, while a parent context ending first returns the
 context's error, never `ErrTimeout` (`internal/execx/real.go:257-258#"never ErrTimeout"`).

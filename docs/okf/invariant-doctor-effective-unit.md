@@ -67,8 +67,9 @@ mode of a non-UTF-8 name (systemd itself refuses to answer) is documented in
 `docs/install.md`, and lands in the cannot-ask branch above.
 
 **Which configuration to believe.** Without `--config`, doctor examines the
-file the installed check service is given by its own `ExecStart`, and only
-falls back to the default path when no service is installed; a service
+file named by an absolute `--config` in the `ExecStart` of the first of our
+installed services that has one, and falls back to the default path
+otherwise; a service
 running with another file is a problem naming both files, and is judged by
 its own file too (`internal/doctor/doctor.go:285-306#"func (d Deps) configPath"`,
 `internal/doctor/doctor.go:591-605#"but this doctor run examined"`). The

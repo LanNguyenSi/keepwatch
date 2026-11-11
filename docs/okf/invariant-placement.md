@@ -11,6 +11,7 @@ sources:
   - internal/install/install.go
   - internal/install/stateprobe.go
   - internal/install/units_test.go
+  - internal/config/walk.go
   - internal/install/measured_test.go
   - internal/doctor/doctor.go
   - docs/install.md

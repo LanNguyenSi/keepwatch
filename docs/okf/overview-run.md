@@ -51,8 +51,11 @@ delivery) is `docs/running.md`; this note only maps it onto the code.
    A signal aborts the whole run on the spot: partial results are neither
    reported nor stored.
 
-4. The comparison only sees snapshots. The exit code is decided from this
-   run's results alone (`internal/cli/check.go:163#"code := ExitCode"`). This
+4. The comparison only sees snapshots. The exit code starts from this
+   run's results alone (`internal/cli/check.go:163#"code := ExitCode"`) and
+   is forced to 3 when the state could not be used
+   (`internal/cli/check.go:211-213#"code = ExitInternal"`); a failed delivery
+   later returns 4 instead (`internal/cli/check.go:306-308#"return ExitDelivery"`). This
    run's snapshot is built with the run's redactor as its only cleaner
    (`internal/cli/check.go:174#"build(results, now, red.Clean)"`); the state
    directory is opened (`internal/cli/check.go:180#"state.Open(cfg.StateDir"`),
@@ -62,7 +65,7 @@ delivery) is `docs/running.md`; this note only maps it onto the code.
    `diff.Compute` compares the two
    (`internal/cli/check.go:200#"diff.Compute(lr.State, cur)"`), by keys that
    are SHA-256 over the raw subjects (`internal/result/evidenceset.go:44#"func SubjectKey"`).
-   The exit code and the comparison never read each other: the code says
+   The diff itself never feeds the exit code: the code says
    what is bad now, the diff says what changed, and only the second is worth
    a message.
 
