@@ -142,7 +142,19 @@ func TestMergeKeepsTheRulesForSameKinds(t *testing.T) {
 }
 
 func TestMergeKindChangeThroughAliases(t *testing.T) {
-	// An alias counts as the kind of its anchor.
+	// An alias counts as the kind of its anchor: the same kind is not an
+	// error, another one is.
+	for _, c := range []struct{ name, anchor, later string }{
+		{"sequence", "[1]", "[2]"},
+		{"scalar", "5", "6"},
+		{"mapping", "{a: 1}", "{b: 2}"},
+	} {
+		_, errs := mergeFiles(t, []string{"main.yaml", "a.yaml"},
+			[]string{"base: &b " + c.anchor + "\nk: *b\n", "k: " + c.later + "\n"})
+		if len(errs) != 0 {
+			t.Errorf("alias of a %s replaced by a %s: errors = %v, want none", c.name, c.name, errs)
+		}
+	}
 	_, errs := mergeFiles(t, []string{"main.yaml", "a.yaml"},
 		[]string{"base: &b [1]\nk: *b\n", "k: 5\n"})
 	if len(errs) != 1 || errs[0].Msg != "k in a.yaml:1 changes the type set in main.yaml:2" {
