@@ -2,13 +2,36 @@
 
 A small, self-hosted guardian for Linux servers.
 
-Status: pre-MVP, under active development. Not ready for use.
+Status: stage 0 is usable: posture checks, reports of what changed, ntfy
+notifications, a weekly report, and a systemd install with a hardened
+sandbox. keepwatch is pre-1.0, so command-line flags, configuration keys and
+the JSON report may still change between minor versions.
 
 keepwatch checks the security posture of a host (for example: is fail2ban
 running, is SSH password login disabled, which ports are listening), reports
 only what changed since the last run, and sends the result to a notification
 channel. Later stages add log-based detection, optional triage with a local
 LLM, and policy-gated, human-approved actions with a tamper-evident audit log.
+
+## Requirements
+
+A Linux server with systemd. The checks and `install` run as root.
+Tested on Ubuntu 22.04 and 24.04; releases ship static binaries for amd64 and
+arm64. Building from source needs Go 1.27 or newer.
+
+## Roadmap
+
+The later stages below are planned, not built, and carry no dates:
+
+- Log-based detection: watch the host's logs for attack patterns, not only
+  the posture of the host.
+- Optional triage with a local LLM: a local model may summarize and rank the
+  findings, with no data leaving the host.
+- Policy-gated, human-approved actions: keepwatch may propose a fix, a
+  policy decides whether it may propose it at all, and nothing runs without
+  a person approving it.
+- A tamper-evident audit log shipped off the host: findings and actions
+  recorded in a log copied off the host, so it cannot be rewritten quietly.
 
 ## Build
 
@@ -1192,12 +1215,15 @@ refused"). The `notify` line of the report shows only `scheme://host[:port]` of 
 
 ## Status
 
-Pre-MVP. The command line skeleton, the program execution layer, the
-strict configuration loader, the check engine with twelve check kinds, the state
-of the last run, the comparison, the text, JSON and Markdown reports, the ntfy
-notification and the weekly report exist; `check`, `report --weekly`, `config check`,
-`init`, `install`, `uninstall` and `doctor` are implemented, while `report` without
-`--weekly` is a stub that exits with status 3.
+Stage 0 is complete as listed at the top of this file: posture checks, change
+reports, ntfy notifications, the weekly report, and the systemd install with
+a hardened sandbox. Concretely: the command line skeleton, the program
+execution layer, the strict configuration loader, the check engine with twelve
+check kinds, the state of the last run, the comparison, the text, JSON and
+Markdown reports, the ntfy notification and the weekly report exist; `check`,
+`report --weekly`, `config check`, `init`, `install`, `uninstall` and `doctor`
+are implemented, while `report` without `--weekly` is still a stub that exits
+with status 3. The later stages are listed in the [Roadmap](#roadmap).
 
 ## License
 
