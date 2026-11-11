@@ -63,6 +63,7 @@ The reference material lives in `docs/`:
 - [docs/running.md](docs/running.md): `check` in detail: exit codes, the comparison with the last run, state, notifications, the weekly report, history, output safety and redaction.
 - [docs/install.md](docs/install.md): installing from a release, and the scheduled runs: `install`, `uninstall`, `doctor`, the paths and the hardening of the units.
 - [docs/development.md](docs/development.md): build, test, end-to-end tests and the sandbox measurement.
+- [docs/okf/index.md](docs/okf/index.md): the knowledge bundle: how a run is wired, the invariants that must not break, and the known limits.
 - [CONTRIBUTING.md](CONTRIBUTING.md): rules for changes.
 - [SECURITY.md](SECURITY.md): reporting a vulnerability.
 
