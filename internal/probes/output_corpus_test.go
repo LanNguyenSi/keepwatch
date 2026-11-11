@@ -334,7 +334,7 @@ func TestProbesKeepTheHostTextAsItIs(t *testing.T) {
 				t.Fatal("the text of the host is in no text of the outcome")
 			}
 			for _, sep := range []string{"-", "\t", "\n", "\x01", "\x1b"} {
-				for _, pad := range []int{5, 60, 250} {
+				for _, pad := range []int{5, 60, 250, 2100} {
 					frag, ok := fragFor(role, token, sep, pad)
 					if !ok {
 						continue
