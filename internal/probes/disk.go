@@ -45,7 +45,11 @@ const defaultStatfsTimeout = 10 * time.Second
 // system (nfs, cifs, fuse.sshfs) that hangs would otherwise block the run, and
 // pseudo file systems have no meaningful usage. A line of mountinfo that does
 // not parse is error. For a mount point that appears more than once the last
-// entry is the visible one. Usage comes from statfs(2) on the mount point
+// entry is the visible one. Mounts that share one device (the major:minor of
+// mountinfo field 3, such as the bind mounts a systemd sandbox adds for /tmp
+// or a state directory) are judged once: the entry with the shortest mount
+// point is kept, and on a tie the first one in mountinfo order. Usage comes
+// from statfs(2) on the mount point
 // (injected, Env.Statfs), with the timeout of Env.StatfsTimeout (default 10
 // seconds) per call; a mount that cannot be read, times out or reports
 // inconsistent numbers is error with the findings of the others kept.
@@ -93,7 +97,7 @@ type diskProbe struct {
 	types      map[string]bool
 }
 
-type mount struct{ point, fstype string }
+type mount struct{ point, fstype, dev string }
 
 func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	b, err := env.FS.ReadFile(mountinfoFile, maxMountinfo)
@@ -110,6 +114,7 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 			wanted = append(wanted, m)
 		}
 	}
+	wanted = dedupeByDevice(wanted)
 	if len(wanted) == 0 {
 		return Outcome{Status: result.Skipped, Summary: "no mounted file system of the checked types, check skipped"}
 	}
@@ -174,6 +179,29 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 		}
 	}
 	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d file system(s) below %d%%", len(wanted), d.warn)}
+}
+
+// dedupeByDevice judges each device (major:minor) once: of the mounts that
+// share one it keeps the one with the shortest mount point, the first in
+// order on a tie, at the position of the device's first appearance. Bind
+// mounts (a systemd sandbox bind-mounting /tmp, /var/tmp and a state
+// directory of the file system it already sees) and subvolumes of one device
+// (btrfs mounted at / and /home) would otherwise be judged several times
+// with the same numbers.
+func dedupeByDevice(ms []mount) []mount {
+	at := make(map[string]int, len(ms))
+	out := make([]mount, 0, len(ms))
+	for _, m := range ms {
+		if i, ok := at[m.dev]; ok {
+			if len(m.point) < len(out[i].point) {
+				out[i] = m
+			}
+			continue
+		}
+		at[m.dev] = len(out)
+		out = append(out, m)
+	}
+	return out
 }
 
 // statfsWithTimeout calls f in its own goroutine and gives up after timeout. A
@@ -253,7 +281,7 @@ func parseMountinfo(content string) ([]mount, error) {
 		if err != nil || !strings.HasPrefix(point, "/") {
 			return nil, fmt.Errorf("line %d has an unusable mount point", i+1)
 		}
-		m := mount{point: point, fstype: f[sep+1]}
+		m := mount{point: point, fstype: f[sep+1], dev: f[2]}
 		if j, ok := index[point]; ok {
 			out[j] = m
 			continue

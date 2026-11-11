@@ -66,11 +66,13 @@ func TestDiskUsageCapturedMountinfo(t *testing.T) {
 	for _, v := range versions {
 		t.Run(v, func(t *testing.T) {
 			files := probestest.MemFS{"/proc/self/mountinfo": fixtureFile(t, v+"/mountinfo.stdout")}
-			// the container's /etc/hosts and friends are ext4 bind mounts of single files
+			// the container's /etc/hosts, /etc/hostname and /etc/resolv.conf are
+			// ext4 bind mounts of single files on one device: judged once, at
+			// the shortest mount point /etc/hosts
 			st := &statfsMap{by: map[string]probes.Statfs{"/mnt/kw ext4": usage(95, 3), "/etc/hosts": usage(1, 1), "/etc/hostname": usage(1, 1), "/etc/resolv.conf": usage(1, 1)}}
 			o := execDisk(diskProbe(t, nil), files, st)
 			wantStatus(t, o, result.Fail)
-			if !eq(subjects(o), []string{"/mnt/kw ext4"}) || len(st.called) != 4 {
+			if !eq(subjects(o), []string{"/mnt/kw ext4"}) || len(st.called) != 2 {
 				t.Fatalf("subjects %v, statfs called for %q", subjects(o), st.called)
 			}
 			if d := o.Evidence[0].Detail; d != "95% of the blocks used, 3% of the inodes used (ext4)" {
@@ -85,7 +87,8 @@ func TestDiskUsageCapturedMountinfo(t *testing.T) {
 			}}
 			o = execDisk(diskProbe(t, map[string]any{"fstypes": []any{"ext4", "tmpfs"}}), files, st)
 			wantStatus(t, o, result.Fail)
-			if len(st.called) != 9 {
+			// three /etc/* bind mounts became one: the device is judged once
+			if len(st.called) != 7 {
 				t.Fatalf("statfs called for %q", st.called)
 			}
 			if !eq(subjects(o), []string{"/mnt/kw-nl\nline"}) {
