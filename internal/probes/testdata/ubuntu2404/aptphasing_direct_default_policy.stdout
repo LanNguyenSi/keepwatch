@@ -1,0 +1,54 @@
+kwdep:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500
+        500 file:/srv/kwrepo noble-updates/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+kwsec:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500
+        500 file:/srv/kwrepo noble-security/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+kwsecph:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500 (phased 0%)
+        500 file:/srv/kwrepo noble-security/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+kwph1:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500 (phased 0%)
+        500 file:/srv/kwrepo noble-updates/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+kwph2:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500 (phased 0%)
+        500 file:/srv/kwrepo noble-updates/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status
+kwph3:
+  Installed: 1.0
+  Candidate: 1.1
+  Version table:
+     1.1 500 (phased 0%)
+        500 file:/srv/kwrepo noble-updates/main arm64 Packages
+ *** 1.0 500
+        500 file:/srv/kwrepo noble/main arm64 Packages
+        100 /var/lib/dpkg/status

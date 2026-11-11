@@ -1,0 +1,19 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following NEW packages will be installed:
+  kwnew
+The following packages have been kept back:
+  kwph1 kwph2 kwph3
+The following packages will be upgraded:
+  kwdep kwsec kwsecph
+3 upgraded, 1 newly installed, 0 to remove and 3 not upgraded.
+Inst kwnew (1.0 kwtest:jammy-updates [all])
+Inst kwdep [1.0] (1.1 kwtest:jammy-updates [all])
+Inst kwsec [1.0] (1.1 kwtest:jammy-security [all])
+Inst kwsecph [1.0] (1.1 kwtest:jammy-security [all])
+Conf kwnew (1.0 kwtest:jammy-updates [all])
+Conf kwdep (1.1 kwtest:jammy-updates [all])
+Conf kwsec (1.1 kwtest:jammy-security [all])
+Conf kwsecph (1.1 kwtest:jammy-security [all])
