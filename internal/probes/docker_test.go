@@ -561,9 +561,14 @@ func TestDockerContainerNamesAreSanitised(t *testing.T) {
 	}
 	for _, id := range ids[1:] {
 		d, ok := bySubject["id:"+id[:12]]
-		if !ok || !strings.Contains(d, "name \"") || !strings.HasSuffix(d, "privileged") || len(d) > 120 {
+		if !ok || !strings.Contains(d, "name \"") || !strings.HasSuffix(d, "privileged") {
 			t.Fatalf("subject for %s: %v", id[:12], subjects(o))
 		}
+	}
+	// the probe does not cut the name: the report redacts the detail first and
+	// cuts it after, so a secret in a long name is not cut in half
+	if d := bySubject["id:"+ids[2][:12]]; !strings.Contains(d, strings.Repeat("a", 300)) {
+		t.Fatalf("detail %q", d)
 	}
 }
 

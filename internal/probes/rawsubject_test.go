@@ -2,6 +2,8 @@ package probes_test
 
 import (
 	"encoding/json"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -209,7 +211,7 @@ func TestPartialSummaryShowsACleanedSubject(t *testing.T) {
 	p := certProbe(t, map[string]any{"paths": []any{"/opt/certs/missing.pem"}, "globs": []any{"/opt/certs/*.pem"}})
 	o := execCert(p, certFS(files))
 	wantStatus(t, o, result.Error)
-	wantSummary(t, o, "also found: /opt/certs/a?[31m?.pem")
+	wantSummary(t, o, `also found: /opt/certs/a\x1b[31m\n.pem`)
 	if !eq(subjects(o), []string{"/opt/certs/a\x1b[31m\n.pem"}) {
 		t.Fatalf("subjects %q", subjects(o))
 	}
@@ -217,3 +219,106 @@ func TestPartialSummaryShowsACleanedSubject(t *testing.T) {
 		t.Fatalf("summary %q", o.Summary)
 	}
 }
+
+// A summary is redacted by the report after the probe built it, and cut after
+// that. A probe that cut a subject first would leave the front of a secret
+// that no pattern matches any more. The secret is placed so that every cut
+// length a probe used (60 to 300 runes) falls inside it.
+func TestSummariesAreRedactedBeforeTheyAreCut(t *testing.T) {
+	const (
+		tokenSecret = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ" // 36 characters after the prefix
+		urlUser     = "user:hunter2yyyyyyyyyyyy"
+	)
+	if len(tokenSecret) != 40 {
+		t.Fatal("test token")
+	}
+	type role struct {
+		name   string
+		status result.Status
+		// slash: the subject may hold a URL (a "//"), which a clean absolute
+		// path cannot
+		slash bool
+		run   func(t *testing.T, frag string) probes.Outcome
+	}
+	missingCert := func(t *testing.T, frag string) probes.Outcome {
+		p := certProbe(t, map[string]any{"paths": []any{"/opt/certs/" + frag + ".pem"}, "globs": []any{}})
+		return execCert(p, certFS(map[string]string{}))
+	}
+	roles := []role{
+		{"cert failing list (subjectList)", result.Fail, false, func(t *testing.T, f string) probes.Outcome {
+			return rawSubjectCases()[0].run(t, f)
+		}},
+		{"cert partial result (partialError)", result.Error, false, func(t *testing.T, f string) probes.Outcome {
+			files := map[string]string{"/opt/certs/" + f + ".pem": pemCert(t, "site.example.test", time.Now().Add(-days(3)))}
+			p := certProbe(t, map[string]any{"paths": []any{"/opt/certs/missing.pem"}, "globs": []any{"/opt/certs/*.pem"}})
+			return execCert(p, certFS(files))
+		}},
+		{"cert cause of a listed path that does not exist", result.Error, false, missingCert},
+		{"cert soonest path of a passing check", result.Pass, false, func(t *testing.T, f string) probes.Outcome {
+			files := map[string]string{"/opt/certs/" + f + ".pem": pemCert(t, "site.example.test", time.Now().Add(days(200)))}
+			p := certProbe(t, map[string]any{"paths": []any{}, "globs": []any{"/opt/certs/*.pem"}})
+			return execCert(p, certFS(files))
+		}},
+		{"disk failing list (subjectList)", result.Fail, true, func(t *testing.T, f string) probes.Outcome {
+			return rawSubjectCases()[1].run(t, f)
+		}},
+		{"disk cause of a mount that cannot be read", result.Error, true, func(t *testing.T, f string) probes.Outcome {
+			point := "/mnt/" + f
+			st := &statfsMap{errs: map[string]error{point: errors.New("boom")}}
+			return execDisk(diskProbe(t, map[string]any{"fstypes": []any{"ext4"}}), mountFS(mi(7, point, "ext4")), st)
+		}},
+		{"docker TCP finding (names)", result.Fail, true, func(t *testing.T, f string) probes.Outcome {
+			return rawSubjectCases()[2].run(t, f)
+		}},
+		{"docker cause of a host that is not understood", result.Error, true, func(t *testing.T, f string) probes.Outcome {
+			b, err := json.Marshal(map[string]any{"hosts": []string{"ftp://" + f}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			none := newRunner().AddResult(dockerPs, inline("", 0))
+			return exec(dockerProbe(t), none, dockerHost(string(b), ""))
+		}},
+		{"authorized_keys warnings (subjectList)", result.Warn, false, func(t *testing.T, f string) probes.Outcome {
+			return rawSubjectCases()[4].run(t, f)
+		}},
+	}
+	offsets := []int{20, 45, 65, 85, 105, 125, 160, 190, 265}
+	for _, r := range roles {
+		for _, off := range offsets {
+			forms := map[string]string{"token": strings.Repeat("a", off) + "-" + tokenSecret}
+			if r.slash {
+				forms["url"] = "ok" + strings.Repeat("a", off) + "/https://" + urlUser + "@host"
+				if r.name == "docker TCP finding (names)" || strings.HasPrefix(r.name, "docker cause") {
+					// the user info runs from the "//" of the scheme the host has
+					forms["url"] = strings.Repeat("a", off) + urlUser + "@host"
+				}
+			}
+			for form, frag := range forms {
+				t.Run(r.name+"/"+form+"/"+itoa(off), func(t *testing.T) {
+					o := r.run(t, frag)
+					if o.Status != r.status {
+						t.Fatalf("status %s (%s), want %s", o.Status, o.Summary, r.status)
+					}
+					secretPart := tokenSecret
+					if form == "url" {
+						secretPart = urlUser
+					}
+					if !strings.Contains(o.Summary, secretPart) {
+						t.Fatalf("the summary does not hold the whole secret, so a probe cut it: %q", o.Summary)
+					}
+					shown := redact.Default().Clean(o.Summary)
+					for _, leak := range []string{"ZZZZZ", "ghp_Z", "hunter2", "yyyyyy"} {
+						if strings.Contains(shown, leak) {
+							t.Fatalf("the shown summary holds %q of the secret: %q", leak, shown)
+						}
+					}
+					if !strings.Contains(shown, "[REDACTED]") {
+						t.Fatalf("nothing was redacted in %q", shown)
+					}
+				})
+			}
+		}
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

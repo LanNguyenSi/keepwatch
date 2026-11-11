@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -81,6 +82,14 @@ func firstLine(b []byte) string {
 	}
 	return s
 }
+
+// show makes a subject, a path or another name taken from the host safe to
+// put into a summary or a detail: the same escaping the report applies to the
+// evidence (redact.Escape), and no cut. A probe must not cut such text: the
+// report redacts a summary after the probe built it, and a secret cut in the
+// middle no longer matches its pattern. The report cuts the whole field after
+// it redacted it.
+func show(s string) string { return redact.Escape(s) }
 
 // clean makes host-supplied text safe to show: control characters, invalid
 // UTF-8 and non-printable runes become "?", and the text is cut to max

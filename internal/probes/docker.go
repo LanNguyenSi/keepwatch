@@ -170,7 +170,7 @@ func (d *dockerRun) names() string {
 			n = append(n, "...")
 			break
 		}
-		n = append(n, clean(e.Subject, maxSummarySubject))
+		n = append(n, show(e.Subject))
 	}
 	return strings.Join(n, ", ")
 }
@@ -241,7 +241,7 @@ func (d *dockerRun) readCmdline() []tcpHost {
 		}
 		d.pidSeen = true
 		if err != nil {
-			d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", pf, clean(err.Error(), 120)))
+			d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", pf, show(err.Error())))
 			return nil
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
@@ -326,7 +326,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 	add := func(v string) error {
 		tcp, known := dockerTCPHost(v)
 		if !known {
-			return fmt.Errorf("host %q is not understood", clean(v, 60))
+			return fmt.Errorf("host %q is not understood", show(v))
 		}
 		if tcp {
 			hosts = append(hosts, tcpHost{source: "dockerd", host: v})
@@ -363,7 +363,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 			case "tls", "tlsverify":
 				on := !hasVal || val == "true"
 				if hasVal && val != "true" && val != "false" {
-					return nil, "", tls, fmt.Errorf("--%s=%s is not understood", name, clean(val, 20))
+					return nil, "", tls, fmt.Errorf("--%s=%s is not understood", name, show(val))
 				}
 				if name == "tlsverify" {
 					tls.verify = on
@@ -403,7 +403,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 					group = group[1:]
 				default:
 					if strings.Contains(a, "H") {
-						return nil, "", tls, fmt.Errorf("the flags %q cannot be read, and may hold -H", clean(a, 30))
+						return nil, "", tls, fmt.Errorf("the flags %q cannot be read, and may hold -H", show(a))
 					}
 					break letters
 				}
@@ -417,7 +417,7 @@ func parseDockerdArgs(args []string) (hosts []tcpHost, cfg string, tls tlsInfo, 
 // exists.
 func (d *dockerRun) readConfig(file string) ([]tcpHost, bool) {
 	if !pathOK(file) {
-		d.causes = append(d.causes, fmt.Sprintf("the daemon config file %q is not an absolute path", clean(file, 80)))
+		d.causes = append(d.causes, fmt.Sprintf("the daemon config file %q is not an absolute path", show(file)))
 		return nil, true
 	}
 	b, err := d.env.FS.ReadFile(file, maxDockerConfig)
@@ -425,12 +425,12 @@ func (d *dockerRun) readConfig(file string) ([]tcpHost, bool) {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false
 	case err != nil:
-		d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", clean(file, 80), clean(err.Error(), 120)))
+		d.causes = append(d.causes, fmt.Sprintf("cannot read %s: %s", show(file), show(err.Error())))
 		return nil, true
 	}
 	hosts, err := parseDaemonJSON(b)
 	if err != nil {
-		d.causes = append(d.causes, fmt.Sprintf("%s: %v", clean(file, 80), err))
+		d.causes = append(d.causes, fmt.Sprintf("%s: %v", show(file), err))
 		return nil, true
 	}
 	return hosts, true
@@ -466,7 +466,7 @@ func parseDaemonJSON(b []byte) ([]tcpHost, error) {
 	for _, h := range hosts {
 		tcp, known := dockerTCPHost(h)
 		if !known {
-			return nil, fmt.Errorf("host %q is not understood", clean(h, 60))
+			return nil, fmt.Errorf("host %q is not understood", show(h))
 		}
 		if tcp {
 			out = append(out, tcpHost{source: "daemon.json", host: h, tls: tls})
@@ -629,7 +629,7 @@ func containerSubject(c inspected) (string, string) {
 	if dockerNameRe.MatchString(name) {
 		return name, ""
 	}
-	return "id:" + c.ID[:12], fmt.Sprintf("name %q (sanitised); ", clean(name, 40))
+	return "id:" + c.ID[:12], fmt.Sprintf("name %q (sanitised); ", show(name))
 }
 
 var dockerSocketPaths = map[string]bool{"/var/run/docker.sock": true, "/run/docker.sock": true}
@@ -676,7 +676,7 @@ func containerReasons(c inspected) ([]string, error) {
 	}
 	sort.Strings(paths)
 	for _, s := range paths {
-		r = append(r, "docker socket mounted ("+clean(s, 60)+")")
+		r = append(r, "docker socket mounted ("+show(s)+")")
 	}
 	return r, nil
 }

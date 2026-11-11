@@ -123,12 +123,12 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	for _, m := range wanted {
 		st, serr := statfsWithTimeout(ctx, env.statfs(), m.point, timeout)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %s", clean(m.point, 80), clean(serr.Error(), 100)))
+			causes = append(causes, fmt.Sprintf("statfs %s: %s", show(m.point), show(serr.Error())))
 			continue
 		}
 		blocks, inodes, serr := usagePercent(st)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %v", clean(m.point, 80), serr))
+			causes = append(causes, fmt.Sprintf("statfs %s: %v", show(m.point), serr))
 			continue
 		}
 		worst := blocks

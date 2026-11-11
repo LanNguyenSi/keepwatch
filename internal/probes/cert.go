@@ -117,7 +117,7 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 	for _, g := range c.globs {
 		matches, err := env.glob(g)
 		if err != nil {
-			return *errorOutcome("glob %s: %s", clean(g, 80), clean(err.Error(), 120))
+			return *errorOutcome("glob %s: %s", show(g), show(err.Error()))
 		}
 		for _, m := range matches {
 			cand[m] = true
@@ -151,17 +151,17 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 			case errors.Is(err, fs.ErrNotExist) && !listed[f]:
 				continue // vanished between the glob and the read
 			case errors.Is(err, fs.ErrNotExist):
-				causes = append(causes, fmt.Sprintf("%s does not exist", clean(f, 100)))
+				causes = append(causes, fmt.Sprintf("%s does not exist", show(f)))
 			case errors.Is(err, ErrTooLarge):
-				causes = append(causes, fmt.Sprintf("%s is larger than %d KiB", clean(f, 100), maxCertFile>>10))
+				causes = append(causes, fmt.Sprintf("%s is larger than %d KiB", show(f), maxCertFile>>10))
 			default:
-				causes = append(causes, fmt.Sprintf("%s: %s", clean(f, 100), clean(err.Error(), 300)))
+				causes = append(causes, fmt.Sprintf("%s: %s", show(f), show(err.Error())))
 			}
 			continue
 		}
 		cert, err := firstCertificate(data)
 		if err != nil {
-			causes = append(causes, fmt.Sprintf("%s: %v", clean(f, 100), err))
+			causes = append(causes, fmt.Sprintf("%s: %v", show(f), err))
 			continue
 		}
 		read++
@@ -218,14 +218,14 @@ func (c certProbe) Run(ctx context.Context, env *Env) Outcome {
 			Set:      set,
 		}
 	}
-	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d certificate(s) valid for at least %s; soonest: %s, %s", read, daysText(c.warn), clean(soonestPath, 100), daysLeft(soonest))}
+	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d certificate(s) valid for at least %s; soonest: %s, %s", read, daysText(c.warn), show(soonestPath), daysLeft(soonest))}
 }
 
 func resolvedNote(path, resolved string) string {
 	if resolved == "" || resolved == path {
 		return ""
 	}
-	return ", file " + clean(resolved, 200)
+	return ", file " + show(resolved)
 }
 
 func daysText(d time.Duration) string { return fmt.Sprintf("%d day(s)", int(d/(24*time.Hour))) }

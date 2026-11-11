@@ -175,7 +175,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 		if strings.TrimSpace(cmdVals[0]) != "none" {
 			cmdWarn = append(cmdWarn, result.Evidence{
 				Subject: "authorizedkeyscommand",
-				Detail:  "AuthorizedKeysCommand is set (" + clean(cmdVals[0], 80) + "); the keys it supplies cannot be checked",
+				Detail:  "AuthorizedKeysCommand is set (" + show(cmdVals[0]) + "); the keys it supplies cannot be checked",
 			})
 		}
 	}
@@ -239,7 +239,7 @@ func (keysProbe) Run(ctx context.Context, env *Env) Outcome {
 			}
 			for _, k := range keys {
 				if _, dup := found[k.fp]; !dup {
-					found[k.fp] = fmt.Sprintf("%s key in %s line %d", k.typ, clean(shown, 80), k.line)
+					found[k.fp] = fmt.Sprintf("%s key in %s line %d", k.typ, show(shown), k.line)
 				}
 			}
 		}
@@ -299,7 +299,7 @@ func subjectList(ev []result.Evidence, n int) string {
 			s = append(s, "...")
 			break
 		}
-		s = append(s, clean(e.Subject, maxSummarySubject))
+		s = append(s, show(e.Subject))
 	}
 	return strings.Join(s, ", ")
 }
@@ -312,7 +312,7 @@ func keyReadReason(err error) string {
 	case strings.Contains(err.Error(), "escapes"):
 		return "a symbolic link or path leads out of the home directory"
 	}
-	return clean(err.Error(), 300)
+	return show(err.Error())
 }
 
 var userNameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}\$?$`)

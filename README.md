@@ -415,7 +415,11 @@ the catalog does not have (an exception may also name `exception_expired`).
 
 An active exception without `match` covers the whole check. With `match` it
 covers the evidence items whose subject equals `match` exactly (for example
-`tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). A check
+`tcp/0.0.0.0:8080`, `passwordauthentication`, `fail2ban.service`). `match` is compared with
+the raw subject the check produced, not with the text a report shows: a subject with a
+control character has to be written as a YAML double-quoted string with the
+escape (`"/etc/x\x01.pem"`), and a subject that the report redacted, escaped or
+cut cannot be matched by copying it from the report. A check
 whose failing items are all covered becomes `excepted`, unless the check also
 found warnings (for example an expected key that is missing next to an
 unexpected one): then it becomes `warn`, its evidence the warnings, because an
