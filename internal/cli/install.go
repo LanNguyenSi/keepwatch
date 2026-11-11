@@ -132,7 +132,7 @@ func printConfigErr(stderr io.Writer, name string, err error) {
 	fmt.Fprintf(stderr, "keepwatch %s: %v\n", name, err)
 }
 
-// runInstall implements `keepwatch install`; the README has the contract.
+// runInstall implements `keepwatch install`; docs/install.md has the contract.
 func runInstall(e env, args []string, stdout, stderr io.Writer) int {
 	var cfgPath, intervalS, weeklyS string
 	var dryRun, printOnly bool

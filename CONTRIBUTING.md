@@ -13,7 +13,7 @@ make systemd   # measures the sandbox of the installed units in privileged
                # and Go
 ```
 
-The README describes what each of these does and what it asserts.
+docs/development.md describes what each of these does and what it asserts.
 
 ## Rules
 

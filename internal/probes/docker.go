@@ -83,7 +83,7 @@ var dockerPidFiles = []string{"/run/docker.pid", "/var/run/docker.pid"}
 // "id:" and the first twelve characters of the id, and shown in the detail as
 // the host gave it (the report cleans it).
 // An exception matches that subject, and so it covers every reason the
-// container has now or later (a limit, see the README). Required fields that are missing in the
+// container has now or later (a limit, see docs/checks.md). Required fields that are missing in the
 // inspect output are an error, never "not privileged". At most 500 running
 // containers are examined; with more the result is error (partial). A
 // container that stops between the two commands is ignored and said so in the
