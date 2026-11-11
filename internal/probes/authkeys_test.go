@@ -489,7 +489,7 @@ func TestAuthorizedKeysReadProblemsAreWarnings(t *testing.T) {
 			wantStatus(t, o, result.Warn)
 			var found bool
 			for _, e := range o.Evidence {
-				if strings.ContainsAny(e.Subject+e.Detail, "\n\x1b") {
+				if strings.ContainsAny(shown(e.Subject+e.Detail), "\n\x1b") {
 					t.Fatalf("control character in %+v", e)
 				}
 				if e.Subject == "alice:.ssh/authorized_keys" && strings.HasPrefix(e.Detail, "not read: ") {

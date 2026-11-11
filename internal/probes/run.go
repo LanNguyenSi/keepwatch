@@ -47,7 +47,7 @@ func runWith(ctx context.Context, env *Env, argv []string, opts execx.Opts, keep
 	case errors.Is(err, execx.ErrIOTimeout):
 		return res, errorOutcome("%s output may be incomplete: pipes still held open after exit", argv[0])
 	default:
-		return res, errorOutcome("running %s failed: %s", argv[0], clean(err.Error(), 200))
+		return res, errorOutcome("running %s failed: %s", argv[0], err.Error())
 	}
 	switch {
 	case res.IOIncomplete:
@@ -74,7 +74,7 @@ func unexpectedExit(prog string, res execx.Result) *Outcome {
 		msg = firstLine(res.Stdout)
 	}
 	if msg != "" {
-		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, clean(msg, 200))
+		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, msg)
 	}
 	return errorOutcome("%s exited with status %d", prog, res.ExitCode)
 }

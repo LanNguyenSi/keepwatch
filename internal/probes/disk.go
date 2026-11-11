@@ -98,7 +98,7 @@ type mount struct{ point, fstype string }
 func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	b, err := env.FS.ReadFile(mountinfoFile, maxMountinfo)
 	if err != nil {
-		return *errorOutcome("cannot read %s: %s", mountinfoFile, clean(err.Error(), 120))
+		return *errorOutcome("cannot read %s: %s", mountinfoFile, err.Error())
 	}
 	mounts, err := parseMountinfo(string(b))
 	if err != nil {
@@ -123,12 +123,12 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	for _, m := range wanted {
 		st, serr := statfsWithTimeout(ctx, env.statfs(), m.point, timeout)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %s", clean(m.point, 80), clean(serr.Error(), 100)))
+			causes = append(causes, fmt.Sprintf("statfs %s: %s", m.point, serr.Error()))
 			continue
 		}
 		blocks, inodes, serr := usagePercent(st)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %v", clean(m.point, 80), serr))
+			causes = append(causes, fmt.Sprintf("statfs %s: %v", m.point, serr))
 			continue
 		}
 		worst := blocks
@@ -137,7 +137,8 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 			detail += fmt.Sprintf(", %d%% of the inodes used", inodes)
 			worst = max(worst, inodes)
 		}
-		ev := result.Evidence{Subject: clean(m.point, 200), Detail: fmt.Sprintf("%s (%s)", detail, m.fstype)}
+		// the raw mount point: it is the key of the item, only the report cleans it
+		ev := result.Evidence{Subject: m.point, Detail: fmt.Sprintf("%s (%s)", detail, m.fstype)}
 		switch {
 		case worst >= d.fail:
 			fails = append(fails, ev)

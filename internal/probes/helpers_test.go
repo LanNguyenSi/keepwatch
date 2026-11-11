@@ -10,6 +10,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
 	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -18,6 +19,10 @@ var versions = []string{"ubuntu2204", "ubuntu2404"}
 
 // newRunner returns a FakeRunner reading the captured fixtures.
 func newRunner() *fake.FakeRunner { return fake.New(os.DirFS("testdata")) }
+
+// shown is what a report prints for a text of a probe: the probes keep the
+// text as the host gave it, and this one function is the only change made.
+func shown(s string) string { return redact.Default().Clean(s) }
 
 func prepare(t *testing.T, kind string, params map[string]any) probes.Probe {
 	t.Helper()

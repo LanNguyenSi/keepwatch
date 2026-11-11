@@ -17,10 +17,9 @@ const MaxKeys = 10000
 // that lets two runs be compared without the items that were left out.
 //
 // A member is identified by its key (SubjectKey): the lowercase hex SHA-256
-// of the subject as the check produced it, before the redaction and escaping
-// of the report. (A few checks clean a path or a name before it becomes the
-// subject; for those the key follows the cleaned text.) A subject is never
-// stored, so the set holds nothing a secret could hide in.
+// of the subject as the check produced it, before the redaction, escaping and
+// cutting of the report. A subject is never stored, so the set holds nothing a
+// secret could hide in.
 //
 //   - Total is the number of distinct keys of the complete list.
 //   - Keys is the sorted, deduplicated list of all keys, when Total is at
