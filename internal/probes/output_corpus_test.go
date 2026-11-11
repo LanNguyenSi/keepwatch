@@ -136,11 +136,15 @@ func TestEverySecretIsGoneFromEveryOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The secret straddles the 200 runes the state shows of a subject, or the
-	// 2000 runes the report keeps of a field.
-	pads := []int{190, 1990}
-	if raceEnabled || testing.Short() {
+	// The secret straddles the 30 to 300 runes a probe used to cut at, the 200
+	// runes the state shows of a subject, or the 2000 runes the report keeps of
+	// a field.
+	pads := []int{20, 190, 1990}
+	switch {
+	case raceEnabled:
 		pads = []int{190}
+	case testing.Short():
+		pads = []int{20, 190}
 	}
 	for _, role := range corpusRoles() {
 		t.Run(role.name, func(t *testing.T) {

@@ -125,16 +125,26 @@ func corpusRoles() []corpusRole {
 		}},
 		{name: "cert file that cannot be read", kind: "cert_expiry", status: result.Error, noCtl: true, run: func(t *testing.T, f string) probes.Outcome {
 			fsys := certFS(map[string]string{})
-			fsys.Errs = map[string]error{certPath(f): errors.New("denied " + f)}
+			fsys.Errs = map[string]error{certPath(f): errors.New("denied")}
 			return certList(t, f, fsys)
+		}},
+		{name: "cert read error text", kind: "cert_expiry", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := certFS(map[string]string{})
+			fsys.Errs = map[string]error{certPath("fixed"): errors.New("denied " + f)}
+			return certList(t, "fixed", fsys)
 		}},
 		{name: "cert file that is no certificate", kind: "cert_expiry", status: result.Error, noCtl: true, run: func(t *testing.T, f string) probes.Outcome {
 			return certList(t, f, certFS(map[string]string{certPath(f): "not a certificate"}))
 		}},
 		{name: "cert glob that fails", kind: "cert_expiry", status: result.Error, noCtl: true, run: func(t *testing.T, f string) probes.Outcome {
 			fsys := certFS(map[string]string{})
-			fsys.GlobErr = errors.New("boom " + f)
+			fsys.GlobErr = errors.New("boom")
 			return execCert(certProbe(t, map[string]any{"paths": []any{}, "globs": []any{"/opt/certs/" + f + "/*.pem"}}), fsys)
+		}},
+		{name: "cert glob error text", kind: "cert_expiry", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := certFS(map[string]string{})
+			fsys.GlobErr = errors.New("boom " + f)
+			return execCert(certProbe(t, map[string]any{"paths": []any{}, "globs": []any{"/opt/certs/*.pem"}}), fsys)
 		}},
 		{name: "cert common name", kind: "cert_expiry", status: result.Fail, run: func(t *testing.T, f string) probes.Outcome {
 			cn := pemCert(t, f, time.Now().Add(-days(3)))
@@ -146,7 +156,10 @@ func corpusRoles() []corpusRole {
 			return diskOn(t, f, func(p string) *statfsMap { return &statfsMap{by: map[string]probes.Statfs{p: usage(95, 1)}} })
 		}},
 		{name: "disk statfs error", kind: "disk_usage", status: result.Error, url: "full", run: func(t *testing.T, f string) probes.Outcome {
-			return diskOn(t, f, func(p string) *statfsMap { return &statfsMap{errs: map[string]error{p: errors.New("boom " + f)}} })
+			return diskOn(t, f, func(p string) *statfsMap { return &statfsMap{errs: map[string]error{p: errors.New("boom")}} })
+		}},
+		{name: "disk statfs error text", kind: "disk_usage", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			return execDisk(diskProbe(t, map[string]any{"fstypes": []any{"ext4"}}), mountFS(mi(7, "/mnt/data", "ext4")), &statfsMap{errs: map[string]error{"/mnt/data": errors.New("boom " + f)}})
 		}},
 		{name: "disk inconsistent numbers", kind: "disk_usage", status: result.Error, url: "full", run: func(t *testing.T, f string) probes.Outcome {
 			return diskOn(t, f, func(p string) *statfsMap {
@@ -175,7 +188,12 @@ func corpusRoles() []corpusRole {
 		}},
 		{name: "docker config file that cannot be read", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
 			fsys := dockerHost("", cmd("--config-file", "/etc/"+f+".json"))
-			fsys.Errs = map[string]error{"/etc/" + f + ".json": errors.New("denied " + f)}
+			fsys.Errs = map[string]error{"/etc/" + f + ".json": errors.New("denied")}
+			return dockerFS(t, fsys)
+		}},
+		{name: "docker config file read error text", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("--config-file", "/etc/fixed.json"))
+			fsys.Errs = map[string]error{"/etc/fixed.json": errors.New("denied " + f)}
 			return dockerFS(t, fsys)
 		}},
 		{name: "docker config file that does not parse", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
