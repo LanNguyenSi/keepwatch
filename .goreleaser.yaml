@@ -1,0 +1,65 @@
+# GoReleaser v2 configuration. A pushed tag vX.Y.Z runs it through
+# .github/workflows/release.yml.
+version: 2
+
+project_name: keepwatch
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: keepwatch
+    main: ./cmd/keepwatch
+    binary: keepwatch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/LanNguyenSi/keepwatch/internal/version.Version=v{{ .Version }}
+      - -X github.com/LanNguyenSi/keepwatch/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/LanNguyenSi/keepwatch/internal/version.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: keepwatch
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  draft: false
+  prerelease: auto
