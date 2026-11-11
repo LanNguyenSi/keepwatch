@@ -1,0 +1,23 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following NEW packages will be installed:
+  kwnew
+The following packages will be upgraded:
+  kwdep kwph1 kwph2 kwph3 kwsec kwsecph
+6 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.
+Inst kwnew (1.0 kwtest:noble-updates [all])
+Inst kwdep [1.0] (1.1 kwtest:noble-updates [all])
+Inst kwph1 [1.0] (1.1 kwtest:noble-updates [all])
+Inst kwph2 [1.0] (1.1 kwtest:noble-updates [all])
+Inst kwph3 [1.0] (1.1 kwtest:noble-updates [all])
+Inst kwsec [1.0] (1.1 kwtest:noble-security [all])
+Inst kwsecph [1.0] (1.1 kwtest:noble-security [all])
+Conf kwnew (1.0 kwtest:noble-updates [all])
+Conf kwdep (1.1 kwtest:noble-updates [all])
+Conf kwph1 (1.1 kwtest:noble-updates [all])
+Conf kwph2 (1.1 kwtest:noble-updates [all])
+Conf kwph3 (1.1 kwtest:noble-updates [all])
+Conf kwsec (1.1 kwtest:noble-security [all])
+Conf kwsecph (1.1 kwtest:noble-security [all])

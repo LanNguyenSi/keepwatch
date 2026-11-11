@@ -688,8 +688,10 @@ func TestDockerCommonFailures(t *testing.T) {
 func TestDockerCommonFailuresOfInspect(t *testing.T) {
 	ids := idsN(1)
 	for name, res := range map[string]execx.Result{
-		"truncated": {Stdout: []byte(inspectDoc(ids, nil)), Truncated: true},
-		"signaled":  {Stdout: []byte(inspectDoc(ids, nil)), Signaled: true, ExitCode: -1},
+		"truncated":                 {Stdout: []byte(inspectDoc(ids, nil)), Truncated: true},
+		"signaled":                  {Stdout: []byte(inspectDoc(ids, nil)), Signaled: true, ExitCode: -1},
+		"pipes cut":                 {Stdout: []byte(inspectDoc(ids, nil)), IOIncomplete: true},
+		"pipes cut after a failure": {Stdout: []byte(inspectDoc(ids, nil)), ExitCode: 1, IOIncomplete: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRunner().AddResult(dockerPs, psOut(ids)).AddResult(inspectArgv(ids...), res)

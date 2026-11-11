@@ -134,13 +134,9 @@ find / -xdev -mindepth 1 -maxdepth 2 -type l 2>/dev/null | grep -v '[[:space:]]'
       visible[$2] = 1
       print "visible " $2
     }' "$lib/verdicts" | sort
-  # Volatile and kernel file systems, the topmost mount of each tree only.
-  awk '$2 ~ /^(tmpfs|ramfs|devtmpfs|proc|sysfs|cgroup|cgroup2|devpts|mqueue|hugetlbfs|securityfs|debugfs|tracefs|fusectl|configfs|pstore|bpf|binfmt_misc|efivarfs)$/' "$lib/mounts" |
-    awk '{
-      for (p in seen) if (index($1, p "/") == 1) next
-      seen[$1] = 1
-      print "mount " $1 " " $2
-    }'
+  # Volatile and kernel file systems, the topmost mount of each tree only
+  # (mounts.awk says why devtmpfs is written as tmpfs).
+  awk -f /opt/keepwatch/mounts.awk "$lib/mounts"
 } >"$out/measured.txt"
 # Links into what was just listed.
 while read -r link target; do
@@ -171,9 +167,29 @@ cfgdir=/etc/kwsandbox
 mkdir -p "$cfgdir"
 chmod 750 "$cfgdir"
 
-# answer ROLE DIR WANTED_STATUS STATUS TEXT WANTED_TEXT
+# answer ROLE DIR WANTED_STATUS STATUS TEXT WANTED_TEXT [OR_TEXT]
+# OR_TEXT is a second text that also counts: the configuration loader walks
+# every ancestor of the configuration and of the token file and refuses a
+# symbolic link there (/lib, /var/lock and /var/run are links) before the
+# placement rules are reached. It is only passed when the path has such a
+# link, and it names that link (see link_refusal).
+# link_refusal PATH prints the loader's refusal for the first symbolic link
+# among the ancestors of PATH, or nothing when there is none.
+link_refusal() {
+  local d="" c
+  local -a parts
+  IFS=/ read -ra parts <<<"${1#/}"
+  for c in "${parts[@]}"; do
+    d="$d/$c"
+    if [ "$d" != "$1" ] && [ -L "$d" ]; then
+      echo "ancestor $d: is a symlink, whoever can change it can redirect the path"
+      return
+    fi
+  done
+}
+
 answer() {
-  if [ "$4" -eq "$3" ] && grep -qF -- "$6" <<<"$5"; then
+  if [ "$4" -eq "$3" ] && { grep -qF -- "$6" <<<"$5" || { [ -n "${7:-}" ] && grep -qF -- "$7" <<<"$5"; }; }; then
     echo "ok   $1 below $2 is refused" >>"$out/product.txt"
   else
     echo "FAIL $1 below $2: exit status $4, wanted $3 and \"$6\": $(head -c 400 <<<"$5" | tr '\n' ' ')" >>"$out/product.txt"
@@ -227,7 +243,7 @@ while read -r dir; do
     text=$(keepwatch install --dry-run --config "$cfgdir/keepwatch.yaml" 2>&1)
     status=$?
     set -e
-    answer token_file "$dir" 2 "$status" "$text" "the directory of notify.ntfy.token_file $p is under "
+    answer token_file "$dir" 2 "$status" "$text" "the directory of notify.ntfy.token_file $p is under " "$(link_refusal "$p")"
 
     chmod 750 "$p"
     config "$p/keepwatch.yaml" /var/lib/keepwatch
@@ -235,7 +251,7 @@ while read -r dir; do
     text=$(keepwatch install --print --config "$p/keepwatch.yaml" 2>&1)
     status=$?
     set -e
-    answer configuration "$dir" 2 "$status" "$text" "the configuration directory $p is under "
+    answer configuration "$dir" 2 "$status" "$text" "the configuration directory $p is under " "$(link_refusal "$p")"
     rm -f "$p/ntfy.token" "$p/keepwatch.yaml"
   else
     echo "note configuration and token_file below $dir: no file can be created there, not asked" >>"$out/product.txt"

@@ -11,8 +11,9 @@
 # with /sbin/init as PID 1 (privileged).
 #
 # KW_SECTIONS selects what to capture: a comma separated list of base,
-# firewall, apt, aptrepo, aptphased, keys, keycases, certs, disk, docker (default: all). The last six
-# sections run in the plain containers, which need the extra packages ufw,
+# firewall, apt, aptrepo, aptphased, aptphasing, keys, keycases, certs, disk, docker (default: all). The last six
+# sections (except aptphasing, which runs in the systemd containers) run in the
+# plain containers, which need the extra packages ufw,
 # nftables, iptables, apt, openssh-client, openssl, e2fsprogs, util-linux
 # (setpriv), docker.io and curl; the docker section starts its own dockerd
 # there (storage driver vfs, so it works inside a container) and leaves the
@@ -163,7 +164,7 @@ fwcap() {
 }
 
 for v in 2204 2404; do
-  eval "plain=\$KW_PLAIN_$v"
+  eval "plain=\$KW_PLAIN_$v sd=\${KW_SYSTEMD_$v:-}"
   d=ubuntu$v
   [ -n "$plain" ] || continue
 
@@ -228,7 +229,9 @@ for v in 2204 2404; do
   # ---- security_updates: apt-get -s -o Debug::NoLocking=true dist-upgrade -------
   if want apt; then
     # the options keep apt from writing its cache files (/var/cache/apt/*.bin)
-    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    # and make it treat every phased update as available (the name nocache is
+    # older than the third option)
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true"
     apt="apt-get -s -o Debug::NoLocking=true $nocache dist-upgrade"
     # polcap <name>: apt-cache policy for the packages the simulation upgrades,
     # in the order the probe asks for them (sorted, one batch)
@@ -300,7 +303,7 @@ for v in 2204 2404; do
   # the probe asks for them (the package kwtest is named by the simulation or
   # by the list of kept back packages).
   if want aptrepo; then
-    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true"
     docker cp "$here/aptrepo.sh" "$plain:/tmp/aptrepo.sh"
     for sc in plain superseded phased phasedonly secphased hold holdupdate newdep; do
       ex "$plain" "bash /tmp/aptrepo.sh $sc"
@@ -312,7 +315,7 @@ for v in 2204 2404; do
 
   # ---- security_updates: a phased update in the real archive (22.04 has some) ----
   if want aptphased; then
-    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+    nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true"
     pk=libnvidia-common-535-server
     if docker exec "$plain" bash -c "apt-cache dumpavail | awk '/^Package: $pk\$/{p=1} p&&/^Phased-Update-Percentage:/{f=1} /^\$/{p=0} END{exit !f}'"; then
       ex "$plain" "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades $pk=535.288.01-0ubuntu0.22.04.1 >/dev/null 2>&1"
@@ -322,6 +325,28 @@ for v in 2204 2404; do
     else
       echo "capture.sh: no package with a Phased-Update-Percentage on $d, no apt_real_phased fixture" >&2
     fi
+  fi
+
+  # ---- security_updates: phased updates in a service and in a direct run ----------
+  # aptphasing.sh runs in the systemd container, which needs keepwatch installed
+  # (the unit with the hardening of keepwatch-check.service is the one the
+  # commands run in the second time). KW_KEEPWATCH_BIN is a keepwatch binary
+  # for the container's architecture (default: built here for the architecture
+  # of the docker daemon).
+  if want aptphasing && [ -n "$sd" ]; then
+    bin=${KW_KEEPWATCH_BIN:-}
+    if [ -z "$bin" ]; then
+      case $(docker info --format '{{.Architecture}}') in x86_64 | amd64) ga=amd64 ;; *) ga=arm64 ;; esac
+      bin=$(mktemp)
+      (cd "$here/../../.." && CGO_ENABLED=0 GOOS=linux GOARCH=$ga go build -trimpath -o "$bin" ./cmd/keepwatch) || exit 1
+    fi
+    docker cp "$bin" "$sd:/root/keepwatch-capture"
+    docker cp "$here/aptphasing.sh" "$sd:/root/aptphasing.sh"
+    ex "$sd" 'install -o root -g root -m 0755 /root/keepwatch-capture /usr/local/bin/keepwatch; keepwatch init >/dev/null 2>&1 || true; keepwatch install >/dev/null; rm -f /root/keepwatch-capture'
+    ex "$sd" 'rm -rf /tmp/aptphasing-out; bash /root/aptphasing.sh /tmp/aptphasing-out'
+    mkdir -p "$here/$d"
+    docker cp "$sd:/tmp/aptphasing-out/." "$here/$d/"
+    ex "$sd" 'bash /root/aptphasing.sh restore; rm -rf /root/aptphasing.sh /tmp/aptphasing-out'
   fi
 
   # ---- authorized_keys: key files and the sshd -T lines that name them -----------

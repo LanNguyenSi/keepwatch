@@ -35,8 +35,9 @@ func ownedInStateDir(name string) bool {
 	return false
 }
 
-// ProbePrefix starts the name of the file `keepwatch doctor` creates inside
-// state_dir to prove it is writable; one left behind by a crash is keepwatch's
+// ProbePrefix starts the name of the file WriteProbe (run by `keepwatch
+// install` and `keepwatch doctor`) creates inside state_dir to prove it is
+// writable; the value keeps its old name so purge still recognises it; one left behind by a crash is keepwatch's
 // own. tmpWritePrefix starts the temporary names of Dir.WriteFile.
 const (
 	ProbePrefix    = ".keepwatch-doctor-probe-"

@@ -1,6 +1,7 @@
 package install
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -39,14 +40,10 @@ func TestOwnedSetCoversTheFilesTheWritersProduce(t *testing.T) {
 	if problem, err := hs.Append(history.Run{RunAt: time.Now().UTC().Truncate(time.Second), Changes: []history.Change{}}); err != nil || problem != "" {
 		t.Fatalf("history append: %q %v", problem, err)
 	}
-	// The doctor probe and the atomic writer of a Dir.
-	od, err := (OSFS{}).OpenDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer od.Close()
-	if err := od.WriteFile(ProbePrefix+"0123456789abcdef", []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+	// The write probe of install and doctor, as a crash leaves it: the file
+	// is created by WriteProbe itself and the removal fails.
+	if err := WriteProbe(removeFails{OSFS{}}, dir); err == nil {
+		t.Fatal("the probe reported success although its file could not be removed")
 	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -75,6 +72,21 @@ func TestOwnedSetCoversTheFilesTheWritersProduce(t *testing.T) {
 		}
 	}
 }
+
+// removeFails is an FS whose directories write files and cannot remove them.
+type removeFails struct{ FS }
+
+func (r removeFails) OpenDir(p string) (Dir, error) {
+	d, err := r.FS.OpenDir(p)
+	if err != nil {
+		return nil, err
+	}
+	return noRemoveDir{d}, nil
+}
+
+type noRemoveDir struct{ Dir }
+
+func (noRemoveDir) Remove(string) error { return errors.New("injected: remove fails") }
 
 var fileNameLiteral = regexp.MustCompile(`^\.?[A-Za-z0-9_-][A-Za-z0-9._-]*\.json$|^\.[A-Za-z0-9._-]*\.tmp-$`)
 

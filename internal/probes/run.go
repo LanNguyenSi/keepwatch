@@ -20,6 +20,7 @@ import (
 //	program not installed      skipped, program named
 //	program not allowlisted    error (programming error)
 //	timeout, io timeout        error
+//	pipes cut after exit       error (Result.IOIncomplete, any exit status)
 //	killed by a signal         error
 //	output truncated           error
 //
@@ -49,6 +50,10 @@ func runWith(ctx context.Context, env *Env, argv []string, opts execx.Opts, keep
 		return res, errorOutcome("running %s failed: %s", argv[0], err.Error())
 	}
 	switch {
+	case res.IOIncomplete:
+		// Set for every exit status: a non-zero exit gives no ErrIOTimeout,
+		// so this is the only place that catches it for the probes.
+		return res, errorOutcome("%s output may be incomplete: pipes still held open after exit", argv[0])
 	case res.Signaled || res.ExitCode < 0:
 		return res, errorOutcome("%s was terminated before it exited", argv[0])
 	case res.Truncated && !keepTruncated:

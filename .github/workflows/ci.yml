@@ -41,3 +41,26 @@ jobs:
           go-version-file: go.mod
       - name: build linux/amd64
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o keepwatch ./cmd/keepwatch
+
+  secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download gitleaks v8.28.0
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz
+      - name: Verify gitleaks checksum
+        run: |
+          echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gitleaks.tar.gz" | sha256sum --check
+      - name: Extract gitleaks
+        run: |
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+      - name: Scan full history for secrets
+        run: ./gitleaks git . --config .gitleaks.toml --redact --no-banner --exit-code 1

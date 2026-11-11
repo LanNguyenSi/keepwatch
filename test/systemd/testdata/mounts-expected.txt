@@ -1,0 +1,4 @@
+mount /dev tmpfs
+mount /proc proc
+mount /run tmpfs
+mount /sys sysfs

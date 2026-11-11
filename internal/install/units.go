@@ -493,3 +493,68 @@ func Inspect(content []byte) Installed {
 	}
 	return in
 }
+
+// RenderInstalled returns the service file name as Render writes it for the
+// values the file itself holds (see Inspect). The interval and the weekly time
+// are not part of a service, so they take no part. It fails when the values
+// are not ones Render accepts, and for a name that is not a service.
+//
+// doctor compares the result with the file on disk: a file that differs is not
+// what "keepwatch install" would write for those values, so systemd runs
+// something else than install rendered, for example with a second ExecStart
+// line or an added hardening option.
+func RenderInstalled(name string, content []byte) ([]byte, error) {
+	in := Inspect(content)
+	spec := Spec{
+		Binary: in.Binary, ConfigPath: in.ConfigPath, StateDir: in.ReadWritePaths, Notify: in.Notify,
+		Interval: Interval{N: 6, Unit: "h"}, Weekly: Weekly{Day: "Mon", Hour: 8},
+	}
+	files, err := Render(spec)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		if f.Name == name && (name == CheckService || name == ReportService) {
+			return f.Content, nil
+		}
+	}
+	return nil, fmt.Errorf("%s is not a service of keepwatch", name)
+}
+
+// Difference is the first line at which two files differ.
+type Difference struct {
+	// Line is counted from 1.
+	Line int
+	// Want and Got are the lines of the first and of the second file there,
+	// without the line feed. A file that ends before the line has no text
+	// there and its Ended flag is set.
+	Want, Got           string
+	WantEnded, GotEnded bool
+}
+
+// FirstDifference compares want with got line by line, a line feed being part
+// of its line. ok is false when the files are equal.
+func FirstDifference(want, got []byte) (d Difference, ok bool) {
+	if bytes.Equal(want, got) {
+		return Difference{}, false
+	}
+	lines := func(b []byte) []string {
+		l := strings.SplitAfter(string(b), "\n")
+		if l[len(l)-1] == "" {
+			l = l[:len(l)-1]
+		}
+		return l
+	}
+	w, g := lines(want), lines(got)
+	text := func(l string) string { return strings.TrimSuffix(l, "\n") }
+	for i := 0; ; i++ {
+		switch {
+		case i >= len(w):
+			return Difference{Line: i + 1, Got: text(g[i]), WantEnded: true}, true
+		case i >= len(g):
+			return Difference{Line: i + 1, Want: text(w[i]), GotEnded: true}, true
+		case w[i] != g[i]:
+			return Difference{Line: i + 1, Want: text(w[i]), Got: text(g[i])}, true
+		}
+	}
+}

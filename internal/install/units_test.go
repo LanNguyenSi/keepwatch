@@ -1,6 +1,7 @@
 package install
 
 import (
+	"bytes"
 	"flag"
 	"os"
 	"path"
@@ -590,6 +591,94 @@ func TestRenderNotifyFlag(t *testing.T) {
 	} {
 		if !strings.Contains(string(files[i].Content), want) {
 			t.Errorf("%s lacks %q", files[i].Name, want)
+		}
+	}
+}
+
+func TestRenderInstalledRoundTrips(t *testing.T) {
+	iv, _ := ParseInterval("6h")
+	wk, _ := ParseWeekly("Mon 08:00")
+	for _, notify := range []bool{false, true} {
+		for _, state := range []string{"/var/lib/keepwatch", "/srv/kw-state"} {
+			files, err := Render(Spec{Binary: "/opt/kw/keepwatch", ConfigPath: "/etc/kw/a.yaml", StateDir: state, Notify: notify, Interval: iv, Weekly: wk})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range files {
+				if !strings.HasSuffix(f.Name, ".service") {
+					if _, err := RenderInstalled(f.Name, f.Content); err == nil {
+						t.Errorf("%s: a timer is rendered from its own values", f.Name)
+					}
+					continue
+				}
+				got, err := RenderInstalled(f.Name, f.Content)
+				if err != nil || !bytes.Equal(got, f.Content) {
+					t.Errorf("%s (notify %v): err %v, differs from the file it was read from:\n%s", f.Name, notify, err, got)
+				}
+			}
+		}
+	}
+}
+
+func TestRenderInstalledSeesWhatInspectDoesNot(t *testing.T) {
+	iv, _ := ParseInterval("6h")
+	wk, _ := ParseWeekly("Mon 08:00")
+	files, _ := Render(Spec{Binary: "/opt/kw/keepwatch", ConfigPath: "/etc/kw/a.yaml", StateDir: "/var/lib/kw", Interval: iv, Weekly: wk})
+	orig := string(files[0].Content)
+	edited := strings.Replace(orig, "ExecStart=", "ExecStart=/opt/gone/keepwatch check --config /etc/kw/a.yaml\nExecStart=", 1)
+	if Inspect([]byte(edited)) != Inspect([]byte(orig)) {
+		t.Fatal("the premise is that Inspect reads the same from both")
+	}
+	got, err := RenderInstalled(CheckService, []byte(edited))
+	if err != nil || string(got) != orig {
+		t.Fatalf("err %v: rendering from the edited file must give the original:\n%s", err, got)
+	}
+}
+
+func TestRenderInstalledRefuses(t *testing.T) {
+	iv, _ := ParseInterval("6h")
+	wk, _ := ParseWeekly("Mon 08:00")
+	files, _ := Render(Spec{Binary: "/opt/kw/keepwatch", ConfigPath: "/etc/kw/a.yaml", StateDir: "/var/lib/kw", Interval: iv, Weekly: wk})
+	good := string(files[0].Content)
+	if _, err := RenderInstalled("other.service", []byte(good)); err == nil || !strings.Contains(err.Error(), "not a service of keepwatch") {
+		t.Errorf("a name that is not a service of keepwatch: %v", err)
+	}
+	for _, timer := range []string{CheckTimer, ReportTimer, "keepwatch-check.service.bak"} {
+		if _, err := RenderInstalled(timer, []byte(good)); err == nil {
+			t.Errorf("%s: rendered from the values of a service", timer)
+		}
+	}
+	for name, c := range map[string]string{
+		"state dir with a space": strings.Replace(good, "ReadWritePaths=/var/lib/kw", "ReadWritePaths=/var/lib/kw /etc", 1),
+		"no ReadWritePaths":      strings.Replace(good, "ReadWritePaths=/var/lib/kw\n", "", 1),
+		"no ExecStart":           strings.Replace(good, "ExecStart=", "ExecStop=", 1),
+	} {
+		if _, err := RenderInstalled(CheckService, []byte(c)); err == nil {
+			t.Errorf("%s: rendered", name)
+		}
+	}
+}
+
+func TestFirstDifference(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		want, got string
+		d         Difference
+		differs   bool
+	}{
+		{"equal", "a\nb\n", "a\nb\n", Difference{}, false},
+		{"empty", "", "", Difference{}, false},
+		{"first line", "a\nb\n", "x\nb\n", Difference{Line: 1, Want: "a", Got: "x"}, true},
+		{"middle", "a\nb\nc\n", "a\nx\nc\n", Difference{Line: 2, Want: "b", Got: "x"}, true},
+		{"got has more", "a\nb\n", "a\nb\nc\n", Difference{Line: 3, Got: "c", WantEnded: true}, true},
+		{"got is cut", "a\nb\nc\n", "a\nb\n", Difference{Line: 3, Want: "c", GotEnded: true}, true},
+		{"no final newline", "a\nb\n", "a\nb", Difference{Line: 2, Want: "b", Got: "b"}, true},
+		{"final newline only in got", "a\nb", "a\nb\n", Difference{Line: 2, Want: "b", Got: "b"}, true},
+		{"empty want", "", "a\n", Difference{Line: 1, Got: "a", WantEnded: true}, true},
+	} {
+		d, ok := FirstDifference([]byte(c.want), []byte(c.got))
+		if ok != c.differs || d != c.d {
+			t.Errorf("%s: got %+v %v, want %+v %v", c.name, d, ok, c.d, c.differs)
 		}
 	}
 }

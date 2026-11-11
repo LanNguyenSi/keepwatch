@@ -187,7 +187,7 @@ func TestErrorsNameThePathOnce(t *testing.T) {
 func TestOwnerRootAcceptedViaInjection(t *testing.T) {
 	// A root-owned main file, conf.d file and conf.d directory are
 	// accepted while the running uid is not 0: configPolicy accepts
-	// uid 0 or the running uid, and checkConfigDir must not reject a
+	// uid 0 or the running uid, and openCheckedDir must not reject a
 	// root-owned directory for a non-root caller.
 	if os.Getuid() == 0 {
 		t.Skip("running as root: an injected uid 0 cannot be told from the real owner")

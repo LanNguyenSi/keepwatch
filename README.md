@@ -2,13 +2,36 @@
 
 A small, self-hosted guardian for Linux servers.
 
-Status: pre-MVP, under active development. Not ready for use.
+Status: stage 0 is usable: posture checks, reports of what changed, ntfy
+notifications, a weekly report, and a systemd install with a hardened
+sandbox. keepwatch is pre-1.0, so command-line flags, configuration keys and
+the JSON report may still change between minor versions.
 
 keepwatch checks the security posture of a host (for example: is fail2ban
 running, is SSH password login disabled, which ports are listening), reports
 only what changed since the last run, and sends the result to a notification
 channel. Later stages add log-based detection, optional triage with a local
 LLM, and policy-gated, human-approved actions with a tamper-evident audit log.
+
+## Requirements
+
+A Linux server with systemd. The checks and `install` run as root.
+Tested on Ubuntu 22.04 and 24.04; releases ship static binaries for amd64 and
+arm64. Building from source needs Go 1.27 or newer.
+
+## Roadmap
+
+The later stages below are planned, not built, and carry no dates:
+
+- Log-based detection: watch the host's logs for attack patterns, not only
+  the posture of the host.
+- Optional triage with a local LLM: a local model may summarize and rank the
+  findings, with no data leaving the host.
+- Policy-gated, human-approved actions: keepwatch may propose a fix, a
+  policy decides whether it may propose it at all, and nothing runs without
+  a person approving it.
+- A tamper-evident audit log shipped off the host: findings and actions
+  recorded in a log copied off the host, so it cannot be rewritten quietly.
 
 ## Build
 
@@ -18,11 +41,17 @@ Requires Go 1.27 or newer.
 make build    # bin/keepwatch (host) and bin/keepwatch-linux-amd64, static
 ```
 
+`make build` stamps the version and commit from git
+(`git describe --tags --always --dirty`) and the build time, so
+`keepwatch version` reports them. Release builds stamp the commit time instead
+of the build time, so that the same commit builds the same bytes.
+
 ## Test
 
 ```sh
 make test     # go test -race ./...
 make lint     # gofmt, go vet, staticcheck
+go run github.com/zricethezav/gitleaks/v8@v8.28.0 git . --config .gitleaks.toml --redact --no-banner   # secret scan, full history
 ```
 
 ## End-to-end tests
@@ -137,8 +166,24 @@ until the table knows it.
 
 The measurement depends on the kernel and the container runtime as well (`/proc` counts
 as hidden because `ProtectKernelTunables=yes` and `ProtectControlGroups=yes` imply
-`MountAPIVFS=yes`, which gives the service its own instance of it). It is a
-local target; no workflow runs it.
+`MountAPIVFS=yes`, which gives the service its own instance of it).
+
+The workflow `.github/workflows/systemd.yml` runs `make systemd` on an x86_64 runner on
+every push to `main`, on every pull request (the answers depend on the whole binary,
+the configuration loader included), and once a week, so the committed files
+cannot rot and a systemd that hides a new directory fails the job. The files were
+first measured on arm64, and there is one set of files for every architecture. The one
+difference seen between an arm64 container runtime and a real x86_64 host is the type at
+`/dev`: the host mounts `devtmpfs`, the runtime a `tmpfs`. `test/systemd/mounts.awk`
+writes both as `tmpfs`. That is the only thing it changes: the Go test reads the path of
+a `mount` line, not its type, and one entry of the table (`/dev`) refuses it either way.
+A new `hidden` or `visible` directory, a new mount or a new link still changes the file
+and fails the job; a `devtmpfs` anywhere else than at `/dev` shows as a new mount.
+`test/systemd/mounts_test.sh` checks this on captures of mount lists
+and runs first in `make systemd`. If the first run on x86_64 (or a later runtime) shows
+a difference in another line, it is a measurement to judge, not noise: look at the diff
+in the log of the job, decide whether the table is wrong, and only then `-update` the
+files or turn the difference into a normalisation next to the one above.
 
 ## Configuration
 
@@ -156,8 +201,12 @@ More rules, all reported with `file:line`:
   is treated as empty; a file never replaces another file's root).
 - A key repeated within the same mapping of the same file is an error
   at any depth; the same key set again by a later file is an override.
-  Validation runs on the merged result, so a value that a later file
-  replaces is not checked on its own (known limit).
+  Validation runs on the merged result, so a later file may not replace
+  a value with one of another YAML kind (mapping, sequence or scalar):
+  that is an error, `<key> in <file:line> changes the type set in
+  <file:line>`, with the dotted path for a nested key (`notify.ntfy`).
+  Sequences of two files are the same kind and append. A null is not a
+  kind of its own, see the next rules.
 - `conf.d` must not be a symlink, dangling or not.
 - `notify.ntfy.token_file` must be a clean absolute path (no `.`, `..`
   or repeated `/`).
@@ -182,12 +231,26 @@ More rules, all reported with `file:line`:
   path is never followed (a symlink is refused), and each file's type,
   size (max 1 MiB), permissions (no group or other write bits, mode
   0644 or stricter) and ownership (root or the running user) are
-  checked on the open file descriptor itself. The directories holding
-  the main file, `conf.d` and the token file must be real directories
-  owned by root or the running user and not writable by group or
-  other; deeper ancestor directories are not checked by the loader
-  (known limit of a run by hand; `install` and `doctor` walk every
-  ancestor, see [Where the paths must lie](#where-the-paths-must-lie)).
+  checked on the open file descriptor itself. The loader walks the path
+  of the main file, of `conf.d` and of the token file from `/` and
+  checks every directory on the way, not only the one that holds the
+  file: each must be a real directory (a symlink at any depth is
+  refused), owned by root or the running user, readable by the running
+  user, and not writable by group or other. The path is cleaned first, so
+  write it without `..`: in `dir/link/../keepwatch.yaml` the link is never
+  looked at. An ancestor with the sticky bit set may be writable by group or
+  other (others cannot rename or remove the entries they do not own); the
+  directory that holds the files may not. This is the rule of the loader
+  only: `install` and `doctor` still refuse a configuration or token file
+  below `/tmp`, see [Where the paths must lie](#where-the-paths-must-lie). A refusal names
+  the directory and the failing component. Every step opens the next
+  directory relative to the one just checked, and the files, `conf.d`
+  entries included, are opened through the checked directory, so the
+  path cannot be swapped between the check and the read. A relative
+  `--config` is resolved against the physical working directory first.
+  POSIX ACLs, file capabilities and the mount of a directory are not
+  examined (known limit; `install` and `doctor` apply a stricter rule,
+  root only, see [Where the paths must lie](#where-the-paths-must-lie)).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
   http only for loopback; no credentials, query or fragment; a URL port must
   be 1-65535). It is the address of the server, not of the topic: see
@@ -200,10 +263,12 @@ More rules, all reported with `file:line`:
   running user and not empty; it is validated without reading and
   fully re-checked every time the token is read.
 - `keepwatch init` writes the example file atomically (temp file +
-  rename, mode 0640) into a directory that must not be a symlink or
-  writable by group or other and must be owned by root or the running
-  user; it refuses to follow symlinks, and `--force` only replaces a
-  regular file.
+  rename, mode 0640) through a directory that is checked like the
+  others: neither it nor any directory above it may be a symlink or
+  writable by group or other (sticky ancestors excepted), and all must
+  be owned by root or the running user. Missing directories are created
+  with mode 0750 and checked in turn. It refuses to follow symlinks, and
+  `--force` only replaces a regular file.
 
 - `redact.patterns` is an optional list of extra redaction patterns, see
   [Redaction](#redaction).
@@ -287,16 +352,33 @@ packages it upgrades. Both run with `-o Dir::Cache::pkgcache= -o
 Dir::Cache::srcpkgcache=`, which keeps apt from writing its cache files under
 `/var/cache/apt` (about 130 MB when the distribution's `docker-clean` snippet
 is absent; measured on both releases: nothing under `/var/cache/apt` or
-`/var/lib/apt` changes). A package fails when any version that a `-security`
-pocket carries (`-infra-security` and `-apps-security` too) is newer than the
-installed one, even if the version the simulation would install comes from
+`/var/lib/apt` changes). Both also run with `-o
+APT::Get::Always-Include-Phased-Updates=true`, so apt counts every phased update
+(Ubuntu's staged rollout, `Phased-Update-Percentage` in the package index) as
+available: "N other upgrade(s) pending" is what the package lists offer, not what
+apt would install on this machine today. This holds even when the host sets
+`APT::Get::Never-Include-Phased-Updates`: the command-line option wins, and the
+check ignores the host's phasing preference on purpose. Without the option the answer would
+depend on where apt runs. apt does not phase when `ischroot -t` says it is in a
+chroot, and `ischroot` takes any process whose `/proc/self/mountinfo` differs
+from PID 1's for one, which is every service with a mount namespace of its own,
+so the scheduled run under systemd upgraded the phased packages while a direct run
+as root held them back (the count of "not upgraded" packages and of other upgrades
+differed on the same host; measured on Ubuntu 22.04 with apt 2.4.15 and 24.04 with
+apt 2.8.4). Security updates are never affected: apt does not phase a package whose
+candidate comes from a security pocket, and the security list was the same in both.
+The option also matters for a host that switches `APT::Get::Phase-Policy` on: apt
+then caps the priority of a phased version, whatever pocket it comes from, and a
+phased security fix would vanish from the simulation, neither upgraded nor named as
+held back; with the option it is found (measured on both releases). A package
+fails when any version that a `-security` pocket carries (`-infra-security`
+and `-apps-security` too) is newer than the installed one, even if the version the simulation would install comes from
 `-updates` and has superseded the security fix; the order of versions is apt's
 own, the check compares no version strings. One evidence item per package. It
 also reports how old the package lists are and warns when they are older than
 `max_list_age_hours` or missing, because then it cannot see newer updates.
-Packages that apt does not upgrade (held with `apt-mark hold`, blocked by a
-dependency that cannot be met, or deferred by Ubuntu's phased updates; apt names
-them under "kept back" or, with apt 2.8, "deferred due to phasing") are counted
+Packages that apt does not upgrade (held with `apt-mark hold`, or blocked by a
+dependency that cannot be met; apt names them under "kept back") are counted
 in the summary and looked up the same way: a held package with a newer security
 version fails the check, and its detail says apt keeps it back. The output of
 both apt commands must be understood line by line (the phased marker
@@ -865,6 +947,28 @@ short, but its cost is paid on every byte of every field that is shown), and a
 bad one is a configuration error with file and line. Lists in `conf.d` files are appended to the main file's list. The redaction
 function (`redact.Redactor.Clean`) is what the notification code uses as well.
 
+## Install from a release
+
+Each release on the [releases page](https://github.com/LanNguyenSi/keepwatch/releases)
+carries static `linux/amd64` and `linux/arm64` archives
+(`keepwatch_<version>_linux_<arch>.tar.gz`, containing the binary, `LICENSE` and
+`README.md`), a `checksums.txt` with their SHA-256 sums, and a build-provenance
+attestation for the archives and the checksum file. The example below installs
+version 0.1.0 on `amd64`; the version in the file name has no leading `v`.
+
+```sh
+# download keepwatch_0.1.0_linux_amd64.tar.gz and checksums.txt from the release, then:
+sha256sum -c checksums.txt --ignore-missing
+gh attestation verify keepwatch_0.1.0_linux_amd64.tar.gz --repo LanNguyenSi/keepwatch
+tar -xzf keepwatch_0.1.0_linux_amd64.tar.gz keepwatch
+sudo install -o root -g root -m 0755 keepwatch /usr/local/bin/keepwatch
+keepwatch version
+```
+
+`sha256sum -c` checks that the download matches the published sums;
+`gh attestation verify` checks that the archive was built from this repository by
+the release workflow. It needs the [GitHub CLI](https://cli.github.com/) (`gh`).
+
 ## Scheduled runs: install, uninstall, doctor
 
 ```sh
@@ -885,7 +989,13 @@ configured in the configuration file that `install` reads, both commands get
 finds and nobody is told, and a run with `--notify` and no `notify.ntfy` exits 3.
 So after adding `notify.ntfy` run `install` again (it updates the two services;
 `doctor` reports a problem while they lack `--notify`). It creates `state_dir`
-(mode 0700) if it is missing, runs `systemctl daemon-reload` and
+(mode 0700) if it is missing, then proves that the scheduled runs can write there:
+the probe `doctor` runs, one file created and removed inside `state_dir`. A
+`state_dir` on a read-only file system, for example, is refused (exit 2) with the
+sentence `doctor` prints, before any unit is written; a `state_dir` that this run
+created stays, empty, and the next run finds it. The probe runs on every real
+`install`, also when the units are up to date. Then `install` runs
+`systemctl daemon-reload` and
 `systemctl enable --now` for both timers, and restarts a timer whose schedule
 changed. The units run the binary that ran `install` (its path is written into
 them), so install it where it stays, for example `/usr/local/bin`.
@@ -914,7 +1024,7 @@ a problem.
 | the directory of the configuration file, and the file (`--config`) | a directory, a regular file | no |
 | `conf.d` next to the configuration file | a directory | yes; checked when it is there |
 | the directory of `notify.ntfy.token_file`, and the file | a directory, a regular file | only when `token_file` is not configured |
-| `state_dir` (`ReadWritePaths`) | a directory | yes: then its parent directory is checked, `install` creates `state_dir` there and checks it again |
+| `state_dir` (`ReadWritePaths`) | a directory | yes: then its parent directory is checked, `install` creates `state_dir` there, checks it again and proves it is writable |
 
 The rule, for each path:
 
@@ -973,9 +1083,10 @@ Limits:
   examined.
 - The walk shows who can change a path now; it does not notice a change later, and a
   unit that fails tells nobody (`doctor` shows the failed last run).
-- `doctor` reads the unit files as `install` writes them. A unit file edited by hand
-  (a second `ExecStart` line, an added option that hides a path) and a drop-in are not
-  judged, see [doctor](#doctor).
+- `doctor` compares each installed service file with the unit `install` renders from the
+  values the file holds, so a file edited by hand (a second `ExecStart` line, an added
+  option that hides a path) is a problem, and so is a drop-in outside `service.d`. What a
+  drop-in changes is not judged, see [doctor](#doctor).
 
 `install` is idempotent: with nothing to change it prints `already installed,
 nothing to change` and touches nothing (it still makes sure the timers are
@@ -985,7 +1096,10 @@ systemd read-only, and works without root). `--print` writes the four unit files
 to stdout, each after a `# ===== name =====` line, and does nothing else; it wins over `--dry-run`.
 Both refuse what `install` refuses about the configuration and the paths, with the
 same message, so a unit file that is printed is one `install` would write; neither
-creates anything, a missing `state_dir` included.
+creates anything, a missing `state_dir` included. Neither runs the write probe
+either, not even on an existing `state_dir`: they stay free of side effects, so a
+`state_dir` that cannot be written is refused only by a real `install` (and found by
+`doctor`). `--dry-run` says so in its output.
 
 | Flag | Grammar |
 |---|---|
@@ -1024,8 +1138,9 @@ Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
 failed after work had started (a `systemctl` command, a write; what was done is
 printed and a second run continues), 2 refused or usage error (not root, systemd
 not running, bad flag, a file that is not keepwatch's, a missing or invalid configuration,
-a path that does not lie where it must;
-nothing was changed, except that `uninstall --purge` exits 2 after doing what it
+a path that does not lie where it must, a `state_dir` that cannot be written;
+nothing was changed, except that `install` keeps a `state_dir` it created before
+the write probe refused it, and that `uninstall --purge` exits 2 after doing what it
 could when it refuses a configuration it cannot prove is keepwatch's), 3 internal error.
 
 ### The units and their hardening
@@ -1067,7 +1182,15 @@ Ubuntu 22.04 and 24.04.
 
 With these options every check returned the same status, severity, summary and
 evidence subjects as a direct run as root, on Ubuntu 22.04 (systemd 249) and 24.04
-(systemd 255).
+(systemd 255), except for the following.
+
+- `disk.usage` counts more file systems in the service than in a direct run: the
+  sandbox adds bind mounts of devices that are already counted.
+- `updates.security_pending` agrees only because the apt simulation runs with
+  `APT::Get::Always-Include-Phased-Updates=true` (see `security_updates` under
+  Checks). apt's own phasing differs between a service and a direct run, and
+  without the option the counts of other upgrades and of packages not upgraded
+  differ; the security list does not.
 
 ### uninstall
 
@@ -1082,7 +1205,7 @@ configuration and state stay. `--dry-run` lists what would be done.
 
 - in the state directory: `state.json` and `history.json`, leftover
   `.state.json.tmp-*` and `.history.json.tmp-*` files and the probe and temporary files
-  that `doctor` and the atomic writer leave after a crash, then the directory if it is
+  that the write probe (`install`, `doctor`) and the atomic writer leave after a crash, then the directory if it is
   empty (a test ties this list to the file names the writers use);
 - the main configuration file, the `*.yaml` files in the `conf.d` directory next to
   it, then `conf.d` and the configuration directory if each is empty.
@@ -1131,13 +1254,77 @@ configuration it examines:
   the check service decides and the other one is a problem in the same way.
 
 A `--config` in a unit that is not a clean absolute path is a problem and is never
-loaded. Limit: `doctor` reads the unit files, not drop-ins, and it reads them as
-`install` writes them. A drop-in (for example `keepwatch-check.service.d/*.conf`)
-that replaces `ExecStart` or adds a hardening option is not looked at. Neither is a
-change made by hand to a unit file itself: of several `ExecStart` lines only the last
-is read, and an option added to the file (`ProtectHome=yes`, `InaccessiblePaths=`) is
-not judged, although `install` would call that file changed and rewrite it. The line
-about the last run is what shows the effect of either.
+loaded.
+
+`doctor` also asks what systemd will run, not only what the file says:
+
+- Each installed service file is compared with the unit `install` renders from the
+  values the file itself holds (the program, `--config`, `--notify`, `ReadWritePaths`).
+  A file that differs in any line is a problem that names the file and the first line
+  that differs: a second `ExecStart` line (a oneshot service runs all of them, in
+  order), an option added or changed (`ProtectHome=yes`, `InaccessiblePaths=`), a line
+  removed. Running `install` again rewrites the file as rendered. The two timers are
+  not compared.
+- A drop-in of a service (`systemctl show -p DropInPaths`) is a problem that lists the
+  files, unless it lies in a directory called `service.d`. systemd reads the drop-ins
+  of a unit from `<name>.service.d` for every name the unit has (an alias, a symbolic
+  link to the unit, included), from the directories named for a prefix of the name
+  (`keepwatch-.service.d`) and from `service.d`, so every one of these changes this
+  service and nothing else does. The unit directories are `/etc/systemd/system`,
+  `/run/systemd/system`, the vendor directory and `system.control` (where
+  `systemctl set-property` writes). systemd merges the drop-in into the unit, so the
+  service no longer runs as `install` renders it, `doctor` does not read what it
+  changes, and `install` does not remove it. It is a problem and not a warning because
+  a drop-in that replaces `ExecStart` or adds a hardening option fails every scheduled
+  run (status 203 or 3) while the unit file looks fine, and a warning does not change
+  the exit status.
+- A file name is bytes, and `doctor` prints the names of drop-ins. It reads them as
+  `systemctl` writes them (in double quotes when they hold a blank, a control character
+  or a character a shell reads specially, with `\"`, `\\`, `\$`, a backslash before a
+  backquote, `\a \b \f \n \r \t \v` and three octal digits like `\033`; `\xNN` is
+  read as well), so a name with a space is one file and a name with an escape character
+  is the file on disk. In the report a name is written as it is only when all of it is
+  printable and it holds no blank, quote or backslash. Every other name is in double
+  quotes with Go's escapes (`\r`, `\x1b`, `\x7f`, `\u202e`, `\xff` for a byte that is
+  not UTF-8), and so is the file systemd loaded, always. So the name of a drop-in or of
+  the file systemd loaded brings no control character, no escape sequence and no
+  character that reverses the direction of the text to the terminal, and it cannot start
+  a line that looks like one of `doctor`.
+- A drop-in in a `service.d` directory holds for every service of the host, and a
+  vendor, an image or a generator may have put it there (the generator of Ubuntu LXC
+  and Incus images writes `/run/systemd/system/service.d/zzz-lxc-service.conf` at
+  every boot). That is a warning that names the file; there is nothing for the
+  operator to remove, and `doctor` does not read what it changes.
+- What systemd loaded, asked with `systemctl show` of each service: a `FragmentPath`
+  other than the file in the unit directory is a problem naming the file systemd took
+  (a unit of the same name in `/etc/systemd/system.control` takes precedence over the
+  file `install` wrote), and
+  `NeedDaemonReload=yes` is a problem (the file or a drop-in changed after systemd last
+  read it, so the service runs as it did then). `systemctl daemon-reload` is the remedy;
+  `install` runs it only when it writes a file, not when the files are already as
+  rendered.
+- A service whose unit file is there and that systemd has not loaded (`LoadState` other
+  than `loaded`) is a problem that names the state: the timer cannot start it. A drop-in
+  that leaves the service without a valid `ExecStart` gives `bad-setting`, a link to
+  `/dev/null` under the unit's name in `system.control` gives `masked`, a line systemd
+  cannot read gives `error`. `systemctl status` of the service shows which.
+- A service whose unit file is there and for which `systemctl show` fails is a problem,
+  `cannot ask systemd about keepwatch-check.service: ...` with the error, because none of
+  the questions above has an answer then and the service may run anything. Only for a
+  service whose unit file is missing is nothing more said than that it is not installed.
+
+The questions to systemd are asked only while systemd runs. Limits:
+
+- A drop-in is judged by its existence, not by its content.
+- A drop-in whose file name is not valid UTF-8 cannot be listed. systemd applies it,
+  but `systemctl show` (and `status` and `cat`) of the unit then fails, with
+  `Failed to get properties: Bad message` on systemd 249 and with `Invalid argument` on
+  systemd 255, so `doctor` cannot name the file: it reports that it cannot ask systemd
+  about the service, which is a problem. `ls -b` of the drop-in directories of the unit
+  (`/etc/systemd/system/keepwatch-check.service.d` and the others named above) shows
+  the file; remove it and run `systemctl daemon-reload`.
+- The line about the last run still shows the effect of a change that `doctor` does not
+  recognise, as long as systemd answers.
 
 | Area | What it checks | Level |
 |---|---|---|
@@ -1149,7 +1336,7 @@ about the last run is what shows the effect of either.
 | notify | a notification channel is configured | none: warn |
 | units, notify | the installed services carry `--notify` exactly when `notify.ntfy` is configured | configured but a service lacks `--notify`: problem (each of its runs consumes the alerts, a loss); `--notify` but not configured: problem (every run exits 3) |
 | state | `state_dir` lies [where the paths must lie](#where-the-paths-must-lie) (its parent directory while it is missing); then it is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable. A `state_dir` whose path does not pass is not probed: nothing is written through a path that somebody else can redirect | a path that does not pass (under a path the sandbox hides or a reboot empties, or one somebody but root can change), unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed: problem (the services do not start, status 226/NAMESPACE) |
-| units | the four unit files are installed with the marker; the `ExecStart` program lies [where the paths must lie](#where-the-paths-must-lie) (it exists, the sandbox shows it, only root can change it or anything above it); `ReadWritePaths` equals `state_dir` of the configuration the unit runs with; each service runs with the configuration that was examined | missing, foreign, a program that does not pass, `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd), no `--config`, or another `--config` than the one examined: problem |
+| units | the four unit files are installed with the marker; each service file equals what `install` renders from the values it holds, systemd answers for the service, has loaded it from that file and has reloaded it, and no drop-in aims at the unit (one in `service.d` is a warning); the `ExecStart` program lies [where the paths must lie](#where-the-paths-must-lie) (it exists, the sandbox shows it, only root can change it or anything above it); `ReadWritePaths` equals `state_dir` of the configuration the unit runs with; each service runs with the configuration that was examined | missing, foreign, a service file that is not what `install` renders from its own values (changed after install), a drop-in outside `service.d`, a service systemd does not answer for or has not loaded, a unit that systemd loaded from another file or has not reloaded, a program that does not pass, `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd), no `--config`, or another `--config` than the one examined: problem; a drop-in in `service.d`: warn |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
 | last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output; exit 3, 4 and 226 are named); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
 
@@ -1166,12 +1353,15 @@ refused"). The `notify` line of the report shows only `scheme://host[:port]` of 
 
 ## Status
 
-Pre-MVP. The command line skeleton, the program execution layer, the
-strict configuration loader, the check engine with twelve check kinds, the state
-of the last run, the comparison, the text, JSON and Markdown reports, the ntfy
-notification and the weekly report exist; `check`, `report --weekly`, `config check`,
-`init`, `install`, `uninstall` and `doctor` are implemented, while `report` without
-`--weekly` is a stub that exits with status 3.
+Stage 0 is complete as listed at the top of this file: posture checks, change
+reports, ntfy notifications, the weekly report, and the systemd install with
+a hardened sandbox. Concretely: the command line skeleton, the program
+execution layer, the strict configuration loader, the check engine with twelve
+check kinds, the state of the last run, the comparison, the text, JSON and
+Markdown reports, the ntfy notification and the weekly report exist; `check`,
+`report --weekly`, `config check`, `init`, `install`, `uninstall` and `doctor`
+are implemented, while `report` without `--weekly` is still a stub that exits
+with status 3. The later stages are listed in the [Roadmap](#roadmap).
 
 ## License
 

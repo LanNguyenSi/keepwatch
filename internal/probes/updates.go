@@ -28,7 +28,8 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // It takes no list parameters.
 //
 // Two read-only apt commands are run, both with the options
-// "-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=" (an empty value
+// "-o APT::Get::Always-Include-Phased-Updates=true" (see "Phased updates"
+// below) and "-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=" (an empty value
 // tells apt to build its cache in memory; without it apt writes
 // /var/cache/apt/pkgcache.bin and srcpkgcache.bin, about 130 MB, whenever
 // the distribution's docker-clean snippet is not there, which was measured on
@@ -53,6 +54,44 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 //
 // "apt-get update" is never run, which would write: the check judges the
 // package lists the host has, and says how old they are.
+//
+// Phased updates. Ubuntu rolls some updates out in percentages: a version with
+// "Phased-Update-Percentage: N" in the Packages index is offered to a machine
+// only when a number derived from the machine-id and the source package is not
+// above N. Whether apt holds such an update back is decided by
+// IsIgnoredPhasedUpdate (apt-pkg/depcache.cc, apt 2.8.4), which pkgDistUpgrade
+// (apt-pkg/upgrade.cc), pkgProblemResolver::KeepPhasedUpdates
+// (apt-pkg/algorithms.cc) and InstallPackages (apt-private/private-install.cc)
+// ask through pkgDepCache::PhasingApplied; with APT::Get::Phase-Policy set,
+// ExcludePhased (apt-pkg/policy.cc) caps the priority of the version instead.
+// Both return "not phased" when APT::Configuration::isChroot()
+// (apt-pkg/aptconfiguration.cc) is true. That function runs "ischroot -t",
+// and ischroot (debianutils 5.17, ischroot_mountinfo in ischroot.c) calls a
+// process a chroot as soon as /proc/self/mountinfo differs from
+// /proc/1/mountinfo, which is the case in every service that has a mount
+// namespace of its own (ProtectSystem=, PrivateTmp=, ProtectKernel*=, ...).
+// The scheduled run of keepwatch is such a service. So under systemd apt
+// upgrades the phased packages in its simulation, and a direct run as root
+// keeps them back: the same host gave "N other upgrade(s) pending" with no
+// "not upgraded" count in one and fewer upgrades plus a "not upgraded" count in
+// the other. The security list was the same in both, because PhasingApplied
+// returns false for a security update. The cause was measured on Ubuntu 22.04
+// (apt 2.4.15) and 24.04 (apt 2.8.4) with a local repository.
+//
+// A second effect of the same setting: with APT::Get::Phase-Policy set (the
+// default is off in 2.8.4; a host can switch it on in apt.conf), ExcludePhased
+// caps the priority of a phased version at 1 whatever pocket it comes from, so
+// a phased security fix drops out of the simulation without a trace: it is
+// neither upgraded nor named as held back.
+//
+// Both commands therefore run with APT::Get::Always-Include-Phased-Updates=true.
+// It is checked first, in IsIgnoredPhasedUpdate and in ExcludePhased, before the
+// machine-id and the chroot test, and it comes before a "Never" setting of the
+// host (an option on the command line replaces the configuration files). apt then treats
+// every phased version as available, in a service and in a direct run, whatever
+// the machine-id, and the packages that phasing would defer are counted as
+// upgrades that are pending. The check reports what the package lists offer, not
+// what apt would install on this machine today.
 //
 // Only exit status 0 is interpreted for either command. The output of
 // apt-get must be understood in full: every line is a known kind of line, the
@@ -86,10 +125,10 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // code. Exactly one marked row must be present, else error. A package that is
 // newly installed has no installed version; it counts when its candidate
 // comes from a security pocket (the Inst line names the pockets). A package
-// that apt keeps back (apt-mark hold, a dependency that cannot be met, or
-// phasing) has no Inst line, but apt names it, and it is looked up in the same
-// way: when a security pocket carries a version newer than the installed one,
-// it is a pending security update whose detail says that apt keeps it back.
+// that apt keeps back (apt-mark hold, a dependency that cannot be met) has no
+// Inst line, but apt names it, and it is looked up in the same way: when a
+// security pocket carries a version newer than the installed one, it is a
+// pending security update whose detail says that apt keeps it back.
 // The simulation leaves such a package alone, so a fix for it would otherwise
 // never be seen.
 //
@@ -102,10 +141,10 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // (one evidence item with subject "apt-lists"); with pending updates the age
 // appears in the summary, and the stale lists are a warning that is reported
 // next to the failure (Outcome.Warnings), so an exception for the updates
-// leaves a warning. The count of "not upgraded" packages (kept back by a hold,
-// by a dependency, or by Ubuntu's phasing) is named in the summary; all of them
-// are judged, as above, so a held package with a newer security version fails
-// the check.
+// leaves a warning. The count of "not upgraded" packages (kept back by a hold
+// or by a dependency; phasing no longer keeps one back, see above) is named in
+// the summary; all of them are judged, as above, so a held package with a newer
+// security version fails the check.
 type securityUpdates struct{}
 
 func (securityUpdates) Name() string       { return "security_updates" }
@@ -126,7 +165,13 @@ type updatesProbe struct{ maxAge time.Duration }
 // files: an empty file name means the cache lives in memory.
 var aptNoCache = []string{"-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache="}
 
-var aptArgv = append(append([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true"}, aptNoCache...), "dist-upgrade")
+// aptPhasing makes apt treat every phased update as available. Without it the
+// result depends on where apt runs (see securityUpdates): a service with a mount
+// namespace of its own is taken for a chroot, where apt does not phase, and a
+// direct run is not.
+var aptPhasing = []string{"-o", "APT::Get::Always-Include-Phased-Updates=true"}
+
+var aptArgv = append(append(append([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true"}, aptNoCache...), aptPhasing...), "dist-upgrade")
 
 // Limits of the policy lookup.
 const (
@@ -271,7 +316,7 @@ type aptPkg struct {
 // update.
 func (p aptPkg) detail() string {
 	if p.kept {
-		return fmt.Sprintf("kept back by apt (held, or blocked by a dependency or by phasing); installed %s, the security version %s from %s is newer", p.oldVer, p.secVer, p.secPocket)
+		return fmt.Sprintf("kept back by apt (held, or blocked by a dependency); installed %s, the security version %s from %s is newer", p.oldVer, p.secVer, p.secPocket)
 	}
 	if len(p.pockets) > 0 {
 		return fmt.Sprintf("%s -> %s from %s", orNone(p.oldVer), p.newVer, strings.Join(p.pockets, ", "))
@@ -526,7 +571,7 @@ func lookupPolicy(ctx context.Context, env *Env, sim *aptSim) *Outcome {
 		n := min(aptPolicyBatch, len(names))
 		batch := names[:n]
 		names = names[n:]
-		argv := append(append([]string{"apt-cache"}, aptNoCache...), "policy", "--")
+		argv := append(append(append([]string{"apt-cache"}, aptNoCache...), aptPhasing...), "policy", "--")
 		argv = append(argv, batch...)
 		res, out := run(ctx, env, argv, 60*time.Second)
 		if out != nil {

@@ -383,13 +383,16 @@ func TestParityOfInstallDoctorAndTheScheduledRun(t *testing.T) {
 			j.writeConfig(j.cfgPath, "/sys/fs/cgroup/kwstate", "")
 		}, fails: failsNamespace, msg: "state_dir /sys/fs/cgroup/kwstate is under /sys", absent: "/sys/fs/cgroup/kwstate"},
 
-		// What the sandbox hides, or a reboot empties.
+		// What the sandbox hides, or a reboot empties. The first row is
+		// refused by the loader, which walks every ancestor of the
+		// configuration before the placement rules of install and doctor
+		// are reached; its message names the real directory of the jail.
 		{name: "hidden: configuration through a link into a directory below /tmp", build: func(j *jail) {
 			j.mkdir("/tmp/kwreal/cfg", 0o750)
 			j.link("/srv/kwlink", "/tmp/kwreal")
 			j.cfgPath = "/srv/kwlink/cfg/keepwatch.yaml"
 			j.writeConfig(j.cfgPath, jailState, "")
-		}, fails: failsHidden, msg: "the configuration directory /srv/kwlink/cfg cannot be trusted: /srv/kwlink is a symbolic link"},
+		}, fails: failsHidden, msg: "/srv/kwlink: is a symlink, whoever can change it can redirect the path"},
 		{name: "hidden: token file below /tmp", build: func(j *jail) {
 			j.mkdir("/tmp/kwtok", 0o700)
 			j.write("/tmp/kwtok/ntfy.token", 0o600, testToken+"\n")

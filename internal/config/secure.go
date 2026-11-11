@@ -29,7 +29,7 @@ func ownerOf(fi fs.FileInfo) (int, error) {
 	return int(st.Uid), nil
 }
 
-// securePolicy is the rule set openSecure enforces on the opened fd.
+// securePolicy is the rule set openSecureIn enforces on the opened fd.
 type securePolicy struct {
 	maxSize    int64
 	permMask   os.FileMode // permission bits that must all be zero
@@ -89,50 +89,68 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 	return b, nil
 }
 
-// openSecure opens path and enforces the policy on the file the fd
-// refers to: the final path component is never followed
-// (O_NOFOLLOW), a FIFO never blocks (O_NONBLOCK), and the fd's fstat
-// result must be a regular file no larger than maxSize (exactly one
-// hard link when nlink1) with no permMask permission bits and an
-// acceptable owner. Because every check runs on the one open fd, a
-// later openSecure call sees a swap of the path and the already-open
-// fd keeps pointing at the original inode; keeping swaps off the path
-// is the job of the directory rules in checkConfigDir. The caller must
-// close the file.
-func openSecure(path string, p securePolicy) (*os.File, fs.FileInfo, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+// openSecureIn opens the file name in the checked directory root and
+// enforces the policy on the file the fd refers to. display is the full
+// path of the file, which the messages name. The open goes through the
+// descriptor of the directory (openat), never through the path again:
+// root comes from openCheckedDir, which has checked every ancestor, so
+// the directory component cannot be swapped between the check and the
+// open. The final component is never followed: a symlink is refused, a
+// FIFO never blocks (O_NONBLOCK), and the descriptor must be the very
+// file the Lstat on the directory showed. The fd's fstat result must be a
+// regular file no larger than maxSize (exactly one hard link when nlink1)
+// with no permMask permission bits and an acceptable owner. Because
+// every check runs on the one open fd, a later call sees a swap of the
+// path and the already-open fd keeps pointing at the original inode. The
+// caller must close the file.
+func openSecureIn(root *os.Root, name, display string, p securePolicy) (*os.File, fs.FileInfo, error) {
+	li, err := root.Lstat(name)
+	if err != nil {
+		return nil, nil, &fs.PathError{Op: "open", Path: display, Err: rootCause(err)}
+	}
+	if li.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("%s: must be a regular file, it is a symlink", display)
+	}
+	if afterLstat != nil {
+		afterLstat(display)
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
-			return nil, nil, fmt.Errorf("%s: must be a regular file, it is a symlink", path)
+			return nil, nil, fmt.Errorf("%s: must be a regular file, it is a symlink", display)
 		}
-		return nil, nil, err
+		return nil, nil, &fs.PathError{Op: "open", Path: display, Err: rootCause(err)}
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return nil, nil, err
 	}
+	if !os.SameFile(li, fi) {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s: changed while it was being opened", display)
+	}
 	if !fi.Mode().IsRegular() {
 		f.Close()
-		return nil, nil, fmt.Errorf("%s: must be a regular file, found %s", path, fi.Mode().Type().String())
+		return nil, nil, fmt.Errorf("%s: must be a regular file, found %s", display, fi.Mode().Type().String())
 	}
 	if fi.Size() > p.maxSize {
 		f.Close()
-		return nil, nil, fmt.Errorf("%s: size %d is larger than the limit %d", path, fi.Size(), p.maxSize)
+		return nil, nil, fmt.Errorf("%s: size %d is larger than the limit %d", display, fi.Size(), p.maxSize)
 	}
 	if fi.Mode().Perm()&p.permMask != 0 {
 		f.Close()
-		return nil, nil, fmt.Errorf(p.permMsg, path, fi.Mode().Perm())
+		return nil, nil, fmt.Errorf(p.permMsg, display, fi.Mode().Perm())
 	}
 	if p.nlink1 {
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		if !ok {
 			f.Close()
-			return nil, nil, fmt.Errorf("%s: cannot determine the link count of the open file", path)
+			return nil, nil, fmt.Errorf("%s: cannot determine the link count of the open file", display)
 		}
 		if st.Nlink != 1 {
 			f.Close()
-			return nil, nil, fmt.Errorf("%s: has %d hard links, want exactly 1", path, st.Nlink)
+			return nil, nil, fmt.Errorf("%s: has %d hard links, want exactly 1", display, st.Nlink)
 		}
 	}
 	uid, err := p.ownerOf(fi)
@@ -142,36 +160,7 @@ func openSecure(path string, p securePolicy) (*os.File, fs.FileInfo, error) {
 	}
 	if !p.isExpected(uid) {
 		f.Close()
-		return nil, nil, fmt.Errorf(p.ownerMsg, path, uid)
+		return nil, nil, fmt.Errorf(p.ownerMsg, display, uid)
 	}
 	return f, fi, nil
-}
-
-// checkConfigDir enforces the configuration directory rules on dir:
-// it must exist as a real directory (not a symlink), must not be
-// writable by group or other, and must be owned by root or the
-// running user. The running-as-root case is why: a group-writable
-// conf.d lets another user suppress findings or redirect the token.
-func checkConfigDir(dir string, of OwnerOf) error {
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s: must not be a symlink", dir)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%s: must be a directory", dir)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s: permissions 0%03o allow group or other writes", dir, fi.Mode().Perm())
-	}
-	uid, err := of(fi)
-	if err != nil {
-		return err
-	}
-	if uid != 0 && uid != os.Getuid() {
-		return fmt.Errorf("%s: owned by uid %d, want uid 0 or %d", dir, uid, os.Getuid())
-	}
-	return nil
 }

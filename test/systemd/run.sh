@@ -8,6 +8,10 @@
 #             instead of comparing with them
 #   -keep     keep the work directory (default: remove it on exit)
 #
+# A host mounts devtmpfs at /dev and a container runtime a tmpfs; mounts.awk
+# writes both as tmpfs, so the comparison does not depend on which of the two
+# the host gives (see "Sandbox measurement" in the README).
+#
 # Environment:
 #   KEEPWATCH_SYSTEMD_ARCH   GOARCH of the keepwatch binary (default: the arch
 #                            of the docker daemon)
@@ -59,6 +63,9 @@ if [ -z "$arch" ]; then
   esac
 fi
 
+# The part of the measurement that has to read alike on every host and runtime.
+bash "$here/mounts_test.sh"
+
 work=$(mktemp -d)
 containers=()
 # shellcheck disable=SC2329 # called by the EXIT trap
@@ -101,6 +108,7 @@ for rel in "${releases[@]}"; do
   booted "$id" || { status=1; continue; }
   docker cp "$work/keepwatch" "$id:/opt/keepwatch/keepwatch"
   docker cp "$here/measure.sh" "$id:/opt/keepwatch/measure.sh"
+  docker cp "$here/mounts.awk" "$id:/opt/keepwatch/mounts.awk"
   asked=0
   docker exec "$id" bash /opt/keepwatch/measure.sh /out >"$out/container.log" 2>&1 || asked=$?
   docker cp "$id:/out/." "$out" || true

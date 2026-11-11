@@ -28,8 +28,10 @@ var (
 	ErrNotFound   = errors.New("execx: program not found")
 	ErrTimeout    = errors.New("execx: timeout")
 	ErrEmptyArgv  = errors.New("execx: empty argv")
-	// ErrIOTimeout means the program exited but a leftover child kept its
-	// output pipes open past the grace period; output may be incomplete.
+	// ErrIOTimeout means the program exited successfully but a leftover
+	// child kept its output pipes open past the grace period; output may be
+	// incomplete. After a non-zero exit the same condition is reported only
+	// through Result.IOIncomplete.
 	ErrIOTimeout = errors.New("execx: output pipes held open after exit")
 )
 
@@ -48,7 +50,13 @@ type Result struct {
 	Stdout    []byte
 	Stderr    []byte
 	Truncated bool // either stream was cut at MaxOutput
-	Duration  time.Duration
+	// IOIncomplete is set, for every exit status, when the output pipes were
+	// still open a grace period after the program exited (a leftover child
+	// held them) and had to be cut. Stdout and Stderr then hold what was
+	// read up to that point and may miss the tail; callers must not trust
+	// them as complete.
+	IOIncomplete bool
+	Duration     time.Duration
 }
 
 // Opts tunes a single run. Zero values select the defaults.
