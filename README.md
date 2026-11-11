@@ -190,8 +190,10 @@ More rules, all reported with `file:line`:
   of the main file, of `conf.d` and of the token file from `/` and
   checks every directory on the way, not only the one that holds the
   file: each must be a real directory (a symlink at any depth is
-  refused), owned by root or the running user, and not writable by group
-  or other. An ancestor with the sticky bit set may be writable by group or
+  refused), owned by root or the running user, readable by the running
+  user, and not writable by group or other. The path is cleaned first, so
+  write it without `..`: in `dir/link/../keepwatch.yaml` the link is never
+  looked at. An ancestor with the sticky bit set may be writable by group or
   other (others cannot rename or remove the entries they do not own); the
   directory that holds the files may not. This is the rule of the loader
   only: `install` and `doctor` still refuse a configuration or token file

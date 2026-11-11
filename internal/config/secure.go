@@ -29,7 +29,7 @@ func ownerOf(fi fs.FileInfo) (int, error) {
 	return int(st.Uid), nil
 }
 
-// securePolicy is the rule set openSecure enforces on the opened fd.
+// securePolicy is the rule set openSecureIn enforces on the opened fd.
 type securePolicy struct {
 	maxSize    int64
 	permMask   os.FileMode // permission bits that must all be zero
