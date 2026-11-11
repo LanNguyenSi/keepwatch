@@ -630,16 +630,11 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 		}
 	}
 	for _, s := range []string{install.CheckService, install.ReportService} {
-		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths")
+		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths", "FragmentPath", "NeedDaemonReload")
 		if err != nil || v["LoadState"] != "loaded" {
 			continue // not installed, said above
 		}
-		if v["DropInPaths"] != "" {
-			// systemd merges a drop-in into the unit, so the service runs with
-			// it whatever its file says. What it changes (ExecStart, a
-			// hardening option) is not something doctor judges.
-			out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", s, v["DropInPaths"])
-		}
+		d.loadedUnit(out, s, v)
 		// SuccessExitStatus=1 makes a run with findings a success.
 		switch {
 		case v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success"):
@@ -648,6 +643,41 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 			// The sandbox only shows when the service runs: nothing above proves it can.
 			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
 		}
+	}
+}
+
+// loadedUnit judges what systemd has loaded of a service, not the file in the
+// unit directory: the file it took the unit from, whether that is the file
+// doctor read, whether it has been reloaded since the file changed, and the
+// drop-ins merged into it.
+func (d Deps) loadedUnit(out reporter, name string, v map[string]string) {
+	if want := filepath.Join(d.unitDir(), name); v["FragmentPath"] != want {
+		out.add(Problem, "units", "systemd loaded %s from %q, not from %s, which is the file doctor judges: the service runs as that file says. Remove the other file and run \"systemctl daemon-reload\"; \"keepwatch install\" writes only the file in the unit directory", name, v["FragmentPath"], want)
+	}
+	if v["NeedDaemonReload"] == "yes" {
+		out.add(Problem, "units", "systemd has not reloaded %s since the unit file or a drop-in changed, so the service runs as it was when systemd last read it, not as the file on disk says: run \"systemctl daemon-reload\"", name)
+	}
+	var own, shared []string
+	for _, p := range strings.Fields(v["DropInPaths"]) {
+		// A directory named for keepwatch (keepwatch-check.service.d,
+		// keepwatch-.service.d) holds the changes of someone who set out to
+		// change these units. Any other, service.d above all, applies to every
+		// service of the host, and a vendor, a generator or an image may have
+		// put it there.
+		if strings.HasPrefix(filepath.Base(filepath.Dir(p)), "keepwatch-") {
+			own = append(own, p)
+		} else {
+			shared = append(shared, p)
+		}
+	}
+	if len(own) > 0 {
+		// systemd merges a drop-in into the unit, so the service runs with it
+		// whatever its file says. What it changes (ExecStart, a hardening
+		// option) is not something doctor judges.
+		out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", name, strings.Join(own, " "))
+	}
+	if len(shared) > 0 {
+		out.add(Warn, "units", "%s is merged with %s, which applies to other services as well and may come from the system, an image or a generator; doctor does not judge what it changes, so look at it if the service does not run as install renders it", name, strings.Join(shared, " "))
 	}
 }
 

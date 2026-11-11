@@ -381,6 +381,10 @@ func (s *Systemd) prop(unit, prop string) string {
 		return "success"
 	case "ExecMainStatus":
 		return "0"
+	case "FragmentPath":
+		return yes(s.Loaded[unit], install.DefaultUnitDir+"/"+unit, "")
+	case "NeedDaemonReload":
+		return "no"
 	case "ExecMainStartTimestamp":
 		return "Mon 2026-01-05 08:00:00 UTC"
 	}
