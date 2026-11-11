@@ -88,12 +88,37 @@ func wantLines(t *testing.T, what string, got, want []string) {
 
 func unitPath(name string) string { return unitDir + "/" + name }
 
+// writes is the log without the entries of install's write probe (one file in
+// state_dir, created and removed under a random name).
+func writes(log []string) []string {
+	var out []string
+	for _, l := range log {
+		if !strings.Contains(l, "/"+install.ProbePrefix) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// probes counts the probe files the log shows created and removed.
+func probes(log []string) (created, removed int) {
+	for _, l := range log {
+		switch {
+		case strings.HasPrefix(l, "write ") && strings.Contains(l, "/"+install.ProbePrefix):
+			created++
+		case strings.HasPrefix(l, "remove ") && strings.Contains(l, "/"+install.ProbePrefix):
+			removed++
+		}
+	}
+	return
+}
+
 func TestFirstInstall(t *testing.T) {
 	r := newRig()
 	if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
 		t.Fatalf("Install: %v\n%s", err, r.out)
 	}
-	wantLines(t, "writes", r.fs.Log, []string{
+	wantLines(t, "writes", writes(r.fs.Log), []string{
 		"mkdir /var/lib/keepwatch",
 		"write " + unitPath(install.CheckService), "write " + unitPath(install.ReportService),
 		"write " + unitPath(install.CheckTimer), "write " + unitPath(install.ReportTimer),
@@ -125,12 +150,12 @@ func TestSecondInstallChangesNothingAndSaysSo(t *testing.T) {
 	if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
 		t.Fatal(err)
 	}
-	logs, calls := len(r.fs.Log), len(r.sd.Runner.Calls)
+	logs, calls := len(writes(r.fs.Log)), len(r.sd.Runner.Calls)
 	if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
 		t.Fatalf("second Install: %v", err)
 	}
-	if len(r.fs.Log) != logs {
-		t.Errorf("second run wrote: %v", r.fs.Log[logs:])
+	if got := writes(r.fs.Log); len(got) != logs {
+		t.Errorf("second run wrote: %v", got[logs:])
 	}
 	for _, l := range r.sd.Runner.Lines()[calls:] {
 		if !strings.HasPrefix(l, "systemctl show ") {
@@ -154,7 +179,7 @@ func TestInstallUpdatesAChangedScheduleAndRestartsTheTimer(t *testing.T) {
 	if err := r.install(t, install.InstallOptions{Spec: s, ConfigFound: true}); err != nil {
 		t.Fatal(err)
 	}
-	wantLines(t, "writes", r.fs.Log, []string{"write " + unitPath(install.CheckTimer)})
+	wantLines(t, "writes", writes(r.fs.Log), []string{"write " + unitPath(install.CheckTimer)})
 	wantLines(t, "systemctl", r.sd.Mutations(), []string{
 		"systemctl daemon-reload",
 		"systemctl enable --now keepwatch-check.timer keepwatch-report.timer",
@@ -185,7 +210,7 @@ func TestInstallEnablesTimersThatWereTurnedOff(t *testing.T) {
 		if err := r.install(t, install.InstallOptions{ConfigFound: true}); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if len(r.fs.Log) != 0 {
+		if len(writes(r.fs.Log)) != 0 {
 			t.Errorf("%s: wrote %v", name, r.fs.Log)
 		}
 		wantLines(t, name+": systemctl", r.sd.Mutations(), []string{"systemctl enable --now keepwatch-check.timer keepwatch-report.timer"})
