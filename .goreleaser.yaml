@@ -53,11 +53,13 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
-# Release notes come from CHANGELOG.md through --release-notes.
-changelog:
-  disable: true
+# Release notes come from CHANGELOG.md through --release-notes. The
+# changelog pipe must stay enabled: it is the step that reads that file
+# (with --release-notes it generates no git changelog of its own).
 
 # The workflow publishes the draft after the provenance attestation exists.
+# A re-run after a failed attestation replaces its own earlier draft.
 release:
   draft: true
+  replace_existing_draft: true
   prerelease: auto

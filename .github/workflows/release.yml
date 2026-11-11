@@ -59,6 +59,7 @@ jobs:
           VERSION="$version" awk '
             BEGIN { heading = "## [" ENVIRON["VERSION"] "]" }
             /^## / { if (on) exit; if (index($0, heading) == 1) { on = 1; next } }
+            on && /^\[[^]]+\]: / { exit }
             on { print }
           ' CHANGELOG.md > "$notes"
           if ! grep -q '[^[:space:]]' "$notes"; then
