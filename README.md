@@ -184,8 +184,12 @@ More rules, all reported with `file:line`:
   is treated as empty; a file never replaces another file's root).
 - A key repeated within the same mapping of the same file is an error
   at any depth; the same key set again by a later file is an override.
-  Validation runs on the merged result, so a value that a later file
-  replaces is not checked on its own (known limit).
+  Validation runs on the merged result, so a later file may not replace
+  a value with one of another YAML kind (mapping, sequence or scalar):
+  that is an error, `<key> in <file:line> changes the type set in
+  <file:line>`, with the dotted path for a nested key (`notify.ntfy`).
+  Sequences of two files are the same kind and append. A null is not a
+  kind of its own, see the next rules.
 - `conf.d` must not be a symlink, dangling or not.
 - `notify.ntfy.token_file` must be a clean absolute path (no `.`, `..`
   or repeated `/`).
@@ -210,12 +214,26 @@ More rules, all reported with `file:line`:
   path is never followed (a symlink is refused), and each file's type,
   size (max 1 MiB), permissions (no group or other write bits, mode
   0644 or stricter) and ownership (root or the running user) are
-  checked on the open file descriptor itself. The directories holding
-  the main file, `conf.d` and the token file must be real directories
-  owned by root or the running user and not writable by group or
-  other; deeper ancestor directories are not checked by the loader
-  (known limit of a run by hand; `install` and `doctor` walk every
-  ancestor, see [Where the paths must lie](#where-the-paths-must-lie)).
+  checked on the open file descriptor itself. The loader walks the path
+  of the main file, of `conf.d` and of the token file from `/` and
+  checks every directory on the way, not only the one that holds the
+  file: each must be a real directory (a symlink at any depth is
+  refused), owned by root or the running user, readable by the running
+  user, and not writable by group or other. The path is cleaned first, so
+  write it without `..`: in `dir/link/../keepwatch.yaml` the link is never
+  looked at. An ancestor with the sticky bit set may be writable by group or
+  other (others cannot rename or remove the entries they do not own); the
+  directory that holds the files may not. This is the rule of the loader
+  only: `install` and `doctor` still refuse a configuration or token file
+  below `/tmp`, see [Where the paths must lie](#where-the-paths-must-lie). A refusal names
+  the directory and the failing component. Every step opens the next
+  directory relative to the one just checked, and the files, `conf.d`
+  entries included, are opened through the checked directory, so the
+  path cannot be swapped between the check and the read. A relative
+  `--config` is resolved against the physical working directory first.
+  POSIX ACLs, file capabilities and the mount of a directory are not
+  examined (known limit; `install` and `doctor` apply a stricter rule,
+  root only, see [Where the paths must lie](#where-the-paths-must-lie)).
 - `notify.ntfy.url` is required when `notify.ntfy` is set (https, or
   http only for loopback; no credentials, query or fragment; a URL port must
   be 1-65535). It is the address of the server, not of the topic: see
@@ -228,10 +246,12 @@ More rules, all reported with `file:line`:
   running user and not empty; it is validated without reading and
   fully re-checked every time the token is read.
 - `keepwatch init` writes the example file atomically (temp file +
-  rename, mode 0640) into a directory that must not be a symlink or
-  writable by group or other and must be owned by root or the running
-  user; it refuses to follow symlinks, and `--force` only replaces a
-  regular file.
+  rename, mode 0640) through a directory that is checked like the
+  others: neither it nor any directory above it may be a symlink or
+  writable by group or other (sticky ancestors excepted), and all must
+  be owned by root or the running user. Missing directories are created
+  with mode 0750 and checked in turn. It refuses to follow symlinks, and
+  `--force` only replaces a regular file.
 
 - `redact.patterns` is an optional list of extra redaction patterns, see
   [Redaction](#redaction).

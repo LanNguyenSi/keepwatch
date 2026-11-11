@@ -11,7 +11,7 @@ import (
 )
 
 func TestConfigReadCapReachedThroughProcfs(t *testing.T) {
-	// procfs files report st_size 0, so the size check in openSecure
+	// procfs files report st_size 0, so the size check in openSecureIn
 	// passes and only the cap on the bytes actually read stops them.
 	// /proc/kallsyms is several MiB on a normal kernel.
 	if runtime.GOOS != "linux" {
@@ -26,7 +26,12 @@ func TestConfigReadCapReachedThroughProcfs(t *testing.T) {
 		t.Skipf("%s has %d bytes, not over the %d byte cap", p, len(b), maxConfigSize)
 	}
 	t.Run("parseFile", func(t *testing.T) {
-		_, _, errs := parseFile(p, configPolicy(ownerOf))
+		dir, err := os.OpenRoot("/proc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dir.Close()
+		_, _, errs := parseFile(dir, "kallsyms", p, configPolicy(ownerOf))
 		if len(errs) == 0 || !strings.Contains(errs.Error(), "larger than 1048576 bytes") {
 			t.Fatalf("parseFile(%s) errors = %v, want the read cap error", p, errs)
 		}

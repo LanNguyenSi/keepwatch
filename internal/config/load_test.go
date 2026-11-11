@@ -172,9 +172,10 @@ func TestDefaults(t *testing.T) {
 func TestDefaultPathWhenFlagAbsent(t *testing.T) {
 	// Load("") must fall back to DefaultPath: the error names it (the
 	// file is absent in the sandbox, so a missing main file proves the
-	// fallback won over an empty path).
+	// fallback won over an empty path). Where /etc is a symlink (macOS)
+	// the load stops at that ancestor and names the directory instead.
 	_, err := Load("")
-	if err == nil || !strings.Contains(err.Error(), DefaultPath) {
+	if err == nil || !strings.Contains(err.Error(), filepath.Dir(DefaultPath)) {
 		t.Fatalf("Load(\"\") error = %v, want it to name %s", err, DefaultPath)
 	}
 }

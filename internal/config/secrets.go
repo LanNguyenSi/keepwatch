@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 )
@@ -24,10 +26,12 @@ func (c *Config) ReadToken() ([]byte, error) {
 	if of == nil {
 		of = ownerOf
 	}
-	if err := checkConfigDir(filepath.Dir(path), of); err != nil {
+	root, err := openCheckedDir(filepath.Dir(path), of, false)
+	if err != nil {
 		return nil, fmt.Errorf("notify.ntfy.token_file: %v", err)
 	}
-	f, _, err := openSecure(path, tokenPolicy(of))
+	defer root.Close()
+	f, _, err := openSecureIn(root, filepath.Base(path), path, tokenPolicy(of))
 	if err != nil {
 		return nil, err
 	}
@@ -47,48 +51,43 @@ func (c *Config) ReadToken() ([]byte, error) {
 
 // WriteExample writes the embedded example configuration to path with
 // mode 0640, creating its directory with 0750 when missing. It never
-// follows a symlink at the path or at the directory: an existing
-// entry (including a dangling symlink) is refused without --force,
-// and with --force only a regular file is replaced. An existing
-// directory must also be non-writable by group or other and owned by
-// uid 0 or the running user, like every other configuration path. The
-// write is atomic: a temp file in the same directory, chmod 0640,
-// fsync, then rename, with the temp file removed on any error.
+// follows a symlink at the path or at the directory or any directory
+// above it: an existing entry (including a dangling symlink) is refused
+// without --force, and with --force only a regular file is replaced.
+// The directory and every directory above it must also be non-writable
+// by group or other and owned by uid 0 or the running user, like every
+// other configuration path (see openCheckedDir), and the file is written
+// through the checked directory. The write is atomic: a temp file in the
+// same directory, chmod 0640, fsync, then rename, with the temp file
+// removed on any error.
 func WriteExample(path string, force bool, opts ...Option) error {
 	opt := options{ownerOf: ownerOf}
 	for _, fn := range opts {
 		fn(&opt)
 	}
 	dir := filepath.Dir(path)
-	if fi, err := os.Lstat(dir); err != nil {
-		if !isNotExist(err) {
-			return err
+	root, err := openCheckedDir(dir, opt.ownerOf, true)
+	if err != nil {
+		var de *dirError
+		if errors.As(err, &de) {
+			switch de.kind {
+			case dirSymlink:
+				if de.final() {
+					return fmt.Errorf("%s: the directory is a symlink, refusing to write through it", dir)
+				}
+			case dirNotDir:
+				if de.final() {
+					return fmt.Errorf("%s: not a directory", dir)
+				}
+			case dirPerm, dirOwner:
+				return fmt.Errorf("%v, refusing to write", err)
+			}
 		}
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-		if err := os.Chmod(dir, 0o750); err != nil { // defeat the umask
-			return err
-		}
-	} else {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s: the directory is a symlink, refusing to write through it", dir)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("%s: not a directory", dir)
-		}
-		if fi.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("%s: permissions 0%03o allow group or other writes, refusing to write", dir, fi.Mode().Perm())
-		}
-		uid, err := opt.ownerOf(fi)
-		if err != nil {
-			return err
-		}
-		if uid != 0 && uid != os.Getuid() {
-			return fmt.Errorf("%s: owned by uid %d, want uid 0 or %d, refusing to write", dir, uid, os.Getuid())
-		}
+		return err
 	}
-	if fi, err := os.Lstat(path); err == nil {
+	defer root.Close()
+	name := filepath.Base(path)
+	if fi, err := root.Lstat(name); err == nil {
 		if !force {
 			return fmt.Errorf("%s already exists (use --force to overwrite)", path)
 		}
@@ -96,13 +95,12 @@ func WriteExample(path string, force bool, opts ...Option) error {
 			return fmt.Errorf("%s exists and is not a regular file, refusing to replace it", path)
 		}
 	} else if !isNotExist(err) {
-		return err
+		return fmt.Errorf("%s: %v", path, rootCause(err))
 	}
-	tmp, err := os.CreateTemp(dir, ".keepwatch-*.yaml")
+	tmpName, tmp, err := createTemp(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %v", dir, rootCause(err))
 	}
-	tmpName := tmp.Name()
 	var errw error
 	if errw = tmp.Chmod(0o640); errw == nil {
 		_, errw = tmp.Write(example)
@@ -114,12 +112,27 @@ func WriteExample(path string, force bool, opts ...Option) error {
 		errw = cerr
 	}
 	if errw != nil {
-		os.Remove(tmpName)
+		root.Remove(tmpName)
 		return errw
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return err
+	if err := root.Rename(tmpName, name); err != nil {
+		root.Remove(tmpName)
+		return fmt.Errorf("%s: %v", path, rootCause(err))
 	}
 	return nil
+}
+
+// createTemp creates a new file with a name like .keepwatch-<random>.yaml
+// in the checked directory, mode 0600, never replacing an existing one.
+func createTemp(root *os.Root) (string, *os.File, error) {
+	for try := 0; ; try++ {
+		name := fmt.Sprintf(".keepwatch-%016x.yaml", rand.Uint64())
+		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return name, f, nil
+		}
+		if !errors.Is(err, fs.ErrExist) || try >= 100 {
+			return "", nil, err
+		}
+	}
 }

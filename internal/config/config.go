@@ -31,8 +31,10 @@
 // later file: the later value applies. A missing conf.d directory is
 // fine; a missing main file is an error, and a conf.d that is a
 // symlink (dangling or not) is an error. Validation runs on the
-// merged tree, so a value replaced by a later file is not validated
-// on its own (known limit). Repeated
+// merged tree, so a later file may not replace a value with one of
+// another YAML kind (mapping, sequence or scalar): that is an error
+// naming both places, "<key> in <file:line> changes the type set in
+// <file:line>". Repeated
 // keys within one mapping of one file are an error at any depth
 // (duplicate key "x" (first at line N)); a key repeated across files is
 // an override and fine.
@@ -50,10 +52,12 @@
 // the running user) are checked on the open file descriptor itself, so
 // a swap of the path between validation and a later open is caught by
 // the next check, not slipped past. The directories holding the main
-// file, conf.d and notify.ntfy.token_file must each be a real
-// directory (not a symlink), owned by uid 0 or the running user, and
-// not writable by group or other; deeper ancestor directories are not
-// checked (known limit). notify.ntfy.token_file is stricter: regular
+// file, conf.d and notify.ntfy.token_file, and every directory above
+// them up to "/", must each be a real directory (not a symlink), owned
+// by uid 0 or the running user, and not writable by group or other (an
+// ancestor with the sticky bit may be); the files are opened through the
+// checked directory, so the path cannot be swapped between check and
+// read (see openCheckedDir). notify.ntfy.token_file is stricter: regular
 // file, at most 4096 bytes, exactly one hard link, mode 0600 or
 // stricter, owned by the running user and not empty; it is validated
 // without reading it and fully re-checked every time ReadToken opens
@@ -62,12 +66,16 @@ package config
 
 import (
 	_ "embed"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 //go:embed example.yaml
@@ -195,16 +203,29 @@ func Load(path string, opts ...Option) (*Config, error) {
 
 	var errs Errors
 	// keepwatch runs as root: the directory holding the main file is
-	// part of the trust chain too. It must be a real, owned,
-	// non-writable directory; a missing one is reported as the missing
-	// main file instead.
+	// part of the trust chain too, and so is every directory above it.
+	// openCheckedDir walks the path from "/" and checks each component;
+	// the files are then opened relative to the handle it returns. A
+	// missing directory is reported as the missing main file instead; a
+	// directory that is refused is not read from at all.
+	policy := configPolicy(opt.ownerOf)
+	var root *yaml.Node
+	var origins map[*yaml.Node]string
 	mainDir := filepath.Dir(path)
-	if derr := checkConfigDir(mainDir, opt.ownerOf); derr != nil && !isNotExist(derr) {
+	dirRoot, derr := openCheckedDir(mainDir, opt.ownerOf, false)
+	switch {
+	case derr == nil:
+		defer dirRoot.Close()
+		var perrs Errors
+		root, origins, perrs = parseFile(dirRoot, filepath.Base(path), path, policy)
+		errs = append(errs, perrs...)
+	case isNotExist(derr):
+		origins = map[*yaml.Node]string{}
+		errs = append(errs, Error{File: path, Msg: "cannot read: open: " + lookupReason(errors.Unwrap(derr))})
+	default:
+		origins = map[*yaml.Node]string{}
 		errs = append(errs, Error{File: mainDir, Msg: fileErr(derr, mainDir)})
 	}
-	policy := configPolicy(opt.ownerOf)
-	root, origins, perrs := parseFile(path, policy)
-	errs = append(errs, perrs...)
 	switch {
 	case root == nil || isNull(root): // empty file or null document: nothing to merge
 		root = emptyMapping()
@@ -214,24 +235,27 @@ func Load(path string, opts ...Option) (*Config, error) {
 	}
 
 	var confd []string
-	dir := filepath.Join(filepath.Dir(path), "conf.d")
-	names, dirErr := os.ReadDir(dir)
-	// os.ReadDir follows a symlink, and a dangling one reports ENOENT,
-	// which would read as "no conf.d" and silently drop every drop-in.
-	// Any symlink at conf.d is an error, decided by Lstat first.
-	li, lerr := os.Lstat(dir)
-	confdLink := lerr == nil && li.Mode()&os.ModeSymlink != 0
-	switch {
-	case confdLink:
-		errs = append(errs, Error{File: dir, Msg: "must not be a symlink"})
-	case dirErr == nil:
-		// keepwatch runs as root: a conf.d that group or other can
-		// write, or that is a symlink, could suppress findings or
-		// redirect the token. It must be a real, owned, non-writable
-		// directory before any of its files are read.
-		if derr := checkConfigDir(dir, opt.ownerOf); derr != nil {
-			errs = append(errs, Error{File: dir, Msg: fileErr(derr, dir)})
-		} else {
+	dir := filepath.Join(mainDir, "conf.d")
+	var confdRoot *os.Root
+	if derr == nil {
+		var cerr *dirError
+		confdRoot, cerr = descend(dirRoot, "conf.d", dir, false, opt.ownerOf, false)
+		if cerr != nil {
+			cerr.dir = dir
+		}
+		switch {
+		case cerr == nil:
+			defer confdRoot.Close()
+			// keepwatch runs as root: a conf.d that group or other can
+			// write, or that is a symlink, could suppress findings or
+			// redirect the token. It was a real, owned, non-writable
+			// directory when it was opened, and its files are opened
+			// through that handle.
+			names, nerr := readDirNames(confdRoot)
+			if nerr != nil {
+				errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + fileErr(nerr, dir)})
+				break
+			}
 			for _, e := range names {
 				name := e.Name()
 				if strings.HasPrefix(name, ".") {
@@ -255,13 +279,19 @@ func Load(path string, opts ...Option) (*Config, error) {
 					errs = append(errs, Error{File: p, Msg: "unsupported extension " + strconv.Quote(filepath.Ext(name)) + ": use lower-case .yaml"})
 				}
 			}
+		case cerr.kind == dirLookup && isNotExist(cerr):
+			// no conf.d
+		case cerr.kind == dirLookup:
+			errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + fileErr(cerr, dir)})
+		default:
+			// Includes a symlink at conf.d, dangling or not: it must not
+			// read as "no conf.d".
+			errs = append(errs, Error{File: dir, Msg: fileErr(cerr, dir)})
 		}
-	case !isNotExist(dirErr):
-		errs = append(errs, Error{File: dir, Msg: "cannot read conf.d: " + fileErr(dirErr, dir)})
 	}
 
 	for _, file := range confd {
-		node, fileOrigins, ferrs := parseFile(file, policy)
+		node, fileOrigins, ferrs := parseFile(confdRoot, filepath.Base(file), file, policy)
 		for n, f := range fileOrigins {
 			origins[n] = f
 		}
@@ -273,7 +303,7 @@ func Load(path string, opts ...Option) (*Config, error) {
 			errs = append(errs, Error{File: file, Line: node.Line, Msg: "the configuration root must be a mapping"})
 			continue
 		}
-		mergeMapping(root, node)
+		mergeMapping(root, node, "", origins, &errs)
 	}
 	// Validate the merged tree even when some file had a parse problem:
 	// every file that parses gets validated, and all problems from all
@@ -296,4 +326,19 @@ func sortErrors(errs Errors) {
 		}
 		return errs[i].Line < errs[j].Line
 	})
+}
+
+// readDirNames lists the entries of the checked directory, sorted by name.
+func readDirNames(root *os.Root) ([]fs.DirEntry, error) {
+	d, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	entries, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
 }
