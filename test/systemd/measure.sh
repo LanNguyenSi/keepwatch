@@ -134,13 +134,9 @@ find / -xdev -mindepth 1 -maxdepth 2 -type l 2>/dev/null | grep -v '[[:space:]]'
       visible[$2] = 1
       print "visible " $2
     }' "$lib/verdicts" | sort
-  # Volatile and kernel file systems, the topmost mount of each tree only.
-  awk '$2 ~ /^(tmpfs|ramfs|devtmpfs|proc|sysfs|cgroup|cgroup2|devpts|mqueue|hugetlbfs|securityfs|debugfs|tracefs|fusectl|configfs|pstore|bpf|binfmt_misc|efivarfs)$/' "$lib/mounts" |
-    awk '{
-      for (p in seen) if (index($1, p "/") == 1) next
-      seen[$1] = 1
-      print "mount " $1 " " $2
-    }'
+  # Volatile and kernel file systems, the topmost mount of each tree only
+  # (mounts.awk says why devtmpfs is written as tmpfs).
+  awk -f /opt/keepwatch/mounts.awk "$lib/mounts"
 } >"$out/measured.txt"
 # Links into what was just listed.
 while read -r link target; do

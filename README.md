@@ -165,8 +165,24 @@ until the table knows it.
 
 The measurement depends on the kernel and the container runtime as well (`/proc` counts
 as hidden because `ProtectKernelTunables=yes` and `ProtectControlGroups=yes` imply
-`MountAPIVFS=yes`, which gives the service its own instance of it). It is a
-local target; no workflow runs it.
+`MountAPIVFS=yes`, which gives the service its own instance of it).
+
+The workflow `.github/workflows/systemd.yml` runs `make systemd` on an x86_64 runner on
+every push to `main`, on pull requests that touch `internal/install`, `internal/doctor`,
+`test/systemd`, the `Makefile` or the workflow, and once a week, so the committed files
+cannot rot and a systemd that hides a new directory fails the job. The files were
+first measured on arm64, and there is one set of files for every architecture. The one
+difference seen between an arm64 container runtime and a real x86_64 host is the type at
+`/dev`: the host mounts `devtmpfs`, the runtime a `tmpfs`. `test/systemd/mounts.awk`
+writes both as `tmpfs`. That is the only thing it changes: the Go test reads the path of
+a `mount` line, not its type, and one entry of the table (`/dev`) refuses it either way.
+A new `hidden` or `visible` directory, a new mount or a new link still changes the file
+and fails the job; a `devtmpfs` anywhere else than at `/dev` shows as a new mount.
+`test/systemd/mounts_test.sh` checks this on captures of mount lists
+and runs first in `make systemd`. If the first run on x86_64 (or a later runtime) shows
+a difference in another line, it is a measurement to judge, not noise: look at the diff
+in the log of the job, decide whether the table is wrong, and only then `-update` the
+files or turn the difference into a normalisation next to the one above.
 
 ## Configuration
 
