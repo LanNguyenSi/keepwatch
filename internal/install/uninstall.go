@@ -67,7 +67,7 @@ type UninstallOptions struct {
 // not carry the marker (or that is a link) is left alone and reported. With
 // Purge it then removes keepwatch's own state files, and its configuration
 // files if the configuration provably is keepwatch's, and the directories that
-// are empty afterwards; see the README for the list.
+// are empty afterwards; see docs/install.md for the list.
 //
 // A configuration file is proven to be keepwatch's only by its path: the
 // default path, or the --config recorded in an installed unit that carries the

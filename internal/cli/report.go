@@ -138,7 +138,7 @@ func runReport(e env, args []string, stdout, stderr io.Writer) int {
 		// it is written, and the failure is recorded only on the snapshot
 		// that was read at the start and has no record. What remains is the
 		// time between that read and the rename (there is no lock; see
-		// the README).
+		// docs/running.md).
 		if e.afterSend != nil {
 			e.afterSend()
 		}

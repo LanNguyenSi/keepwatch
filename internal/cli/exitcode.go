@@ -9,7 +9,7 @@ const (
 	// written, an interrupted run, a failed write of the report).
 	ExitInternal = 3
 	// ExitDelivery: a notification that --notify asked for could not be
-	// delivered. The state is not moved forward then (see the README), so
+	// delivered. The state is not moved forward then (see docs/running.md), so
 	// the next run reports the same changes again. Against the other codes:
 	// 3 wins over 4 (the run itself is unreliable), 4 wins over 1 (the
 	// checks' own verdict is in the report and the next run repeats it; that
@@ -23,7 +23,7 @@ const (
 const authorizedKeysKind = "authorized_keys"
 
 // Counts reports whether a result makes `check` exit 1 at the --fail-on
-// severity. The rule, which the README repeats:
+// severity. The rule, which docs/running.md repeats:
 //
 //   - fail counts when its severity is at least failOn;
 //   - error counts the same way, because an unknown state must not look

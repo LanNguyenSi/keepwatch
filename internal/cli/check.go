@@ -71,7 +71,7 @@ func (e env) withDefaults() env {
 // exit 1.
 const DefaultFailOn = result.Medium
 
-// runCheck implements `keepwatch check`. See the README for the contract:
+// runCheck implements `keepwatch check`. See docs/running.md for the contract:
 // the flags, the formats, the exit codes and the state handling.
 func runCheck(e env, args []string, stdout, stderr io.Writer) int {
 	e = e.withDefaults()

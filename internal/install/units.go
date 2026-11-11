@@ -354,7 +354,7 @@ type File struct {
 	Content []byte
 }
 
-// Hardening of both services. The reason for every option is in the README.
+// Hardening of both services. The reason for every option is in docs/install.md.
 const (
 	memoryMax        = "1536M"
 	goMemLimit       = "384MiB"

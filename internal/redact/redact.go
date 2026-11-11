@@ -16,8 +16,8 @@
 // character that moves the cursor, starts a terminal escape sequence, forges
 // a line or flips the direction of the text.
 //
-// Redaction is best effort. It catches the common shapes listed in the
-// README; it cannot know a secret that has no recognisable shape. Probes
+// Redaction is best effort. It catches the common shapes listed in
+// docs/running.md; it cannot know a secret that has no recognisable shape. Probes
 // keep secrets out of evidence in the first place (they never print file
 // contents, only fingerprints and counts); this package is the second line.
 package redact

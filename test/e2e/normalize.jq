@@ -1,6 +1,6 @@
 # Normalises one keepwatch JSON report for the golden comparison.
-# Every rewrite here is listed with its reason in the README (section
-# "End-to-end tests"). Nothing here may touch a check id, a status, a
+# Every rewrite here is listed with its reason in docs/development.md
+# (section "End-to-end tests"). Nothing here may touch a check id, a status, a
 # severity, a change kind, an alert flag or an exit code: run.sh checks that
 # separately (see signature.jq).
 

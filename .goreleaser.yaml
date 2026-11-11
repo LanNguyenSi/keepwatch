@@ -48,6 +48,12 @@ archives:
           owner: root
           group: root
           mtime: "{{ .CommitDate }}"
+      - src: docs/*.md
+        dst: docs
+        info:
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
 
 checksum:
   name_template: checksums.txt

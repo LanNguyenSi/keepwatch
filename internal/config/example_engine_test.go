@@ -75,7 +75,7 @@ func uncommentBlock(t *testing.T, text, head string) string {
 	return strings.Join(lines, "\n")
 }
 
-// The redact block of the example is commented out, and the README and the
+// The redact block of the example is commented out, and the documentation and the
 // comment promise what its two patterns do. Uncommented, it must load, pass
 // the engine, compile as redaction patterns and behave as documented.
 func TestExampleRedactBlockIsValidWhenUncommented(t *testing.T) {
