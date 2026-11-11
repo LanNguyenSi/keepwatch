@@ -10,7 +10,7 @@
 #
 # A host mounts devtmpfs at /dev and a container runtime a tmpfs; mounts.awk
 # writes both as tmpfs, so the comparison does not depend on which of the two
-# the host gives (see "Sandbox measurement" in the README).
+# the host gives (see docs/development.md, "Sandbox measurement").
 #
 # Environment:
 #   KEEPWATCH_SYSTEMD_ARCH   GOARCH of the keepwatch binary (default: the arch

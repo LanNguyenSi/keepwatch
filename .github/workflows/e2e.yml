@@ -1,7 +1,7 @@
 name: E2E
 
 # Optional: not a required check. Runs keepwatch in Ubuntu 22.04 and 24.04
-# containers on an x86_64 runner (see "End-to-end tests" in the README).
+# containers on an x86_64 runner (see docs/development.md, "End-to-end tests").
 on:
   workflow_dispatch:
   pull_request:

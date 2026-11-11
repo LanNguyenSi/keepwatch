@@ -1,6 +1,6 @@
 name: Sandbox measurement
 
-# Runs `make systemd` (see "Sandbox measurement" in the README): Ubuntu 22.04
+# Runs `make systemd` (see docs/development.md, "Sandbox measurement"): Ubuntu 22.04
 # and 24.04 containers with systemd as PID 1 on an x86_64 runner. The committed
 # files in test/systemd are compared with what the sandbox does there, so they
 # cannot rot, and the weekly run notices a systemd that hides a new directory.

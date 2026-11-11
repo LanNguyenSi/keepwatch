@@ -6,8 +6,8 @@ Part of the [keepwatch README](../README.md).
 
 Each release on the [releases page](https://github.com/LanNguyenSi/keepwatch/releases)
 carries static `linux/amd64` and `linux/arm64` archives
-(`keepwatch_<version>_linux_<arch>.tar.gz`, containing the binary, `LICENSE` and
-`README.md`), a `checksums.txt` with their SHA-256 sums, and a build-provenance
+(`keepwatch_<version>_linux_<arch>.tar.gz`, containing the binary, `LICENSE`,
+`README.md` and `docs/`), a `checksums.txt` with their SHA-256 sums, and a build-provenance
 attestation for the archives and the checksum file. The example below installs
 version 0.1.0 on `amd64`; the version in the file name has no leading `v`.
 
