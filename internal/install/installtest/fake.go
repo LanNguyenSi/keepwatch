@@ -342,6 +342,10 @@ func (s *Systemd) handle(argv []string) (execx.Result, error) {
 	case "enable":
 		for _, u := range units() {
 			s.Loaded[u], s.Enabled[u], s.Active[u] = true, true, true
+			// systemd loads the service a timer starts together with the timer.
+			if name, ok := strings.CutSuffix(u, ".timer"); ok {
+				s.Loaded[name+".service"] = true
+			}
 		}
 	case "disable":
 		for _, u := range units() {
@@ -381,6 +385,10 @@ func (s *Systemd) prop(unit, prop string) string {
 		return "success"
 	case "ExecMainStatus":
 		return "0"
+	case "FragmentPath":
+		return yes(s.Loaded[unit], install.DefaultUnitDir+"/"+unit, "")
+	case "NeedDaemonReload":
+		return "no"
 	case "ExecMainStartTimestamp":
 		return "Mon 2026-01-05 08:00:00 UTC"
 	}

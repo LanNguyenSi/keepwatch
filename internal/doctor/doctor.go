@@ -21,8 +21,11 @@ import (
 	"io/fs"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/catalog"
 	"github.com/LanNguyenSi/keepwatch/internal/config"
@@ -544,10 +547,13 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 	// above is judged by its own file, loaded once.
 	others := map[string]judged{}
 	installedAll := true
+	// missing are the unit files that are not there.
+	missing := map[string]bool{}
 	for _, u := range units {
 		switch {
 		case errors.Is(u.err, fs.ErrNotExist):
 			installedAll = false
+			missing[u.name] = true
 			out.add(Problem, "units", "%s is not installed; run \"keepwatch install\"", u.path)
 			continue
 		case u.err != nil:
@@ -571,6 +577,9 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 			for _, p := range install.CheckPlacement(d.FS, install.Manifest(install.Paths{Binary: in.Binary})) {
 				out.add(Problem, "units", "%s: %s", u.path, p.Error())
 			}
+		}
+		if in.Binary != "" && in.ConfigPath != "" {
+			d.unitDrift(out, u)
 		}
 		var cfg *config.Config
 		switch {
@@ -626,10 +635,26 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 		}
 	}
 	for _, s := range []string{install.CheckService, install.ReportService} {
-		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp")
-		if err != nil || v["LoadState"] != "loaded" {
-			continue // not installed, said above
+		// A service whose file is missing was reported as not installed, and
+		// that systemd does not know it adds nothing. For every other one (the
+		// file is there: ours, foreign or unreadable) the questions below are
+		// the only thing that tells what systemd runs, so a question without an
+		// answer, or a unit systemd did not load, is a problem and never a
+		// silent skip.
+		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths", "FragmentPath", "NeedDaemonReload")
+		if err != nil {
+			if !missing[s] {
+				out.add(Problem, "units", "cannot ask systemd about %s: %s. So doctor cannot tell whether drop-ins are merged into the service, which file systemd loaded and how the last run ended, and nothing says that the service runs as \"keepwatch install\" renders it. \"systemctl show %s\" fails, for one, when a drop-in of the unit has a file name that is not valid UTF-8", s, quoteUnprintable(err.Error()), s)
+			}
+			continue
 		}
+		if v["LoadState"] != "loaded" {
+			if !missing[s] {
+				out.add(Problem, "units", "systemd has not loaded %s although its unit file is there (load state %q), so the timer cannot start the service: the unit is masked, or systemd refuses a setting of the unit file or of a drop-in. \"systemctl status %s\" shows which", s, v["LoadState"], s)
+			}
+			continue
+		}
+		d.loadedUnit(out, s, v)
 		// SuccessExitStatus=1 makes a run with findings a success.
 		switch {
 		case v["ActiveState"] == "failed" || (v["Result"] != "" && v["Result"] != "success"):
@@ -639,6 +664,221 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
 		}
 	}
+}
+
+// loadedUnit judges what systemd has loaded of a service, not the file in the
+// unit directory: the file it took the unit from, whether that is the file
+// doctor read, whether it has been reloaded since the file changed, and the
+// drop-ins merged into it.
+func (d Deps) loadedUnit(out reporter, name string, v map[string]string) {
+	if want := filepath.Join(d.unitDir(), name); v["FragmentPath"] != want {
+		out.add(Problem, "units", "systemd loaded %s from %q, not from %s, which is the file doctor judges: the service runs as that file says. Remove the other file and run \"systemctl daemon-reload\"; \"keepwatch install\" writes only the file in the unit directory", name, v["FragmentPath"], want)
+	}
+	if v["NeedDaemonReload"] == "yes" {
+		out.add(Problem, "units", "systemd has not reloaded %s since the unit file or a drop-in changed, so the service runs as it was when systemd last read it, not as the file on disk says: run \"systemctl daemon-reload\"", name)
+	}
+	var own, shared []string
+	for _, p := range splitQuoted(v["DropInPaths"]) {
+		// systemd reads the drop-ins of a unit from <name>.service.d for each
+		// name the unit has (an alias included), from the directories named
+		// for a prefix of the name (keepwatch-.service.d) and from service.d,
+		// which holds for every service of the host. Only service.d can have
+		// been put there by someone who did not mean these units: a vendor, an
+		// image or a generator. Everything else is aimed at this unit.
+		if filepath.Base(filepath.Dir(p)) == "service.d" {
+			shared = append(shared, p)
+		} else {
+			own = append(own, p)
+		}
+	}
+	if len(own) > 0 {
+		// systemd merges a drop-in into the unit, so the service runs with it
+		// whatever its file says. What it changes (ExecStart, a hardening
+		// option) is not something doctor judges.
+		out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", name, listPaths(own))
+	}
+	if len(shared) > 0 {
+		out.add(Warn, "units", "%s is merged with %s from a service.d directory, which applies to every service of the host and may come from the system, an image or a generator; doctor does not judge what it changes, so look at it if the service does not run as install renders it", name, listPaths(shared))
+	}
+}
+
+// splitQuoted splits the value of a systemctl property that lists paths, as
+// "systemctl show" prints it (measured on systemd 249 and 255, which print the
+// same bytes). The entries are separated by blanks. systemctl puts an entry in
+// double quotes when it holds a blank, a control character or one of a set of
+// characters a shell reads specially (a quote, a backslash, & ; * ? among
+// them), and inside the quotes it writes
+//
+//   - a backslash before a double quote, a backslash, a dollar sign and a
+//     backquote;
+//   - \a \b \f \n \r \t \v for these control characters;
+//   - a backslash and three octal digits for every other byte below 0x20 and
+//     for 0x7f (\033, \177).
+//
+// Valid UTF-8 above 0x7f is printed as it is, quoted or not, whatever the
+// character is. splitQuoted undoes exactly that, and reads two more forms of
+// systemd's escaping that systemctl does not print here: \xNN (two hexadecimal
+// digits) and a backslash before a single quote. A backslash before any other
+// byte stands for that byte, and one that is not followed by three octal digits
+// of a value up to 0377 (or by x and two hexadecimal digits) is not a number.
+// A backslash outside quotes is kept. A quote that is not closed takes the rest
+// of the value. The entries are the bytes of the file names: they can hold
+// control characters and must be quoted before they are printed (listPaths).
+func splitQuoted(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inToken, inQuote := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inQuote && c == '\\' && i+1 < len(s):
+			if b, ok := escapedNumber(s[i+1:]); ok {
+				cur.WriteByte(b)
+				i += escapedNumberLen
+				continue
+			}
+			i++
+			switch e := s[i]; e {
+			case 'a':
+				cur.WriteByte('\a')
+			case 'b':
+				cur.WriteByte('\b')
+			case 'f':
+				cur.WriteByte('\f')
+			case 'n':
+				cur.WriteByte('\n')
+			case 'r':
+				cur.WriteByte('\r')
+			case 't':
+				cur.WriteByte('\t')
+			case 'v':
+				cur.WriteByte('\v')
+			default:
+				cur.WriteByte(e)
+			}
+		case inQuote && c == '"':
+			inQuote = false
+		case inQuote:
+			cur.WriteByte(c)
+		case c == '"':
+			inQuote, inToken = true, true
+		case c == ' ' || c == '\t' || c == '\n':
+			if inToken {
+				out = append(out, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+		default:
+			cur.WriteByte(c)
+			inToken = true
+		}
+	}
+	if inToken {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// escapedNumberLen is how many bytes the number of an escape takes after the
+// backslash, in both forms.
+const escapedNumberLen = 3
+
+// escapedNumber reads the number of an escape, s being what follows the
+// backslash: three octal digits of a value up to 0377, or x and two
+// hexadecimal digits.
+func escapedNumber(s string) (b byte, ok bool) {
+	if len(s) < escapedNumberLen {
+		return 0, false
+	}
+	digits, base := s[:3], 8
+	if s[0] == 'x' {
+		digits, base = s[1:3], 16
+	}
+	// ParseUint takes digits of the base and nothing else (no sign, no
+	// prefix), and refuses a value that does not fit a byte.
+	v, err := strconv.ParseUint(digits, base, 8)
+	if err != nil {
+		return 0, false
+	}
+	return byte(v), true
+}
+
+// printable reports whether s can be written to a terminal as it is: valid
+// UTF-8 that holds nothing but printable characters (unicode.IsPrint: no
+// control character, no escape, no character that changes the direction of the
+// text or draws nothing but a blank).
+func printable(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// quoteUnprintable returns a text of another program for a message: as it is
+// when it is printable, and quoted like a path of listPaths when it is not.
+func quoteUnprintable(s string) string {
+	if printable(s) {
+		return s
+	}
+	return strconv.Quote(s)
+}
+
+// listPaths joins paths for a message. The paths are file names of the host,
+// so they can hold any byte but NUL. One that is printable and holds no blank,
+// no double quote and no backslash is written as it is; every other one is
+// written as strconv.Quote writes it (\r, \x1b, \x7f, \u202e, \xff for a byte
+// that is not UTF-8), so that no control character and no byte that is not
+// UTF-8 reaches the output and the end of each path can be seen.
+func listPaths(paths []string) string {
+	q := make([]string, len(paths))
+	for i, p := range paths {
+		q[i] = p
+		if p == "" || !printable(p) || strings.ContainsAny(p, " \"\\") {
+			q[i] = strconv.Quote(p)
+		}
+	}
+	return strings.Join(q, " ")
+}
+
+// unitDrift reports a service file that is not what "keepwatch install" writes
+// for the values the file holds. Inspect reads only the last ExecStart and a
+// few values, so a second ExecStart line, an added or changed option or any
+// other line would pass the other checks while systemd runs something else.
+func (d Deps) unitDrift(out reporter, u unitFile) {
+	want, err := install.RenderInstalled(u.name, u.content)
+	if err != nil {
+		out.add(Problem, "units", "%s is not a unit that \"keepwatch install\" can have written: %v; run \"keepwatch install\" again", u.path, err)
+		return
+	}
+	diff, differs := install.FirstDifference(want, u.content)
+	if !differs {
+		return
+	}
+	var where string
+	switch {
+	case diff.GotEnded:
+		where = fmt.Sprintf("the file ends after line %d, where the rendered unit goes on with %s", diff.Line-1, shown(diff.Want))
+	case diff.WantEnded:
+		where = fmt.Sprintf("line %d, %s, is not in the rendered unit", diff.Line, shown(diff.Got))
+	case diff.Want == diff.Got:
+		where = fmt.Sprintf("line %d, %s, lacks or has a line feed that the rendered unit does not", diff.Line, shown(diff.Got))
+	default:
+		where = fmt.Sprintf("line %d is %s, the rendered unit has %s", diff.Line, shown(diff.Got), shown(diff.Want))
+	}
+	out.add(Problem, "units", "%s was changed after \"keepwatch install\" wrote it, so systemd does not run it as rendered (rendered from the values the file holds): %s. Run \"keepwatch install\" again to write it as rendered", u.path, where)
+}
+
+// shown quotes a line of a unit file for a message, shortened.
+func shown(line string) string {
+	if len(line) > 160 {
+		line = line[:160] + "..."
+	}
+	return strconv.Quote(line)
 }
 
 // unitNotify checks that an installed service notifies exactly when
