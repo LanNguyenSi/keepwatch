@@ -418,6 +418,38 @@ func waitGone(pid int) bool {
 	return false
 }
 
+// runBounded runs argv and fails the test with a named message when Run has
+// not returned after runDeadline, instead of letting a hang surface as a go
+// test timeout. On the deadline it cancels the context, which kills the
+// process group and so unblocks Run and removes the grandchild.
+func runBounded(t *testing.T, r *Real, argv []string) (Result, error) {
+	t.Helper()
+	const runDeadline = 5 * time.Second
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	type out struct {
+		res Result
+		err error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		res, err := r.Run(ctx, argv, Opts{})
+		ch <- out{res, err}
+	}()
+	select {
+	case o := <-ch:
+		return o.res, o.err
+	case <-time.After(runDeadline):
+		cancel()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatalf("Run did not return within %s although the wait delay is far shorter", runDeadline)
+		return Result{}, nil
+	}
+}
+
 // The child exits while a background grandchild holds stdout: Run must
 // return within the wait delay with ErrIOTimeout and kill the grandchild.
 func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
@@ -426,7 +458,7 @@ func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
 	t.Cleanup(func() { waitDelay = old })
 
 	start := time.Now()
-	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "sleep 30 & echo $!; exit 0"}, Opts{})
+	res, err := runBounded(t, realRunner(t, "sh"), []string{"sh", "-c", "sleep 30 & echo $!; exit 0"})
 	if !errors.Is(err, ErrIOTimeout) {
 		t.Fatalf("err = %v, want ErrIOTimeout", err)
 	}
@@ -457,7 +489,7 @@ func TestGrandchildHoldingPipeNonZeroExit(t *testing.T) {
 	t.Cleanup(func() { waitDelay = old })
 
 	start := time.Now()
-	res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", "sleep 30 & echo $!; exit 4"}, Opts{})
+	res, err := runBounded(t, realRunner(t, "sh"), []string{"sh", "-c", "sleep 30 & echo $!; exit 4"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +526,7 @@ func TestGrandchildHoldingStderrOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			script := "echo out; sleep 30 >/dev/null & echo $! >&2; exit " + strconv.Itoa(tc.exit)
 			start := time.Now()
-			res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", script}, Opts{})
+			res, err := runBounded(t, realRunner(t, "sh"), []string{"sh", "-c", script})
 			if tc.exit == 0 && !errors.Is(err, ErrIOTimeout) || tc.exit != 0 && err != nil {
 				t.Fatalf("err = %v", err)
 			}
