@@ -18,6 +18,11 @@ Requires Go 1.27 or newer.
 make build    # bin/keepwatch (host) and bin/keepwatch-linux-amd64, static
 ```
 
+`make build` stamps the version and commit from git
+(`git describe --tags --always --dirty`) and the build time, so
+`keepwatch version` reports them. Release builds stamp the commit time instead
+of the build time, so that the same commit builds the same bytes.
+
 ## Test
 
 ```sh
@@ -863,6 +868,28 @@ match the empty string or compile to a program of more than 1000 instructions
 short, but its cost is paid on every byte of every field that is shown), and a
 bad one is a configuration error with file and line. Lists in `conf.d` files are appended to the main file's list. The redaction
 function (`redact.Redactor.Clean`) is what the notification code uses as well.
+
+## Install from a release
+
+Each release on the [releases page](https://github.com/LanNguyenSi/keepwatch/releases)
+carries static `linux/amd64` and `linux/arm64` archives
+(`keepwatch_<version>_linux_<arch>.tar.gz`, containing the binary, `LICENSE` and
+`README.md`), a `checksums.txt` with their SHA-256 sums, and a build-provenance
+attestation for the archives and the checksum file. The example below installs
+version 0.1.0 on `amd64`; the version in the file name has no leading `v`.
+
+```sh
+# download keepwatch_0.1.0_linux_amd64.tar.gz and checksums.txt from the release, then:
+sha256sum -c checksums.txt --ignore-missing
+gh attestation verify keepwatch_0.1.0_linux_amd64.tar.gz --repo LanNguyenSi/keepwatch
+tar -xzf keepwatch_0.1.0_linux_amd64.tar.gz keepwatch
+sudo install -o root -g root -m 0755 keepwatch /usr/local/bin/keepwatch
+keepwatch version
+```
+
+`sha256sum -c` checks that the download matches the published sums;
+`gh attestation verify` checks that the archive was built from this repository by
+the release workflow. It needs the [GitHub CLI](https://cli.github.com/) (`gh`).
 
 ## Scheduled runs: install, uninstall, doctor
 
