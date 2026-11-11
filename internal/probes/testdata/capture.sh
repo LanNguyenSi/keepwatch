@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Re-captures the fixtures under this directory from local Ubuntu containers.
-# See README.md for the container preparation. Usage:
+# See docs/development.md for the container preparation. Usage:
 #   KW_PLAIN_2204=<container> KW_PLAIN_2404=<container> \
 #   KW_SYSTEMD_2204=<container> KW_SYSTEMD_2404=<container> ./capture.sh
 # Plain containers: ubuntu:22.04 / ubuntu:24.04 with openssh-server, fail2ban,

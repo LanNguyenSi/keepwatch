@@ -30,10 +30,15 @@ sha256sum -c checksums.txt --ignore-missing
 tar -xzf keepwatch_0.1.0_linux_amd64.tar.gz keepwatch
 sudo install -o root -g root -m 0755 keepwatch /usr/local/bin/keepwatch
 sudo keepwatch init                 # write an example configuration
+sudoedit /etc/keepwatch/keepwatch.yaml  # set notify.ntfy (or remove it), listeners, ...
 sudo keepwatch config check         # validate it
 sudo keepwatch install              # install the systemd units
 sudo keepwatch doctor               # check the installation
 ```
+
+The example configuration points `notify.ntfy` at a placeholder server: set your
+own server and topic, or remove the block to run without notifications (see
+[docs/configuration.md](docs/configuration.md)).
 
 ## Usage
 
