@@ -375,7 +375,7 @@ func TestCancelledContextRunsNothing(t *testing.T) {
 }
 
 var (
-	aptNoCache = []string{"-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache="}
+	aptNoCache = []string{"-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=", "-o", "APT::Get::Always-Include-Phased-Updates=true"}
 	aptArgv    = append(append([]string{"apt-get", "-s", "-o", "Debug::NoLocking=true"}, aptNoCache...), "dist-upgrade")
 )
 

@@ -335,16 +335,33 @@ packages it upgrades. Both run with `-o Dir::Cache::pkgcache= -o
 Dir::Cache::srcpkgcache=`, which keeps apt from writing its cache files under
 `/var/cache/apt` (about 130 MB when the distribution's `docker-clean` snippet
 is absent; measured on both releases: nothing under `/var/cache/apt` or
-`/var/lib/apt` changes). A package fails when any version that a `-security`
-pocket carries (`-infra-security` and `-apps-security` too) is newer than the
-installed one, even if the version the simulation would install comes from
+`/var/lib/apt` changes). Both also run with `-o
+APT::Get::Always-Include-Phased-Updates=true`, so apt counts every phased update
+(Ubuntu's staged rollout, `Phased-Update-Percentage` in the package index) as
+available: "N other upgrade(s) pending" is what the package lists offer, not what
+apt would install on this machine today. This holds even when the host sets
+`APT::Get::Never-Include-Phased-Updates`: the command-line option wins, and the
+check ignores the host's phasing preference on purpose. Without the option the answer would
+depend on where apt runs. apt does not phase when `ischroot -t` says it is in a
+chroot, and `ischroot` takes any process whose `/proc/self/mountinfo` differs
+from PID 1's for one, which is every service with a mount namespace of its own,
+so the scheduled run under systemd upgraded the phased packages while a direct run
+as root held them back (the count of "not upgraded" packages and of other upgrades
+differed on the same host; measured on Ubuntu 22.04 with apt 2.4.15 and 24.04 with
+apt 2.8.4). Security updates are never affected: apt does not phase a package whose
+candidate comes from a security pocket, and the security list was the same in both.
+The option also matters for a host that switches `APT::Get::Phase-Policy` on: apt
+then caps the priority of a phased version, whatever pocket it comes from, and a
+phased security fix would vanish from the simulation, neither upgraded nor named as
+held back; with the option it is found (measured on both releases). A package
+fails when any version that a `-security` pocket carries (`-infra-security`
+and `-apps-security` too) is newer than the installed one, even if the version the simulation would install comes from
 `-updates` and has superseded the security fix; the order of versions is apt's
 own, the check compares no version strings. One evidence item per package. It
 also reports how old the package lists are and warns when they are older than
 `max_list_age_hours` or missing, because then it cannot see newer updates.
-Packages that apt does not upgrade (held with `apt-mark hold`, blocked by a
-dependency that cannot be met, or deferred by Ubuntu's phased updates; apt names
-them under "kept back" or, with apt 2.8, "deferred due to phasing") are counted
+Packages that apt does not upgrade (held with `apt-mark hold`, or blocked by a
+dependency that cannot be met; apt names them under "kept back") are counted
 in the summary and looked up the same way: a held package with a newer security
 version fails the check, and its detail says apt keeps it back. The output of
 both apt commands must be understood line by line (the phased marker
@@ -1137,7 +1154,15 @@ Ubuntu 22.04 and 24.04.
 
 With these options every check returned the same status, severity, summary and
 evidence subjects as a direct run as root, on Ubuntu 22.04 (systemd 249) and 24.04
-(systemd 255).
+(systemd 255), except for the following.
+
+- `disk.usage` counts more file systems in the service than in a direct run: the
+  sandbox adds bind mounts of devices that are already counted.
+- `updates.security_pending` agrees only because the apt simulation runs with
+  `APT::Get::Always-Include-Phased-Updates=true` (see `security_updates` under
+  Checks). apt's own phasing differs between a service and a direct run, and
+  without the option the counts of other upgrades and of packages not upgraded
+  differ; the security list does not.
 
 ### uninstall
 

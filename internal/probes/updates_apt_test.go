@@ -227,7 +227,7 @@ func TestSecurityUpdatesKeptBackList(t *testing.T) {
 		answers := map[string]string{names: rawPolicyNames("up", "alpha:i386", "pkg-b", "zeta")}
 		o, r := run(sim, answers)
 		wantStatus(t, o, result.Pass)
-		if got := strings.Join(r.Calls()[1].Argv[7:], " "); got != names {
+		if got := strings.Join(r.Calls()[1].Argv[policyHead:], " "); got != names {
 			t.Fatalf("asked about %q, want %q", got, names)
 		}
 	})

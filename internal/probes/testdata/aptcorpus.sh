@@ -20,7 +20,7 @@ out=${1:?usage: aptcorpus.sh <dir>}
 every=${KW_CORPUS_INSTALLED_EVERY:-1}
 sample=${KW_CORPUS_SAMPLE:-3000}
 rm -rf "$out"; mkdir -p "$out"
-nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache="
+nocache="-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true"
 { echo "release: $(. /etc/os-release; echo "$PRETTY_NAME")"; echo "apt: $(dpkg-query -W -f='${Version}' apt)"; echo "arch: $(dpkg --print-architecture)"; echo "installed-every: $every"; echo "sample: $sample"; } >"$out/META"
 # policy <prefix> <names-file>: apt-cache policy in batches of 100
 policy() {

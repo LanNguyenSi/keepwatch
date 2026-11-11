@@ -16,12 +16,18 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
-var aptArgv = []string{"apt-get", "-s", "-o", "Debug::NoLocking=true", "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=", "dist-upgrade"}
+var aptArgv = []string{"apt-get", "-s", "-o", "Debug::NoLocking=true", "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=", "-o", "APT::Get::Always-Include-Phased-Updates=true", "dist-upgrade"}
 
 // policyArgv is what the probe asks apt-cache for the given packages.
 func policyArgv(names ...string) []string {
-	return append([]string{"apt-cache", "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=", "policy", "--"}, names...)
+	return append(append([]string{}, policyHeadArgv...), names...)
 }
+
+// policyHeadArgv is the command line of apt-cache up to the package names.
+var policyHeadArgv = []string{"apt-cache", "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=", "-o", "APT::Get::Always-Include-Phased-Updates=true", "policy", "--"}
+
+// policyHead is the number of arguments before the first package name.
+var policyHead = len(policyHeadArgv)
 
 var instUpgrade = regexp.MustCompile(`^Inst (\S+) \[(\S+)\] \((\S+) (.+?) \[[^\]]*\]\)`)
 
@@ -377,10 +383,10 @@ func TestSecurityUpdatesArgvIsReadOnlyAndLockFree(t *testing.T) {
 	if len(c) != 2 {
 		t.Fatalf("calls %+v", c)
 	}
-	if got := strings.Join(c[0].Argv, " "); got != "apt-get -s -o Debug::NoLocking=true -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= dist-upgrade" {
+	if got := strings.Join(c[0].Argv, " "); got != "apt-get -s -o Debug::NoLocking=true -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade" {
 		t.Fatalf("simulation: %s", got)
 	}
-	if got := strings.Join(c[1].Argv[:7], " "); got != "apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= policy --" {
+	if got := strings.Join(c[1].Argv[:policyHead], " "); got != "apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Get::Always-Include-Phased-Updates=true policy --" {
 		t.Fatalf("policy: %s", got)
 	}
 }
@@ -607,8 +613,8 @@ func TestSecurityUpdatesPolicyBatches(t *testing.T) {
 	}
 	for i, want := range []int{100, 100, 30} {
 		c := calls[i+1].Argv
-		if got := len(c) - 7; got != want || c[6] != "--" {
-			t.Fatalf("batch %d: %d names, argv %v", i, got, c[:8])
+		if got := len(c) - policyHead; got != want || c[policyHead-1] != "--" {
+			t.Fatalf("batch %d: %d names, argv %v", i, got, c[:policyHead+1])
 		}
 	}
 	// exactly at the bound the packages are all looked up
