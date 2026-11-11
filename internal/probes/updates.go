@@ -126,8 +126,9 @@ const aptListsGlob = "/var/lib/apt/lists/*InRelease"
 // newly installed has no installed version; it counts when its candidate
 // comes from a security pocket (the Inst line names the pockets). A package
 // that apt keeps back (apt-mark hold, a dependency that cannot be met) has no
-// Inst line, but apt names it, and it is looked up in the same way: when a security pocket carries a version newer than the installed one,
-// it is a pending security update whose detail says that apt keeps it back.
+// Inst line, but apt names it, and it is looked up in the same way: when a
+// security pocket carries a version newer than the installed one, it is a
+// pending security update whose detail says that apt keeps it back.
 // The simulation leaves such a package alone, so a fix for it would otherwise
 // never be seen.
 //

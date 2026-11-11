@@ -339,7 +339,9 @@ is absent; measured on both releases: nothing under `/var/cache/apt` or
 APT::Get::Always-Include-Phased-Updates=true`, so apt counts every phased update
 (Ubuntu's staged rollout, `Phased-Update-Percentage` in the package index) as
 available: "N other upgrade(s) pending" is what the package lists offer, not what
-apt would install on this machine today. Without the option the answer would
+apt would install on this machine today. This holds even when the host sets
+`APT::Get::Never-Include-Phased-Updates`: the command-line option wins, and the
+check ignores the host's phasing preference on purpose. Without the option the answer would
 depend on where apt runs. apt does not phase when `ischroot -t` says it is in a
 chroot, and `ischroot` takes any process whose `/proc/self/mountinfo` differs
 from PID 1's for one, which is every service with a mount namespace of its own,
@@ -352,8 +354,8 @@ The option also matters for a host that switches `APT::Get::Phase-Policy` on: ap
 then caps the priority of a phased version, whatever pocket it comes from, and a
 phased security fix would vanish from the simulation, neither upgraded nor named as
 held back; with the option it is found (measured on both releases). A package
-fails when any version that a `-security` pocket carries (`-infra-security` and `-apps-security` too) is newer than the
-installed one, even if the version the simulation would install comes from
+fails when any version that a `-security` pocket carries (`-infra-security`
+and `-apps-security` too) is newer than the installed one, even if the version the simulation would install comes from
 `-updates` and has superseded the security fix; the order of versions is apt's
 own, the check compares no version strings. One evidence item per package. It
 also reports how old the package lists are and warns when they are older than
