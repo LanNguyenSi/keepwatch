@@ -1103,8 +1103,9 @@ Exit codes of `install` and `uninstall`: 0 done (or nothing to do), 1 a step
 failed after work had started (a `systemctl` command, a write; what was done is
 printed and a second run continues), 2 refused or usage error (not root, systemd
 not running, bad flag, a file that is not keepwatch's, a missing or invalid configuration,
-a path that does not lie where it must;
-nothing was changed, except that `uninstall --purge` exits 2 after doing what it
+a path that does not lie where it must, a `state_dir` that cannot be written;
+nothing was changed, except that `install` keeps a `state_dir` it created before
+the write probe refused it, and that `uninstall --purge` exits 2 after doing what it
 could when it refuses a configuration it cannot prove is keepwatch's), 3 internal error.
 
 ### The units and their hardening
@@ -1161,7 +1162,7 @@ configuration and state stay. `--dry-run` lists what would be done.
 
 - in the state directory: `state.json` and `history.json`, leftover
   `.state.json.tmp-*` and `.history.json.tmp-*` files and the probe and temporary files
-  that `doctor` and the atomic writer leave after a crash, then the directory if it is
+  that the write probe (`install`, `doctor`) and the atomic writer leave after a crash, then the directory if it is
   empty (a test ties this list to the file names the writers use);
 - the main configuration file, the `*.yaml` files in the `conf.d` directory next to
   it, then `conf.d` and the configuration directory if each is empty.

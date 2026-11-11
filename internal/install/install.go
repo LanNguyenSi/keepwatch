@@ -28,8 +28,9 @@ const systemdRunDir = "/run/systemd/system"
 // Error kinds, mapped to exit codes by the caller.
 var (
 	// ErrRefused: the request cannot be carried out as given (not root, a
-	// file that is not keepwatch's, a value that does not validate). Nothing
-	// was changed. Exit code 2.
+	// file that is not keepwatch's, a value that does not validate, a
+	// state_dir the write probe cannot write). Nothing was changed, except a
+	// state_dir that Install created before its probe refused it. Exit code 2.
 	ErrRefused = errors.New("refused")
 	// ErrFailed: a step failed after the work started. What was done is
 	// reported and a second run continues. Exit code 1.
