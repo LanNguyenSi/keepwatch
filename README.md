@@ -954,7 +954,13 @@ configured in the configuration file that `install` reads, both commands get
 finds and nobody is told, and a run with `--notify` and no `notify.ntfy` exits 3.
 So after adding `notify.ntfy` run `install` again (it updates the two services;
 `doctor` reports a problem while they lack `--notify`). It creates `state_dir`
-(mode 0700) if it is missing, runs `systemctl daemon-reload` and
+(mode 0700) if it is missing, then proves that the scheduled runs can write there:
+the probe `doctor` runs, one file created and removed inside `state_dir`. A
+`state_dir` on a read-only file system, for example, is refused (exit 2) with the
+sentence `doctor` prints, before any unit is written; a `state_dir` that this run
+created stays, empty, and the next run finds it. The probe runs on every real
+`install`, also when the units are up to date. Then `install` runs
+`systemctl daemon-reload` and
 `systemctl enable --now` for both timers, and restarts a timer whose schedule
 changed. The units run the binary that ran `install` (its path is written into
 them), so install it where it stays, for example `/usr/local/bin`.
@@ -983,7 +989,7 @@ a problem.
 | the directory of the configuration file, and the file (`--config`) | a directory, a regular file | no |
 | `conf.d` next to the configuration file | a directory | yes; checked when it is there |
 | the directory of `notify.ntfy.token_file`, and the file | a directory, a regular file | only when `token_file` is not configured |
-| `state_dir` (`ReadWritePaths`) | a directory | yes: then its parent directory is checked, `install` creates `state_dir` there and checks it again |
+| `state_dir` (`ReadWritePaths`) | a directory | yes: then its parent directory is checked, `install` creates `state_dir` there, checks it again and proves it is writable |
 
 The rule, for each path:
 
@@ -1055,7 +1061,10 @@ systemd read-only, and works without root). `--print` writes the four unit files
 to stdout, each after a `# ===== name =====` line, and does nothing else; it wins over `--dry-run`.
 Both refuse what `install` refuses about the configuration and the paths, with the
 same message, so a unit file that is printed is one `install` would write; neither
-creates anything, a missing `state_dir` included.
+creates anything, a missing `state_dir` included. Neither runs the write probe
+either, not even on an existing `state_dir`: they stay free of side effects, so a
+`state_dir` that cannot be written is refused only by a real `install` (and found by
+`doctor`). `--dry-run` says so in its output.
 
 | Flag | Grammar |
 |---|---|

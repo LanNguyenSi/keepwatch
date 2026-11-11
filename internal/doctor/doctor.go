@@ -507,7 +507,7 @@ func (d Deps) state(out reporter, cfg *config.Config, unitsInstalled bool) {
 	st := d.State(cfg.StateDir)
 	switch {
 	case st.Err != nil:
-		out.add(Problem, "state", "state_dir %s is not usable, checks would exit 3: %v", cfg.StateDir, st.Err)
+		out.add(Problem, "state", "%s", install.StateDirUnusable(cfg.StateDir, st.Err))
 	case !st.Exists && unitsInstalled:
 		out.add(Problem, "state", "state_dir %s does not exist, but the units are installed: the services have ReadWritePaths=%s and fail to start (status 226/NAMESPACE) while it is missing; run \"keepwatch install\" again, which creates it", cfg.StateDir, cfg.StateDir)
 	case !st.Exists:

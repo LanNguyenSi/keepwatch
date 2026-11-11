@@ -120,6 +120,11 @@ func Preflight(fsys FS, o InstallOptions) ([]File, error) {
 // Install writes the directories and the four unit files and enables the
 // timers. With DryRun nothing is written or run, except for read-only queries
 // of systemd. It is idempotent: a second run changes nothing and says so.
+//
+// Once state_dir exists, Install proves that it can be written (WriteProbe,
+// the probe doctor runs) before it writes a unit, and refuses when it cannot.
+// A state_dir that this run created stays: it is empty, root's, mode 0700, and
+// the next run finds it.
 func Install(ctx context.Context, d Deps, o InstallOptions) error {
 	files, err := Preflight(d.FS, o)
 	if err != nil {
@@ -185,6 +190,15 @@ func Install(ctx context.Context, d Deps, o InstallOptions) error {
 				return failed("after creating %s: %s", o.Spec.StateDir, PlacementError(problems))
 			}
 		}
+	}
+	// state_dir exists now (found or just made). The scheduled runs must be
+	// able to write into it, and a read-only file system passes every check
+	// above; doctor makes the same probe and calls the same state a problem.
+	// A dry run stays free of side effects and does not probe.
+	if o.DryRun {
+		say("note: --dry-run does not probe whether %s is writable; a real install creates and removes one file there and refuses when that fails", o.Spec.StateDir)
+	} else if err := WriteProbe(d.FS, o.Spec.StateDir); err != nil {
+		return refuse("%s", StateDirUnusable(o.Spec.StateDir, err))
 	}
 	updatedTimers := map[string]bool{}
 	for _, pa := range plan {

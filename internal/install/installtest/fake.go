@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/install"
@@ -33,6 +34,10 @@ type MemFS struct {
 	Log []string
 	// FailWrite makes WriteFile of the named path fail with the error.
 	FailWrite map[string]error
+	// ReadOnly lists directories on a read-only file system: creating a file
+	// in one fails with EROFS, as the kernel answers (the directory itself
+	// can still be listed and opened).
+	ReadOnly map[string]bool
 	// FailOpenDir makes OpenDir of the named path fail with the error.
 	FailOpenDir map[string]error
 	// FailMkdir makes Mkdir of the named path fail with the error.
@@ -46,7 +51,7 @@ type MemFS struct {
 // /run, /var, /var/lib and /usr/local/bin, and a root-owned keepwatch binary in
 // the last.
 func NewMemFS() *MemFS {
-	m := &MemFS{nodes: map[string]*node{}, FailWrite: map[string]error{}, FailOpenDir: map[string]error{}, FailMkdir: map[string]error{}}
+	m := &MemFS{nodes: map[string]*node{}, FailWrite: map[string]error{}, ReadOnly: map[string]bool{}, FailOpenDir: map[string]error{}, FailMkdir: map[string]error{}}
 	for _, d := range []string{"/", "/etc", "/etc/systemd", "/etc/systemd/system", "/run", "/run/systemd", "/run/systemd/system", "/var", "/var/lib", "/usr", "/usr/local", "/usr/local/bin"} {
 		m.nodes[d] = &node{mode: fs.ModeDir | 0o755}
 	}
@@ -230,6 +235,9 @@ func (d *memDir) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	defer d.m.mu.Unlock()
 	if err, ok := d.m.FailWrite[p]; ok {
 		return err
+	}
+	if d.m.ReadOnly[d.path] {
+		return &fs.PathError{Op: "open", Path: p, Err: syscall.EROFS}
 	}
 	// Like rename(2), the new file replaces whatever is at the name, a link
 	// included, and never writes through it.
