@@ -22,7 +22,7 @@ The README describes what each of these does and what it asserts.
 - Changes to a probe or to `install`, `uninstall` and `doctor` are checked
   with the real tools in the containers (`make e2e` and `make systemd`),
   not only with unit tests.
-- No shell strings anywhere in Go code, and no direct use of `os/exec`:
+- No shell strings anywhere in Go code, and no direct use of `os/exec` outside tests:
   programs are started only by `internal/execx`, with fixed argument lists
   and without a shell.
 - keepwatch runs as root. Changes to configuration loading, path placement,
