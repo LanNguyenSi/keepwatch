@@ -242,9 +242,11 @@ func TestFirewallSourceFailures(t *testing.T) {
 		wantSummary(t, o, "allowlist")
 	})
 	for name, res := range map[string]execx.Result{
-		"truncated": {Stdout: []byte(nftDoc("inet f in filter input drop")), Truncated: true},
-		"signaled":  {Stdout: []byte(nftDoc("inet f in filter input drop")), Signaled: true, ExitCode: -1},
-		"exit 1":    {Stdout: []byte(nftDoc("inet f in filter input drop")), ExitCode: 1},
+		"truncated":                 {Stdout: []byte(nftDoc("inet f in filter input drop")), Truncated: true},
+		"signaled":                  {Stdout: []byte(nftDoc("inet f in filter input drop")), Signaled: true, ExitCode: -1},
+		"exit 1":                    {Stdout: []byte(nftDoc("inet f in filter input drop")), ExitCode: 1},
+		"pipes cut":                 {Stdout: []byte(nftDoc("inet f in filter input drop")), IOIncomplete: true},
+		"pipes cut after a failure": {Stdout: []byte(nftDoc("inet f in filter input drop")), ExitCode: 1, IOIncomplete: true},
 	} {
 		t.Run("nft "+name+" never counts as a drop", func(t *testing.T) {
 			r := fwRunner(nftNothing, iptAccept, iptAccept, "").AddResult(fwNft, res)

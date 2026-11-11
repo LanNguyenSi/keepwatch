@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,11 +261,15 @@ func (r *Real) isResolvedTrusted(dir string) bool {
 // On unix the child runs in its own process group and the group is killed
 // when Run returns on any path, so background grandchildren never outlive
 // the call. If the child exits while a grandchild still holds its output
-// pipes, Run gives up after a short grace period and returns ErrIOTimeout
-// with the output read so far (ExitCode 0, as only a successful exit is
-// reported this way). If such a child exits non-zero, the Go runtime reports
-// the exit status alone: Run returns it with a nil error and the output read
-// so far, and cannot tell that the pipes were cut.
+// pipes, Run gives up after a short grace period, cuts the pipes and sets
+// Result.IOIncomplete: the output is what was read so far and may be missing
+// the tail. This is reported for every exit status. A successful exit also
+// returns ErrIOTimeout; a non-zero exit returns the status with a nil error,
+// so callers that parse output after a non-zero exit must check IOIncomplete.
+//
+// Run copies the child's output itself, from pipes it creates, rather than
+// leaving that to os/exec: os/exec reports a cut pipe only when the exit was
+// successful, and a cut after a non-zero exit would go unnoticed.
 func (r *Real) Run(ctx context.Context, argv []string, opts Opts) (Result, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return Result{}, ErrEmptyArgv
@@ -293,25 +298,46 @@ func (r *Real) Run(ctx context.Context, argv []string, opts Opts) (Result, error
 	cmd.Args[0] = argv[0]
 	cmd.Env = env
 	cmd.Dir = opts.Dir
-	var stdout, stderr limitBuffer
-	stdout.limit, stderr.limit = limit, limit
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return Result{}, fmt.Errorf("execx: run %s: %w", argv[0], err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return Result{}, fmt.Errorf("execx: run %s: %w", argv[0], err)
+	}
+	// *os.File writers go to the child directly, so os/exec starts no copy
+	// goroutines of its own.
+	cmd.Stdout, cmd.Stderr = outW, errW
 	configureKill(cmd)
 
 	start := time.Now()
-	runErr := cmd.Run()
+	runErr := cmd.Start()
+	// The parent must not hold the write ends, or the readers never see EOF.
+	outW.Close()
+	errW.Close()
+	var stdout, stderr limitBuffer
+	stdout.limit, stderr.limit = limit, limit
+	outC, errC := startCopy(outR, &stdout), startCopy(errR, &stderr)
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
+	incomplete := awaitCopies(outC, errC)
 	killGroup(cmd)
 	res := Result{
-		Stdout:    stdout.buf.Bytes(),
-		Stderr:    stderr.buf.Bytes(),
-		Truncated: stdout.truncated || stderr.truncated,
-		Duration:  time.Since(start),
+		Stdout:       stdout.buf.Bytes(),
+		Stderr:       stderr.buf.Bytes(),
+		Truncated:    stdout.truncated || stderr.truncated,
+		IOIncomplete: incomplete,
+		Duration:     time.Since(start),
 	}
 	if tctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 		res.ExitCode = -1
 		return res, fmt.Errorf("%w after %s: %s", ErrTimeout, timeout, argv[0])
 	}
-	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
+	if runErr == nil && incomplete && ctx.Err() == nil {
 		return res, fmt.Errorf("%w: %s", ErrIOTimeout, argv[0])
 	}
 	if runErr == nil {
@@ -331,6 +357,47 @@ func (r *Real) Run(ctx context.Context, argv []string, opts Opts) (Result, error
 		return res, fmt.Errorf("%w: %s", ErrNotFound, argv[0])
 	}
 	return res, fmt.Errorf("execx: run %s: %w", argv[0], runErr)
+}
+
+// copier drains one pipe into a limitBuffer.
+type copier struct {
+	r    *os.File
+	done chan struct{}
+}
+
+func startCopy(r *os.File, dst *limitBuffer) *copier {
+	c := &copier{r: r, done: make(chan struct{})}
+	go func() {
+		defer close(c.done)
+		_, _ = io.Copy(dst, r)
+	}()
+	return c
+}
+
+// awaitCopies waits for the copies to reach end of file. If they have not
+// finished waitDelay after the child exited, it closes the read ends, waits
+// for the copies to stop and reports true: the output may be incomplete.
+// Closing the read end of an os.Pipe interrupts a blocked Read.
+func awaitCopies(cs ...*copier) (incomplete bool) {
+	all := make(chan struct{})
+	go func() {
+		defer close(all)
+		for _, c := range cs {
+			<-c.done
+		}
+	}()
+	t := time.NewTimer(waitDelay)
+	defer t.Stop()
+	select {
+	case <-all:
+	case <-t.C:
+		incomplete = true
+	}
+	for _, c := range cs {
+		c.r.Close()
+	}
+	<-all
+	return incomplete
 }
 
 // limitBuffer keeps at most limit bytes and drops the rest while still

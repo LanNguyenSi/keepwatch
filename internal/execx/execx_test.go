@@ -436,6 +436,9 @@ func TestGrandchildHoldingPipeBoundedAndKilled(t *testing.T) {
 	if res.ExitCode != 0 || res.Signaled {
 		t.Errorf("exit code = %d signaled = %v, want 0 and false", res.ExitCode, res.Signaled)
 	}
+	if !res.IOIncomplete {
+		t.Error("IOIncomplete not set after the pipes were cut")
+	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
 	if perr != nil {
 		t.Fatalf("stdout %q: %v", res.Stdout, perr)
@@ -464,6 +467,9 @@ func TestGrandchildHoldingPipeNonZeroExit(t *testing.T) {
 	if res.ExitCode != 4 || res.Signaled {
 		t.Errorf("exit code = %d signaled = %v, want 4 and false", res.ExitCode, res.Signaled)
 	}
+	if !res.IOIncomplete {
+		t.Error("IOIncomplete not set after the pipes were cut (non-zero exit)")
+	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
 	if perr != nil {
 		t.Fatalf("stdout %q: %v", res.Stdout, perr)
@@ -471,6 +477,62 @@ func TestGrandchildHoldingPipeNonZeroExit(t *testing.T) {
 	if !waitGone(pid) {
 		syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatal("grandchild outlived Run")
+	}
+}
+
+// A grandchild that holds only stderr cuts that pipe too, for either status,
+// and the stdout read before the cut is kept.
+func TestGrandchildHoldingStderrOnly(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+
+	for _, tc := range []struct {
+		name string
+		exit int
+	}{{"exit 0", 0}, {"exit 1", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := "echo out; sleep 30 >/dev/null & echo $! >&2; exit " + strconv.Itoa(tc.exit)
+			start := time.Now()
+			res, err := realRunner(t, "sh").Run(bg, []string{"sh", "-c", script}, Opts{})
+			if tc.exit == 0 && !errors.Is(err, ErrIOTimeout) || tc.exit != 0 && err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if el := time.Since(start); el > 3*time.Second {
+				t.Fatalf("Run took %s", el)
+			}
+			if res.ExitCode != tc.exit || !res.IOIncomplete {
+				t.Errorf("exit code = %d IOIncomplete = %v", res.ExitCode, res.IOIncomplete)
+			}
+			if string(res.Stdout) != "out\n" {
+				t.Errorf("stdout = %q", res.Stdout)
+			}
+			pid, perr := strconv.Atoi(strings.TrimSpace(string(res.Stderr)))
+			if perr != nil {
+				t.Fatalf("stderr %q: %v", res.Stderr, perr)
+			}
+			if !waitGone(pid) {
+				syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatal("grandchild outlived Run")
+			}
+		})
+	}
+}
+
+// Output that arrives before the child exits is not marked, whatever the
+// exit status, and neither is a run whose output is cut at MaxOutput.
+func TestIOIncompleteNotSetOnCleanRuns(t *testing.T) {
+	r := realRunner(t, "sh")
+	for _, exit := range []int{0, 3} {
+		script := "echo hi; echo oops >&2; exit " + strconv.Itoa(exit)
+		res, err := r.Run(bg, []string{"sh", "-c", script}, Opts{})
+		if err != nil || res.IOIncomplete || res.ExitCode != exit || string(res.Stdout) != "hi\n" || string(res.Stderr) != "oops\n" {
+			t.Errorf("exit %d: res=%+v err=%v", exit, res, err)
+		}
+	}
+	res, err := r.Run(bg, []string{"sh", "-c", "yes | head -c 100000; exit 2"}, Opts{MaxOutput: 1000})
+	if err != nil || res.IOIncomplete || !res.Truncated || len(res.Stdout) != 1000 || res.ExitCode != 2 {
+		t.Errorf("truncated run: res=%+v err=%v", res, err)
 	}
 }
 
