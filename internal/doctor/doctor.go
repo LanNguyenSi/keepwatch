@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -572,6 +573,9 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 				out.add(Problem, "units", "%s: %s", u.path, p.Error())
 			}
 		}
+		if in.Binary != "" && in.ConfigPath != "" {
+			d.unitDrift(out, u)
+		}
 		var cfg *config.Config
 		switch {
 		case in.ConfigPath == "":
@@ -626,9 +630,15 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 		}
 	}
 	for _, s := range []string{install.CheckService, install.ReportService} {
-		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp")
+		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths")
 		if err != nil || v["LoadState"] != "loaded" {
 			continue // not installed, said above
+		}
+		if v["DropInPaths"] != "" {
+			// systemd merges a drop-in into the unit, so the service runs with
+			// it whatever its file says. What it changes (ExecStart, a
+			// hardening option) is not something doctor judges.
+			out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", s, v["DropInPaths"])
 		}
 		// SuccessExitStatus=1 makes a run with findings a success.
 		switch {
@@ -639,6 +649,42 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 			out.add(Warn, "last run", "%s has not run since the host booted, so nothing proves that the sandbox lets the checks run; start it once with \"systemctl start %s\" and look at \"journalctl -u %s\"", s, s, s)
 		}
 	}
+}
+
+// unitDrift reports a service file that is not what "keepwatch install" writes
+// for the values the file holds. Inspect reads only the last ExecStart and a
+// few values, so a second ExecStart line, an added or changed option or any
+// other line would pass the other checks while systemd runs something else.
+func (d Deps) unitDrift(out reporter, u unitFile) {
+	want, err := install.RenderInstalled(u.name, u.content)
+	if err != nil {
+		out.add(Problem, "units", "%s is not a unit that \"keepwatch install\" can have written: %v; run \"keepwatch install\" again", u.path, err)
+		return
+	}
+	diff, differs := install.FirstDifference(want, u.content)
+	if !differs {
+		return
+	}
+	var where string
+	switch {
+	case diff.GotEnded:
+		where = fmt.Sprintf("the file ends after line %d, where the rendered unit goes on with %s", diff.Line-1, shown(diff.Want))
+	case diff.WantEnded:
+		where = fmt.Sprintf("line %d, %s, is not in the rendered unit", diff.Line, shown(diff.Got))
+	case diff.Want == diff.Got:
+		where = fmt.Sprintf("line %d, %s, lacks or has a line feed that the rendered unit does not", diff.Line, shown(diff.Got))
+	default:
+		where = fmt.Sprintf("line %d is %s, the rendered unit has %s", diff.Line, shown(diff.Got), shown(diff.Want))
+	}
+	out.add(Problem, "units", "%s was changed after \"keepwatch install\" wrote it, so systemd does not run it as rendered (rendered from the values the file holds): %s. Run \"keepwatch install\" again to write it as rendered", u.path, where)
+}
+
+// shown quotes a line of a unit file for a message, shortened.
+func shown(line string) string {
+	if len(line) > 160 {
+		line = line[:160] + "..."
+	}
+	return strconv.Quote(line)
 }
 
 // unitNotify checks that an installed service notifies exactly when

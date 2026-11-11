@@ -972,9 +972,10 @@ Limits:
   examined.
 - The walk shows who can change a path now; it does not notice a change later, and a
   unit that fails tells nobody (`doctor` shows the failed last run).
-- `doctor` reads the unit files as `install` writes them. A unit file edited by hand
-  (a second `ExecStart` line, an added option that hides a path) and a drop-in are not
-  judged, see [doctor](#doctor).
+- `doctor` compares each installed service file with the unit `install` renders from the
+  values the file holds, so a file edited by hand (a second `ExecStart` line, an added
+  option that hides a path) is a problem, and so is a drop-in. What a drop-in changes is
+  not judged, see [doctor](#doctor).
 
 `install` is idempotent: with nothing to change it prints `already installed,
 nothing to change` and touches nothing (it still makes sure the timers are
@@ -1130,13 +1131,30 @@ configuration it examines:
   the check service decides and the other one is a problem in the same way.
 
 A `--config` in a unit that is not a clean absolute path is a problem and is never
-loaded. Limit: `doctor` reads the unit files, not drop-ins, and it reads them as
-`install` writes them. A drop-in (for example `keepwatch-check.service.d/*.conf`)
-that replaces `ExecStart` or adds a hardening option is not looked at. Neither is a
-change made by hand to a unit file itself: of several `ExecStart` lines only the last
-is read, and an option added to the file (`ProtectHome=yes`, `InaccessiblePaths=`) is
-not judged, although `install` would call that file changed and rewrite it. The line
-about the last run is what shows the effect of either.
+loaded.
+
+`doctor` also asks what systemd will run, not only what the file says:
+
+- Each installed service file is compared with the unit `install` renders from the
+  values the file itself holds (the program, `--config`, `--notify`, `ReadWritePaths`).
+  A file that differs in any line is a problem that names the file and the first line
+  that differs: a second `ExecStart` line (a oneshot service runs all of them, in
+  order), an option added or changed (`ProtectHome=yes`, `InaccessiblePaths=`), a line
+  removed. Running `install` again rewrites the file as rendered. The two timers are
+  not compared.
+- A drop-in of a service (`systemctl show -p DropInPaths`: a file in
+  `keepwatch-check.service.d`, one in a `service.d` that holds for all services, or a
+  change made with `systemctl set-property`) is a problem that lists the files. systemd
+  merges it into the unit, so the service no longer runs as `install` renders it,
+  `doctor` does not read what it changes, and `install` does not remove it. It is a
+  problem and not a warning because a drop-in that replaces `ExecStart` or adds a
+  hardening option fails every scheduled run (status 203 or 3) while the unit file looks
+  fine, and a warning does not change the exit status.
+
+The drop-in question is asked only while systemd runs. Limits: a drop-in is judged by
+its existence, not by its content, and `doctor` does not ask which file systemd loaded
+the unit from (`FragmentPath`); it reads the files in the unit directory. The line about
+the last run still shows the effect of a change that `doctor` does not recognise.
 
 | Area | What it checks | Level |
 |---|---|---|
@@ -1148,7 +1166,7 @@ about the last run is what shows the effect of either.
 | notify | a notification channel is configured | none: warn |
 | units, notify | the installed services carry `--notify` exactly when `notify.ntfy` is configured | configured but a service lacks `--notify`: problem (each of its runs consumes the alerts, a loss); `--notify` but not configured: problem (every run exits 3) |
 | state | `state_dir` lies [where the paths must lie](#where-the-paths-must-lie) (its parent directory while it is missing); then it is judged like `check` judges it (a symbolic link, a foreign owner or a directory others can write to is refused), writable (one probe file is created and removed inside it), and the previous state file is usable. A `state_dir` whose path does not pass is not probed: nothing is written through a path that somebody else can redirect | a path that does not pass (under a path the sandbox hides or a reboot empties, or one somebody but root can change), unusable or not writable: problem; missing yet and no unit installed, or a state file that will not be used: warn; missing while the units are installed: problem (the services do not start, status 226/NAMESPACE) |
-| units | the four unit files are installed with the marker; the `ExecStart` program lies [where the paths must lie](#where-the-paths-must-lie) (it exists, the sandbox shows it, only root can change it or anything above it); `ReadWritePaths` equals `state_dir` of the configuration the unit runs with; each service runs with the configuration that was examined | missing, foreign, a program that does not pass, `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd), no `--config`, or another `--config` than the one examined: problem |
+| units | the four unit files are installed with the marker; each service file equals what `install` renders from the values it holds, and has no drop-in; the `ExecStart` program lies [where the paths must lie](#where-the-paths-must-lie) (it exists, the sandbox shows it, only root can change it or anything above it); `ReadWritePaths` equals `state_dir` of the configuration the unit runs with; each service runs with the configuration that was examined | missing, foreign, a service file that is not what `install` renders from its own values (changed after install), a drop-in on a service, a program that does not pass, `ReadWritePaths` differing from `state_dir` (the state could not be saved under systemd), no `--config`, or another `--config` than the one examined: problem |
 | systemd, timers | systemd is running; both timers are loaded, enabled and active (`systemctl show`, read-only) | problem |
 | last run | the last run of each service did not fail (`journalctl -u keepwatch-check.service` has the output; exit 3, 4 and 226 are named); the check service has run since the host booted (the sandbox only shows when it runs) | failed: problem; check service not run yet: warn, with `systemctl start keepwatch-check.service` |
 
