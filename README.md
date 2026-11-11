@@ -191,9 +191,11 @@ More rules, all reported with `file:line`:
   checks every directory on the way, not only the one that holds the
   file: each must be a real directory (a symlink at any depth is
   refused), owned by root or the running user, and not writable by group
-  or other. An ancestor with the sticky bit set, such as `/tmp`, may be
-  writable by others, because they cannot rename or remove entries they
-  do not own; the directory that holds the files may not. A refusal names
+  or other. An ancestor with the sticky bit set may be writable by group or
+  other (others cannot rename or remove the entries they do not own); the
+  directory that holds the files may not. This is the rule of the loader
+  only: `install` and `doctor` still refuse a configuration or token file
+  below `/tmp`, see [Where the paths must lie](#where-the-paths-must-lie). A refusal names
   the directory and the failing component. Every step opens the next
   directory relative to the one just checked, and the files, `conf.d`
   entries included, are opened through the checked directory, so the
