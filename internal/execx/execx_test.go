@@ -420,31 +420,24 @@ func waitGone(pid int) bool {
 
 // runBounded runs argv and fails the test with a named message when Run has
 // not returned after runDeadline, instead of letting a hang surface as a go
-// test timeout. On the deadline it cancels the context, which kills the
-// process group and so unblocks Run and removes the grandchild.
+// test timeout. When it fails, the hung Run and its grandchild are left to
+// end on their own (the grandchild sleeps for 30 seconds at most).
 func runBounded(t *testing.T, r *Real, argv []string) (Result, error) {
 	t.Helper()
 	const runDeadline = 5 * time.Second
-	ctx, cancel := context.WithCancel(bg)
-	defer cancel()
 	type out struct {
 		res Result
 		err error
 	}
 	ch := make(chan out, 1)
 	go func() {
-		res, err := r.Run(ctx, argv, Opts{})
+		res, err := r.Run(bg, argv, Opts{})
 		ch <- out{res, err}
 	}()
 	select {
 	case o := <-ch:
 		return o.res, o.err
 	case <-time.After(runDeadline):
-		cancel()
-		select {
-		case <-ch:
-		case <-time.After(5 * time.Second):
-		}
 		t.Fatalf("Run did not return within %s although the wait delay is far shorter", runDeadline)
 		return Result{}, nil
 	}
