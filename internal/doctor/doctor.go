@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/catalog"
 	"github.com/LanNguyenSi/keepwatch/internal/config"
@@ -545,10 +547,13 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 	// above is judged by its own file, loaded once.
 	others := map[string]judged{}
 	installedAll := true
+	// missing are the unit files that are not there.
+	missing := map[string]bool{}
 	for _, u := range units {
 		switch {
 		case errors.Is(u.err, fs.ErrNotExist):
 			installedAll = false
+			missing[u.name] = true
 			out.add(Problem, "units", "%s is not installed; run \"keepwatch install\"", u.path)
 			continue
 		case u.err != nil:
@@ -630,9 +635,24 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 		}
 	}
 	for _, s := range []string{install.CheckService, install.ReportService} {
+		// A service whose file is missing was reported as not installed, and
+		// that systemd does not know it adds nothing. For every other one (the
+		// file is there: ours, foreign or unreadable) the questions below are
+		// the only thing that tells what systemd runs, so a question without an
+		// answer, or a unit systemd did not load, is a problem and never a
+		// silent skip.
 		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths", "FragmentPath", "NeedDaemonReload")
-		if err != nil || v["LoadState"] != "loaded" {
-			continue // not installed, said above
+		if err != nil {
+			if !missing[s] {
+				out.add(Problem, "units", "cannot ask systemd about %s: %s. So doctor cannot tell whether drop-ins are merged into the service, which file systemd loaded and how the last run ended, and nothing says that the service runs as \"keepwatch install\" renders it. \"systemctl show %s\" fails, for one, when a drop-in of the unit has a file name that is not valid UTF-8", s, quoteUnprintable(err.Error()), s)
+			}
+			continue
+		}
+		if v["LoadState"] != "loaded" {
+			if !missing[s] {
+				out.add(Problem, "units", "systemd has not loaded %s although its unit file is there (load state %q), so the timer cannot start the service: the unit is masked, or systemd refuses a setting of the unit file or of a drop-in. \"systemctl status %s\" shows which", s, v["LoadState"], s)
+			}
+			continue
 		}
 		d.loadedUnit(out, s, v)
 		// SuccessExitStatus=1 makes a run with findings a success.
@@ -682,12 +702,28 @@ func (d Deps) loadedUnit(out reporter, name string, v map[string]string) {
 	}
 }
 
-// splitQuoted splits the value of a systemctl property that lists paths. The
-// entries are separated by blanks. An entry that holds a blank, a quote, a
-// backslash or a control character is in double quotes: inside them a backslash
-// stands before a quote, a backslash, a dollar sign or a backquote, and C
-// escapes (\\t) stand for control characters. A quote that is not closed takes
-// the rest of the value.
+// splitQuoted splits the value of a systemctl property that lists paths, as
+// "systemctl show" prints it (measured on systemd 249 and 255, which print the
+// same bytes). The entries are separated by blanks. systemctl puts an entry in
+// double quotes when it holds a blank, a control character or one of a set of
+// characters a shell reads specially (a quote, a backslash, & ; * ? among
+// them), and inside the quotes it writes
+//
+//   - a backslash before a double quote, a backslash, a dollar sign and a
+//     backquote;
+//   - \a \b \f \n \r \t \v for these control characters;
+//   - a backslash and three octal digits for every other byte below 0x20 and
+//     for 0x7f (\033, \177).
+//
+// Valid UTF-8 above 0x7f is printed as it is, quoted or not, whatever the
+// character is. splitQuoted undoes exactly that, and reads two more forms of
+// systemd's escaping that systemctl does not print here: \xNN (two hexadecimal
+// digits) and a backslash before a single quote. A backslash before any other
+// byte stands for that byte, and one that is not followed by three octal digits
+// of a value up to 0377 (or by x and two hexadecimal digits) is not a number.
+// A backslash outside quotes is kept. A quote that is not closed takes the rest
+// of the value. The entries are the bytes of the file names: they can hold
+// control characters and must be quoted before they are printed (listPaths).
 func splitQuoted(s string) []string {
 	var out []string
 	var cur strings.Builder
@@ -696,6 +732,11 @@ func splitQuoted(s string) []string {
 		c := s[i]
 		switch {
 		case inQuote && c == '\\' && i+1 < len(s):
+			if b, ok := escapedNumber(s[i+1:]); ok {
+				cur.WriteByte(b)
+				i += escapedNumberLen
+				continue
+			}
 			i++
 			switch e := s[i]; e {
 			case 'a':
@@ -738,12 +779,66 @@ func splitQuoted(s string) []string {
 	return out
 }
 
-// listPaths joins paths for a message, quoting the ones that hold a space.
+// escapedNumberLen is how many bytes the number of an escape takes after the
+// backslash, in both forms.
+const escapedNumberLen = 3
+
+// escapedNumber reads the number of an escape, s being what follows the
+// backslash: three octal digits of a value up to 0377, or x and two
+// hexadecimal digits.
+func escapedNumber(s string) (b byte, ok bool) {
+	if len(s) < escapedNumberLen {
+		return 0, false
+	}
+	digits, base := s[:3], 8
+	if s[0] == 'x' {
+		digits, base = s[1:3], 16
+	}
+	// ParseUint takes digits of the base and nothing else (no sign, no
+	// prefix), and refuses a value that does not fit a byte.
+	v, err := strconv.ParseUint(digits, base, 8)
+	if err != nil {
+		return 0, false
+	}
+	return byte(v), true
+}
+
+// printable reports whether s can be written to a terminal as it is: valid
+// UTF-8 that holds nothing but printable characters (unicode.IsPrint: no
+// control character, no escape, no character that changes the direction of the
+// text or draws nothing but a blank).
+func printable(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// quoteUnprintable returns a text of another program for a message: as it is
+// when it is printable, and quoted like a path of listPaths when it is not.
+func quoteUnprintable(s string) string {
+	if printable(s) {
+		return s
+	}
+	return strconv.Quote(s)
+}
+
+// listPaths joins paths for a message. The paths are file names of the host,
+// so they can hold any byte but NUL. One that is printable and holds no blank,
+// no double quote and no backslash is written as it is; every other one is
+// written as strconv.Quote writes it (\r, \x1b, \x7f, \u202e, \xff for a byte
+// that is not UTF-8), so that no control character and no byte that is not
+// UTF-8 reaches the output and the end of each path can be seen.
 func listPaths(paths []string) string {
 	q := make([]string, len(paths))
 	for i, p := range paths {
 		q[i] = p
-		if strings.ContainsAny(p, " \t\"\\") {
+		if p == "" || !printable(p) || strings.ContainsAny(p, " \"\\") {
 			q[i] = strconv.Quote(p)
 		}
 	}

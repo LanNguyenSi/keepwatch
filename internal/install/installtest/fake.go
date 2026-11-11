@@ -342,6 +342,10 @@ func (s *Systemd) handle(argv []string) (execx.Result, error) {
 	case "enable":
 		for _, u := range units() {
 			s.Loaded[u], s.Enabled[u], s.Active[u] = true, true, true
+			// systemd loads the service a timer starts together with the timer.
+			if name, ok := strings.CutSuffix(u, ".timer"); ok {
+				s.Loaded[name+".service"] = true
+			}
 		}
 	case "disable":
 		for _, u := range units() {
