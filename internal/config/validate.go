@@ -586,11 +586,25 @@ func (v *validator) ntfyURL(n *yaml.Node, raw string) {
 // checkTokenFile validates the token file's existence, type, size,
 // link count, permissions and ownership through the same secure-open
 // used by ReadToken, then closes it without reading it. Every check
-// runs on the open fd and the file's directory passes the conf.d
-// directory rules, so a later openSecure sees any path swap; ReadToken
-// re-checks when it opens.
+// runs on the open fd, and the file's directory and each directory above
+// it pass the conf.d directory rules, so a later open sees any path
+// swap; ReadToken re-checks when it opens.
 func (v *validator) checkTokenFile(n *yaml.Node, path string) {
-	f, _, err := openSecure(path, tokenPolicy(v.ownerOf))
+	// The directory holding the secret and every directory above it are
+	// checked like conf.d, and the token is opened through the checked
+	// directory: a group-writable or foreign directory at any depth lets
+	// another user swap the token between validation and the read.
+	root, derr := openCheckedDir(filepath.Dir(path), v.ownerOf, false)
+	if derr != nil {
+		if isNotExist(derr) {
+			v.fail(n, "notify.ntfy.token_file: "+path+": does not exist")
+		} else {
+			v.fail(n, "notify.ntfy.token_file: "+cleanErr(derr))
+		}
+		return
+	}
+	defer root.Close()
+	f, _, err := openSecureIn(root, filepath.Base(path), path, tokenPolicy(v.ownerOf))
 	if err != nil {
 		if isNotExist(err) {
 			v.fail(n, "notify.ntfy.token_file: "+path+": does not exist")
@@ -600,12 +614,6 @@ func (v *validator) checkTokenFile(n *yaml.Node, path string) {
 		return
 	}
 	f.Close()
-	// The directory holding the secret is checked like conf.d: a
-	// group-writable or foreign directory lets another user swap the
-	// token between validation and the read.
-	if derr := checkConfigDir(filepath.Dir(path), v.ownerOf); derr != nil {
-		v.fail(n, "notify.ntfy.token_file: "+cleanErr(derr))
-	}
 }
 
 func contains(set []string, s string) bool {

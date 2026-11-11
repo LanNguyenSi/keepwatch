@@ -56,9 +56,9 @@ func (es Errors) Error() string {
 // yields a nil root; a file with duplicate keys still returns its
 // root, which is merged and validated, and Load fails on the kept
 // errors.
-func parseFile(file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, Errors) {
+func parseFile(dir *os.Root, name, file string, p securePolicy) (*yaml.Node, map[*yaml.Node]string, Errors) {
 	origins := map[*yaml.Node]string{}
-	f, _, err := openSecure(file, p)
+	f, _, err := openSecureIn(dir, name, file, p)
 	if err != nil {
 		return nil, origins, Errors{{File: file, Msg: "cannot read: " + fileErr(err, file)}}
 	}
