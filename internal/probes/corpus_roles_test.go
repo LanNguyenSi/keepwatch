@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
 	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
@@ -161,6 +162,9 @@ func corpusRoles() []corpusRole {
 		{name: "disk statfs error text", kind: "disk_usage", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
 			return execDisk(diskProbe(t, map[string]any{"fstypes": []any{"ext4"}}), mountFS(mi(7, "/mnt/data", "ext4")), &statfsMap{errs: map[string]error{"/mnt/data": errors.New("boom " + f)}})
 		}},
+		{name: "disk mountinfo that cannot be read", kind: "disk_usage", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			return execDisk(diskProbe(t, nil), probestest.ErrFS{Err: errors.New("boom " + f)}, &statfsMap{})
+		}},
 		{name: "disk inconsistent numbers", kind: "disk_usage", status: result.Error, url: "full", run: func(t *testing.T, f string) probes.Outcome {
 			return diskOn(t, f, func(p string) *statfsMap {
 				return &statfsMap{by: map[string]probes.Statfs{p: {BlockSize: 4096, Blocks: 1, Bfree: 2, Bavail: 2}}}
@@ -205,6 +209,29 @@ func corpusRoles() []corpusRole {
 			fsys := dockerHost("", "")
 			fsys.Errs = map[string]error{"/run/docker.pid": errors.New("denied " + f)}
 			return dockerFS(t, fsys)
+		}},
+		{name: "docker process that cannot be examined", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("-H", "tcp://127.0.0.1:2375"))
+			fsys.Errs = map[string]error{"/proc/4242": errors.New("denied " + f)}
+			return dockerFS(t, fsys)
+		}},
+		{name: "docker process name that cannot be read", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("-H", "tcp://127.0.0.1:2375"))
+			fsys.Errs = map[string]error{"/proc/4242/comm": errors.New("denied " + f)}
+			return dockerFS(t, fsys)
+		}},
+		{name: "docker command line that cannot be read", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			fsys := dockerHost("", cmd("-H", "tcp://127.0.0.1:2375"))
+			fsys.Errs = map[string]error{"/proc/4242/cmdline": errors.New("denied " + f)}
+			return dockerFS(t, fsys)
+		}},
+		{name: "docker ps that fails with a message", kind: "docker_exposure", status: result.Error, noWS: true, run: func(t *testing.T, f string) probes.Outcome {
+			r := newRunner().AddResult(dockerPs, execx.Result{ExitCode: 2, Stderr: []byte(f)})
+			return exec(dockerProbe(t), r, probestest.FakeFS{})
+		}},
+		{name: "docker ps that cannot be run", kind: "docker_exposure", status: result.Error, run: func(t *testing.T, f string) probes.Outcome {
+			r := newRunner().AddError(dockerPs, errors.New("boom "+f))
+			return exec(dockerProbe(t), r, probestest.FakeFS{})
 		}},
 		{name: "docker process that is not dockerd", kind: "docker_exposure", status: result.Error, maxPad: 5, run: func(t *testing.T, f string) probes.Outcome {
 			fsys := dockerHost("", cmd("-H", "tcp://127.0.0.1:2375"))

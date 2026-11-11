@@ -139,12 +139,12 @@ func TestEverySecretIsGoneFromEveryOutput(t *testing.T) {
 	// The secret straddles the 30 to 300 runes a probe used to cut at, the 200
 	// runes the state shows of a subject, or the 2000 runes the report keeps of
 	// a field.
-	pads := []int{20, 190, 1990}
+	pads := []int{5, 20, 190, 1990}
 	switch {
 	case raceEnabled:
 		pads = []int{190}
 	case testing.Short():
-		pads = []int{20, 190}
+		pads = []int{5, 20, 190}
 	}
 	for _, role := range corpusRoles() {
 		t.Run(role.name, func(t *testing.T) {
@@ -222,5 +222,61 @@ func TestProbesKeepTheHostTextAsItIs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Each place that shows a subject applies the clean itself, whatever it was
+// handed: the change lists of the report, the notices, the weekly report and
+// the history take a subject from the state, which cleaned it already, and
+// must not depend on that.
+func TestEveryConsumerCleansWhatItShows(t *testing.T) {
+	red, err := redact.New([]string{`\bINT-[0-9]{10}\b`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0)
+	for _, k := range secretKinds() {
+		text := k.text
+		if k.name == "url user info" {
+			text = "https://user:hunter2urls@host.example"
+		}
+		for _, sep := range corpusSeparators {
+			raw := "x." + sep + text
+			ch := diff.Change{Kind: diff.SubjectNew, CheckID: "c.x", CheckKind: "cert_expiry", Severity: result.High, From: result.Fail, To: result.Fail, Subject: raw, Alert: true}
+			rep := diff.Report{Changes: []diff.Change{ch}}
+			in := render.Input{GeneratedAt: now, Host: "host", FailOn: result.Medium, State: render.StateInfo{Used: true, PrevRunAt: now}, Diff: rep}
+			st := &state.State{SchemaVersion: state.SchemaVersion, RunAt: now, Checks: []state.Check{{ID: "c.x", Kind: "cert_expiry", Status: result.Fail, Severity: result.High, Items: []state.Item{{Key: result.SubjectKey(raw), Subject: raw}}}}}
+			outs := map[string][]byte{}
+			for _, f := range []render.Format{render.Text, render.JSON, render.Markdown} {
+				var b bytes.Buffer
+				if err := render.Render(&b, f, in, red); err != nil {
+					t.Fatal(err)
+				}
+				outs["report "+string(f)] = b.Bytes()
+			}
+			if n, ok := render.BuildNotice(in, nil, red); ok {
+				outs["notice"] = []byte(n.Title + "\n" + n.Body)
+			}
+			run := history.FromReport(now, rep, red.Clean)
+			hb, err := json.Marshal(run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outs["history"] = hb
+			for _, md := range []bool{true, false} {
+				n := render.BuildDigest(render.DigestInput{GeneratedAt: now, Host: "host", Days: 7, State: st, Runs: []history.Run{run}}, md, red)
+				outs[fmt.Sprintf("digest markdown=%v", md)] = []byte(n.Title + "\n" + n.Body)
+			}
+			for name, b := range outs {
+				if bytes.Contains(b, []byte(k.probe)) {
+					t.Fatalf("%s sep %q: %s holds the secret: %.300q", k.name, sep, name, b)
+				}
+				for i, c := range b {
+					if (c < 0x20 && c != '\n') || c == 0x7f {
+						t.Fatalf("%s sep %q: %s holds the control byte %#x at %d", k.name, sep, name, c, i)
+					}
+				}
+			}
+		}
 	}
 }
