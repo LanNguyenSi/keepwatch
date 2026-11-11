@@ -1,0 +1,74 @@
+---
+type: invariant
+title: Host text is transformed once, at the last moment
+description: Probes hand on the raw host text; exactly one transformation (redact, escape, cut) is applied, and only where the text leaves the program or is stored. Which consumers apply it, and which deliberately do not.
+tags: [redaction, output-safety, state, invariants]
+timestamp: 2026-11-11T10:18:36Z
+sources:
+  - internal/result/result.go
+  - internal/redact/redact.go
+  - internal/render/view.go
+  - internal/render/render.go
+  - internal/render/notice.go
+  - internal/render/digest.go
+  - internal/state/state.go
+  - internal/cli/check.go
+  - internal/cli/notify.go
+  - internal/history/history.go
+  - internal/diff/diff.go
+  - internal/doctor/doctor.go
+  - docs/running.md
+---
+
+The rule is stated once, on the `Evidence` type: the subject is the raw
+identifier and is never changed by a probe
+(`internal/result/result.go:60#"is the raw identifier"`), and the one
+transformation is made "where the text leaves the program or is stored"
+(`internal/result/result.go:66#"The one change is made where the"`). No
+other stage may rewrite host text, in either direction: not cleaning early is
+load-bearing (a cut before redaction splits a secret so its pattern no longer
+matches; escaping early removes the word boundary a pattern needs), and
+cleaning the stored comparison keys is worse still, because the diff would
+then compare display forms instead of what the check saw.
+
+The single transformation is `redact.Redactor.Clean`: redact, then escape,
+then cut to `MaxFieldRunes` (`internal/redact/redact.go:224-229#"func (r *Redactor) Clean"`).
+Its order is itself an invariant, documented above the package
+(`internal/redact/redact.go:13#"The order matters"`), and the escaping
+step is specified in `docs/running.md` under "Output safety"; this bundle
+does not repeat it.
+
+Every consumer of untrusted text applies that one function, each at its own
+boundary:
+
+- the report builds one cleaned view and writes all three formats from it
+  (`internal/render/view.go:169#"return red.Clean(s)"`,
+  `internal/render/render.go:13-14#"passes through red.Clean"`);
+- the notification and the weekly digest run the same function through
+  `cutRunes` (`internal/render/notice.go:79#"red.Clean(s)"`,
+  `internal/render/digest.go:72#"red.Clean(s)"`);
+- the state stores the key from the raw subject (`result.SubjectKey`,
+  `internal/state/state.go:349#"result.SubjectKey(ev.Subject)"`) and the
+  display subject only after `clean` (`internal/state/state.go:356#"truncate(clean(ev.Subject)"`);
+  the function arrives as a parameter, and `check` passes its own redactor
+  (`internal/cli/check.go:174#"build(results, now, red.Clean)"`), so a run
+  with extra `redact.patterns` stores exactly what it would show;
+- the history is built the same way
+  (`internal/history/history.go:105#"func FromReport"`, called with
+  `red.Clean` at `internal/cli/notify.go:114#"history.FromReport"`).
+
+Two consequences live between files and belong to no single package:
+
+1. The comparison and the storage of the run share one redactor instance, so
+   report, state and notifications can never disagree about how a subject
+   looks; the diff, which only ever sees the raw-key snapshots
+   (`internal/diff/diff.go:169#"func Compute"`), cannot be poisoned by a
+   display form at all.
+2. `doctor` is deliberately outside this system. It prints host and systemd
+   paths that never passed through a probe, so it quotes them itself
+   (`internal/doctor/doctor.go:837-846#"func listPaths"`) and prints only
+   `scheme://host` of a notification URL because "doctor's output does not go
+   through the redactor" (`internal/doctor/doctor.go:916-917#"does not go through the redactor"`).
+   Anything added to a doctor message must therefore stay free of secret
+   material by construction, the way `origin` keeps the user info of a URL
+   out of it.
