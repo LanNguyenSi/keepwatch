@@ -168,8 +168,8 @@ as hidden because `ProtectKernelTunables=yes` and `ProtectControlGroups=yes` imp
 `MountAPIVFS=yes`, which gives the service its own instance of it).
 
 The workflow `.github/workflows/systemd.yml` runs `make systemd` on an x86_64 runner on
-every push to `main`, on pull requests that touch `internal/install`, `internal/doctor`,
-`test/systemd`, the `Makefile` or the workflow, and once a week, so the committed files
+every push to `main`, on every pull request (the answers depend on the whole binary,
+the configuration loader included), and once a week, so the committed files
 cannot rot and a systemd that hides a new directory fails the job. The files were
 first measured on arm64, and there is one set of files for every architecture. The one
 difference seen between an arm64 container runtime and a real x86_64 host is the type at
