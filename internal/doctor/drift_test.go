@@ -232,24 +232,60 @@ func TestDoctorReportsDropIns(t *testing.T) {
 			t.Errorf("\n%s", dump(rep))
 		}
 	})
-	t.Run("a drop-in for all services is a warning, not a problem", func(t *testing.T) {
+	t.Run("a drop-in in service.d is a warning, not a problem", func(t *testing.T) {
 		// The path a generator of LXC and Incus images writes at every boot,
 		// and the places a vendor and an administrator use for the same.
 		for _, p := range []string{
 			"/run/systemd/system/service.d/zzz-lxc-service.conf",
 			"/usr/lib/systemd/system/service.d/10-timeout-abort.conf",
 			"/etc/systemd/system/service.d/90-x.conf",
-			"/etc/systemd/system/other.service.d/90-x.conf",
 		} {
 			r := newRig(t)
 			r.sd.Props[install.CheckService] = map[string]string{"DropInPaths": p}
 			rep := r.run()
-			if !has(rep, doctor.Warn, "units", install.CheckService, p, "applies to other services", "system, an image or a generator") {
+			if !has(rep, doctor.Warn, "units", install.CheckService, p, "service.d directory", "applies to every service", "system, an image or a generator") {
 				t.Errorf("%s:\n%s", p, dump(rep))
 			}
 			if rep.Problems() != 0 || strings.Contains(dump(rep), "Remove them") {
 				t.Errorf("%s is no problem the operator can fix:\n%s", p, dump(rep))
 			}
+		}
+	})
+	t.Run("a drop-in in any other directory is aimed at the unit", func(t *testing.T) {
+		// systemd reads <name>.service.d for every name of the unit, so a
+		// directory of an alias, whatever it is called, changes this service.
+		// On Ubuntu 24.04 a kwalias.service symlinked to the unit with
+		// ExecStart= and ExecStart=/bin/true in its drop-in ran /bin/true.
+		for _, p := range []string{
+			"/etc/systemd/system/other.service.d/90-x.conf",
+			"/etc/systemd/system/kwalias.service.d/x.conf",
+			"/etc/systemd/system/keepwatch-.service.d/x.conf",
+			"/run/systemd/system/anything.d/x.conf",
+			"/etc/systemd/system/service.d.d/x.conf",
+		} {
+			r := newRig(t)
+			r.sd.Props[install.CheckService] = map[string]string{"DropInPaths": p}
+			rep := r.run()
+			if !has(rep, doctor.Problem, "units", install.CheckService, "has drop-ins ("+p+")") || rep.Warnings() != 0 {
+				t.Errorf("%s:\n%s", p, dump(rep))
+			}
+		}
+	})
+	t.Run("a name with a space is quoted by systemctl and read whole", func(t *testing.T) {
+		// systemctl show of keepwatch-check.service.d/a b.conf (systemd 255).
+		const quoted = `"/etc/systemd/system/keepwatch-check.service.d/a b.conf"`
+		r := newRig(t)
+		r.sd.Props[install.CheckService] = map[string]string{"DropInPaths": quoted}
+		rep := r.run()
+		if !has(rep, doctor.Problem, "units", install.CheckService, "has drop-ins ("+quoted+")") || rep.Warnings() != 0 || rep.Problems() != 1 {
+			t.Errorf("\n%s", dump(rep))
+		}
+		// In a service.d it is one file as well, and still only a warning.
+		const shared = `"/run/systemd/system/service.d/a b.conf" /etc/systemd/system/keepwatch-check.service.d/o.conf`
+		r.sd.Props[install.CheckService] = map[string]string{"DropInPaths": shared}
+		rep = r.run()
+		if !has(rep, doctor.Warn, "units", `"/run/systemd/system/service.d/a b.conf" from a service.d`) || !has(rep, doctor.Problem, "units", "has drop-ins (/etc/systemd/system/keepwatch-check.service.d/o.conf)") {
+			t.Errorf("\n%s", dump(rep))
 		}
 	})
 	t.Run("both kinds: the problem lists only the files named for keepwatch", func(t *testing.T) {

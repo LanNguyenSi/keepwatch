@@ -658,27 +658,96 @@ func (d Deps) loadedUnit(out reporter, name string, v map[string]string) {
 		out.add(Problem, "units", "systemd has not reloaded %s since the unit file or a drop-in changed, so the service runs as it was when systemd last read it, not as the file on disk says: run \"systemctl daemon-reload\"", name)
 	}
 	var own, shared []string
-	for _, p := range strings.Fields(v["DropInPaths"]) {
-		// A directory named for keepwatch (keepwatch-check.service.d,
-		// keepwatch-.service.d) holds the changes of someone who set out to
-		// change these units. Any other, service.d above all, applies to every
-		// service of the host, and a vendor, a generator or an image may have
-		// put it there.
-		if strings.HasPrefix(filepath.Base(filepath.Dir(p)), "keepwatch-") {
-			own = append(own, p)
-		} else {
+	for _, p := range splitQuoted(v["DropInPaths"]) {
+		// systemd reads the drop-ins of a unit from <name>.service.d for each
+		// name the unit has (an alias included), from the directories named
+		// for a prefix of the name (keepwatch-.service.d) and from service.d,
+		// which holds for every service of the host. Only service.d can have
+		// been put there by someone who did not mean these units: a vendor, an
+		// image or a generator. Everything else is aimed at this unit.
+		if filepath.Base(filepath.Dir(p)) == "service.d" {
 			shared = append(shared, p)
+		} else {
+			own = append(own, p)
 		}
 	}
 	if len(own) > 0 {
 		// systemd merges a drop-in into the unit, so the service runs with it
 		// whatever its file says. What it changes (ExecStart, a hardening
 		// option) is not something doctor judges.
-		out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", name, strings.Join(own, " "))
+		out.add(Problem, "units", "%s has drop-ins (%s): systemd runs the service with them applied, so it does not run as \"keepwatch install\" renders it, and doctor does not judge what they change. Remove them: install writes the unit without them and does not remove a drop-in", name, listPaths(own))
 	}
 	if len(shared) > 0 {
-		out.add(Warn, "units", "%s is merged with %s, which applies to other services as well and may come from the system, an image or a generator; doctor does not judge what it changes, so look at it if the service does not run as install renders it", name, strings.Join(shared, " "))
+		out.add(Warn, "units", "%s is merged with %s from a service.d directory, which applies to every service of the host and may come from the system, an image or a generator; doctor does not judge what it changes, so look at it if the service does not run as install renders it", name, listPaths(shared))
 	}
+}
+
+// splitQuoted splits the value of a systemctl property that lists paths. The
+// entries are separated by blanks. An entry that holds a blank, a quote, a
+// backslash or a control character is in double quotes: inside them a backslash
+// stands before a quote, a backslash, a dollar sign or a backquote, and C
+// escapes (\\t) stand for control characters. A quote that is not closed takes
+// the rest of the value.
+func splitQuoted(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inToken, inQuote := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inQuote && c == '\\' && i+1 < len(s):
+			i++
+			switch e := s[i]; e {
+			case 'a':
+				cur.WriteByte('\a')
+			case 'b':
+				cur.WriteByte('\b')
+			case 'f':
+				cur.WriteByte('\f')
+			case 'n':
+				cur.WriteByte('\n')
+			case 'r':
+				cur.WriteByte('\r')
+			case 't':
+				cur.WriteByte('\t')
+			case 'v':
+				cur.WriteByte('\v')
+			default:
+				cur.WriteByte(e)
+			}
+		case inQuote && c == '"':
+			inQuote = false
+		case inQuote:
+			cur.WriteByte(c)
+		case c == '"':
+			inQuote, inToken = true, true
+		case c == ' ' || c == '\t' || c == '\n':
+			if inToken {
+				out = append(out, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+		default:
+			cur.WriteByte(c)
+			inToken = true
+		}
+	}
+	if inToken {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// listPaths joins paths for a message, quoting the ones that hold a space.
+func listPaths(paths []string) string {
+	q := make([]string, len(paths))
+	for i, p := range paths {
+		q[i] = p
+		if strings.ContainsAny(p, " \t\"\\") {
+			q[i] = strconv.Quote(p)
+		}
+	}
+	return strings.Join(q, " ")
 }
 
 // unitDrift reports a service file that is not what "keepwatch install" writes
