@@ -60,10 +60,10 @@ func ParseSeverity(s string) (Severity, error) {
 // the item is made from (SubjectKey), so it is the raw identifier and is never
 // changed by a probe (not cleaned, not cut, not quoted): two items that differ
 // only in a control character, or only past the length a report shows, are two
-// items. The probes cert_expiry, disk_usage, docker_exposure and
-// authorized_keys also put the text of the host into Detail and into the
-// Summary of a Result as it is (the other probes still clean some of their
-// texts, which the report cleans again). The one change is made where the
+// items. Every probe hands the text of the host on as read, into Detail and
+// into the Summary of a Result too; none cleans, cuts, escapes or quotes it.
+// A probe holds no more of it than the command output it read.
+// The one change is made where the
 // text leaves the program or is stored (report, notices, state, history), by
 // redact.Redactor.Clean: redact, then escape, then cut. A change made before
 // that can hide a secret from its pattern (a cut splits it, an escape takes

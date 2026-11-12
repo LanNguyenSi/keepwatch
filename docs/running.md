@@ -408,10 +408,15 @@ one block when it is matched:
   tokens;
 - URLs with credentials (`scheme://user:password@host`, `scheme://token@host`);
   the credentials end at the last `@` before the host, so a password with an `@`
-  in it is covered;
+  in it is covered, also when host text and a space or tab, or a comma and then
+  a space or tab, stand between the scheme and a `user:password` (a token alone
+  behind such text is not covered);
 - AWS access key ids, GitHub tokens (`ghp_`, `github_pat_`, ...), GitLab tokens
   (`glpat-`), API keys of the `sk-` family (`sk-...`, `sk-ant-...`), ntfy tokens
   (`tk_`), Slack tokens, Google API keys, Stripe keys and JSON web tokens.
+  GitHub, GitLab and Slack tokens are found glued to the text in front of them
+  (`aghp_...`); every token is found behind a terminal color sequence. Which
+  shapes are left out on purpose is listed in `docs/okf/limit-known-limits.md`.
 
 Redaction is best effort: it knows the shapes above and cannot know a secret that
 has none. The probes keep secrets out of evidence in the first place (they print
