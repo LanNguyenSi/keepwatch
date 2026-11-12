@@ -40,6 +40,12 @@ report.
 
 ### Fixed
 
+- The disk usage check now reads a file system through another mount point of
+  the same device when the one it kept cannot be statted (a permission problem,
+  a hung path, a lazily unmounted point), instead of reporting the whole device
+  as unreadable. The device is still judged once, on the same mount point it
+  always reported, and the finding names the mount that answered.
+
 - `keepwatch doctor` escapes every line it prints. A control byte (an escape
   sequence, for one) in a unit-file value such as the `--config` path or in a
   systemd error text reached the terminal raw, where it could move the cursor
