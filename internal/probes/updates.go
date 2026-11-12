@@ -206,7 +206,7 @@ func (u updatesProbe) Run(ctx context.Context, env *Env) Outcome {
 			other++
 			continue
 		}
-		ev = append(ev, result.Evidence{Subject: p.name, Detail: hostText(p.detail())})
+		ev = append(ev, result.Evidence{Subject: p.name, Detail: p.detail()})
 	}
 	base := fmt.Sprintf("%d other upgrade(s) pending", other)
 	if sim.notUpgraded > 0 {
@@ -264,7 +264,7 @@ func orNone(s string) string {
 func (u updatesProbe) listAge(env *Env) (note string, stale bool, err error) {
 	files, gerr := env.glob(aptListsGlob)
 	if gerr != nil {
-		return "", false, fmt.Errorf("listing the apt package lists failed: %s", hostText(gerr.Error()))
+		return "", false, fmt.Errorf("listing the apt package lists failed: %s", gerr.Error())
 	}
 	var newest time.Time
 	for _, f := range files {

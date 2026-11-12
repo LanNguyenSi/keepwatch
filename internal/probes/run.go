@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
@@ -46,7 +45,7 @@ func runWith(ctx context.Context, env *Env, argv []string, opts execx.Opts, keep
 	case errors.Is(err, execx.ErrIOTimeout):
 		return res, errorOutcome("%s output may be incomplete: pipes still held open after exit", argv[0])
 	default:
-		return res, errorOutcome("running %s failed: %s", argv[0], hostText(err.Error()))
+		return res, errorOutcome("running %s failed: %s", argv[0], err.Error())
 	}
 	switch {
 	case res.IOIncomplete:
@@ -73,7 +72,7 @@ func unexpectedExit(prog string, res execx.Result) *Outcome {
 		msg = firstLine(res.Stdout)
 	}
 	if msg != "" {
-		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, hostText(msg))
+		return errorOutcome("%s exited with status %d: %s", prog, res.ExitCode, msg)
 	}
 	return errorOutcome("%s exited with status %d", prog, res.ExitCode)
 }
@@ -86,36 +85,12 @@ func firstLine(b []byte) string {
 	return s
 }
 
-// maxHostText is the most bytes of one piece of host text (a quoted line, the
-// first line of a message, a value, a name) that a probe puts into a summary
-// or a detail. It bounds what a probe holds and what the report then has to
-// scan, without cutting where a pattern could notice: Clean cuts a field at
-// MaxFieldRunes (2000 runes, at most 8000 bytes) after redacting, so a token
-// that starts inside those runes is whole as long as the text goes a token's
-// length beyond them, and 32 KiB is four times that with room to spare. A
-// match with no length limit of its own (a private key block, a quoted value
-// that is never closed) runs to the end of the text, which is where this cut
-// is too, so it stays one match. The cut does not escape or replace anything,
-// stays on a character boundary and ends in "...".
-const maxHostText = 32 << 10
-
-// hostText cuts s to maxHostText bytes (see there).
-func hostText(s string) string {
-	if len(s) <= maxHostText {
-		return s
-	}
-	i := maxHostText
-	for i > 0 && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return s[:i] + "..."
-}
-
-// quoted puts s, cut to maxHostText, in double quotes and changes nothing
-// else. Host text stays raw in a probe until the one redact.Redactor.Clean
-// where it leaves the program: an escape (strconv.Quote, %q) or a "?" for an
-// unprintable byte made here can move the word boundary a pattern needs, and
-// a cut that is short splits a secret, so no pattern would match any more.
-// The quotes are only for the eye: a quote inside the text is not escaped, so
-// they are no delimiter that a reader can rely on.
-func quoted(s string) string { return `"` + hostText(s) + `"` }
+// quoted puts s in double quotes and changes nothing else. Host text stays
+// raw in a probe until the one redact.Redactor.Clean where it leaves the
+// program: an escape (strconv.Quote, %q), a "?" for an unprintable byte or a
+// cut made here can move the word boundary a pattern needs or split a secret,
+// so no pattern would match any more. How much output a probe holds is
+// bounded where it is read (execx.Opts.MaxOutput), not here. The quotes are
+// only for the eye: a quote inside the text is not escaped, so they are no
+// delimiter that a reader can rely on.
+func quoted(s string) string { return `"` + s + `"` }

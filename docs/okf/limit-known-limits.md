@@ -45,12 +45,11 @@ adjacent ones stop short.
   that plan the scheduled root runs do walk them
   (`docs/running.md:154-155#"not examined by"`). A hostile ancestor makes the
   manual and the scheduled answer differ, on purpose.
-- **A probe holds host text up to a cut far beyond the report's.** A piece of
-  host text in a summary or a detail is cut at `maxHostText` (32 KiB,
-  `internal/probes/run.go:100#"const maxHostText"`), and the output it came from at
-  the stream limit of its command (`internal/execx/execx.go:19#"DefaultMaxOutput"`,
-  or the larger limit a run asks for by name:
-  `internal/probes/listeners.go:23#"trustedMaxOutput"`), until `Clean` cuts a
+- **A probe's text is as long as the output it came from.** No probe cuts
+  host text, so a summary or a detail can hold up to the stream limit of the
+  command it was taken from (1 MiB, or the larger limit a run asks for by
+  name: `internal/execx/execx.go:19#"DefaultMaxOutput"`,
+  `internal/probes/listeners.go:23#"trustedMaxOutput"`) until `Clean` cuts a
   field at `MaxFieldRunes`. That is memory held for one run, not output.
 - **Two parsers still tidy white space.** The sshd probe collapses the white
   space of a value (`internal/probes/sshd.go:147#"raw := strings.Join"`) and the
@@ -68,7 +67,7 @@ adjacent ones stop short.
   each would cost false positives in text that is no secret:
   - a token with a short or common prefix (AWS key id, `sk-`, ntfy `tk_`,
     Google, Stripe, JWT) glued to a letter, digit or underscore in front of it
-    (the start rule is `internal/redact/redact.go:111#"const tokenStart"`; GitHub,
+    (the start rule is `internal/redact/redact.go:113#"const tokenStart"`; GitHub,
     GitLab and Slack tokens, and the scheme of a URL, are found after any
     character, and every built-in shape is found behind a CSI (color) sequence;
     other escape sequences are not recognised: `ESC ( B`, `ESC c`, the 8-bit CSI
@@ -82,7 +81,7 @@ adjacent ones stop short.
     not looked for; the `user:password` form can also redact ordinary text such
     as `https://example.com mailto:admin@example.com`, which is accepted and
     pinned in the tests (the URL rule is
-    `internal/redact/redact.go:124#"scheme://user:password@host and scheme://token@host"`);
+    `internal/redact/redact.go:126#"scheme://user:password@host and scheme://token@host"`);
   - a secret with no shape of its own, as before.
 - **A check-then-exec gap remains.** Trust in execx rests on the trusted
   directories being root-owned; Go has no `fexecve`, so anyone who could

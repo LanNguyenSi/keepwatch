@@ -16,9 +16,7 @@ report.
   few dozen characters (and replace control characters by `?`) first, so a
   token that straddled the cut kept a prefix that no pattern matched and
   reached the report. The one change is now made where the text leaves the
-  program, as for the other checks. A probe still cuts a piece of host text at
-  32 KiB, far beyond what a report shows, so one very long line cannot be
-  held or copied many times; the note about a failed `ss -p` run in the
+  program, as for the other checks. The note about a failed `ss -p` run in the
   listeners check now stands once in the summary instead of in every item.
 - Redaction closes two gaps. A GitHub, GitLab or Slack token glued to the text
   in front of it (`aghp_...`, a digit or an underscore before it) is found, and

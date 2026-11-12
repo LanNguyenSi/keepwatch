@@ -61,7 +61,7 @@ var corpusSeparators = []string{"", " ", "-", "\t", "\n", "\x01", "\x1b", "?", "
 // a stated limit (docs/okf/limit-known-limits.md).
 func foundAfter(k secretKind, sep string) bool {
 	switch sep {
-	case "a", "7", "_":
+	case "a":
 		return k.name == "github token" || k.name == "url user info"
 	case "\x1b[31m":
 		return k.name != "operator pattern" // a pattern of the operator has its own boundary
@@ -171,9 +171,10 @@ func TestEverySecretIsGoneFromEveryOutput(t *testing.T) {
 	seps := corpusSeparators
 	if raceEnabled {
 		// the race detector adds nothing to a pure function and costs minutes
-		// here: one separator of each kind is left (nothing, white space, a
-		// tab, a control character, a glued letter, a color sequence)
-		seps = []string{"", " ", "\t", "\x01", "a", "\x1b[31m"}
+		// here: a reduced list that still has nothing, white space (a space,
+		// a tab, a newline), a control character, a comma, a letter that glues
+		// the secret to the text before it and a color sequence
+		seps = []string{"", " ", "\t", "\n", "\x01", ",", "a", "\x1b[31m"}
 	}
 	for _, role := range corpusRoles() {
 		t.Run(role.name, func(t *testing.T) {

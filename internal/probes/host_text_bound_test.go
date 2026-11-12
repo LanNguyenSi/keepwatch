@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
-	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -22,7 +21,7 @@ func outcomeText(summary string, ev []result.Evidence) int {
 
 // A best-effort ss -p run that fails with a very long line must not put that
 // line into every listener's detail: with 150 listeners and a 1 MiB line the
-// outcome would hold 150 copies. The note stands once, cut.
+// outcome would hold 150 copies. The note stands once.
 func TestListenersFailingProcessRunIsNotRepeatedPerListener(t *testing.T) {
 	var sockets strings.Builder
 	for i := 0; i < 150; i++ {
@@ -33,7 +32,7 @@ func TestListenersFailingProcessRunIsNotRepeatedPerListener(t *testing.T) {
 		AddResult(ssTCPp, execx.Result{ExitCode: 1, Stderr: []byte(huge + "\n")}).AddResult(ssUDPp, inline("", 0))
 	o := exec(listenersProbe(t, nil), r, nil)
 	wantStatus(t, o, result.Fail)
-	if n := outcomeText(o.Summary, o.Evidence); n > 128<<10 {
+	if n := outcomeText(o.Summary, o.Evidence); n > len(huge)+(256<<10) {
 		t.Fatalf("the outcome holds %d bytes of text for one 1 MiB line", n)
 	}
 	all := o.Summary
@@ -48,39 +47,6 @@ func TestListenersFailingProcessRunIsNotRepeatedPerListener(t *testing.T) {
 			t.Fatalf("detail %q", e.Detail)
 		}
 	}
-}
-
-// Text of the host is cut far beyond what a report shows, so a secret that
-// starts inside the first 2000 runes is whole when Clean redacts it, the cut
-// leaves valid UTF-8, and the length is bounded.
-func TestHostTextIsCutOnlyFarBeyondTheReportCut(t *testing.T) {
-	const token = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
-	run := func(first string) result.Result {
-		o := exec(prepare(t, "fail2ban_jail", map[string]any{"jail": "sshd"}), newRunner().AddResult(jailArgv("sshd"), inline(first+"\n", 0)), nil)
-		wantStatus(t, o, result.Error)
-		return result.Result{Summary: o.Summary}
-	}
-	t.Run("a token across the report cut is redacted", func(t *testing.T) {
-		got := run(strings.Repeat("a", 1930) + " " + token + " " + strings.Repeat("b", 1<<20)).Summary
-		if len(got) > 33<<10 {
-			t.Fatalf("summary is %d bytes", len(got))
-		}
-		if s := shown(got); strings.Contains(s, "ZZZZ") || !strings.Contains(s, "[REDACTED]") {
-			t.Fatalf("shown summary %.100q ... %.60q", s, s[max(0, len(s)-60):])
-		}
-	})
-	t.Run("the cut keeps valid UTF-8 and ends in dots", func(t *testing.T) {
-		got := run(strings.Repeat("€", 20000)).Summary
-		if !utf8.ValidString(got) || !strings.HasSuffix(got, `..."`) || len(got) > 33<<10 {
-			t.Fatalf("summary: valid %v, %d bytes, ends %q", utf8.ValidString(got), len(got), got[len(got)-8:])
-		}
-	})
-	t.Run("a short text is not cut", func(t *testing.T) {
-		in := strings.Repeat("c", 30<<10)
-		if got := run(in).Summary; !strings.Contains(got, `"`+in+`"`) {
-			t.Fatalf("a text below the limit was changed")
-		}
-	})
 }
 
 // With a failing ss -p run and a failing ss run of the other protocol the
@@ -98,28 +64,56 @@ func TestListenersPartialResultStatesTheProcessNoteOnce(t *testing.T) {
 	}
 }
 
-// Wherever the probes of these kinds put a piece of host text into a summary
-// or a detail, a megabyte of it is cut.
-func TestEveryPieceOfHostTextIsBounded(t *testing.T) {
-	huge := strings.Repeat("a", 1<<20)
+// A piece of host text is copied into an outcome at most twice (a firewall
+// table that drops for both address families is named in both), never once per
+// item of a list.
+func TestNoPieceOfHostTextIsCopiedMoreThanTwice(t *testing.T) {
+	big := strings.Repeat("a", 100<<10)
 	for _, role := range commandRoles() {
 		t.Run(role.name, func(t *testing.T) {
-			o := role.run(t, huge)
-			if n := outcomeText(o.Summary, o.Evidence); n > 2*(33<<10) {
-				t.Fatalf("the outcome holds %d bytes of text", n)
+			o := role.run(t, big)
+			if n := outcomeText(o.Summary, o.Evidence); n > 2*len(big)+4096 {
+				t.Fatalf("a piece of %d bytes is in the outcome %.1f times", len(big), float64(n)/float64(len(big)))
 			}
 		})
 	}
 }
 
-// The package list file may be up to 64 KiB, which is more than the cut: a
-// line of it is cut too.
-func TestRebootPackageListLineIsCut(t *testing.T) {
-	line := strings.Repeat("p", 60<<10)
-	r := newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 0))
-	o := exec(rebootProbe(t), r, probestest.MemFS{rebootFile: "x", pkgsFile: line + "\n"})
-	wantStatus(t, o, result.Fail)
-	if n := outcomeText(o.Summary, o.Evidence); n > 34<<10 {
-		t.Fatalf("the outcome holds %d bytes of text for a 60 KiB line", n)
+// Host text is long, and a pattern that matches a lot sits in front of a
+// secret: no step between the host and the report may cut the text where it
+// would split the secret, however the text came to be that long. Both cases
+// are followed to every output.
+func TestLongHostTextIsRedactedBeforeItIsCut(t *testing.T) {
+	const token = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+	var role corpusRole
+	for _, r := range commandRoles() {
+		if r.name == "run command that cannot be started" {
+			role = r
+		}
+	}
+	red := redact.Default()
+	for name, frag := range map[string]string{
+		// bytes that are not valid UTF-8 after the token
+		"token, then 33 KiB of continuation bytes":    "x. " + token + " " + strings.Repeat("\x80", 33<<10),
+		"token glued to 33 KiB of continuation bytes": "x. " + token + strings.Repeat("\x80", 33<<10),
+		// a long value that Clean redacts to a few characters, so that what
+		// stands at byte 32768 of the host text is within the first runes of
+		// the shown text
+		"long redacted value, token at byte 32768":     "password=" + strings.Repeat("v", 32768-len("password=")-len(token)-12) + " x " + token + " tail",
+		"long redacted value, token across byte 32768": "password=" + strings.Repeat("v", 32768-len("password=")-20) + " x " + token + " tail",
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := role.run(t, frag)
+			saw := false
+			for out, b := range outputsOf(t, role, o, red) {
+				if leak := leakIn(b, "ghp_ZZZZ"); leak != "" || strings.Contains(string(b), "ZZZZZZ") {
+					t.Fatalf("%s holds the token", out)
+				}
+				saw = saw || strings.Contains(string(b), "[REDACTED]")
+			}
+			if !saw {
+				t.Fatal("nothing was redacted in any output")
+			}
+		})
 	}
 }

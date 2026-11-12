@@ -99,16 +99,18 @@ type rule struct {
 // ends a value as a space does.
 const valueRe = `"(?:[^"\\]|(?s:\\.))*(?:"|\\?$)|'(?:[^'\\]|(?s:\\.))*(?:'|\\?$)|\[REDACTED\]|[^\s\x00"',;&][^\s\x00",;&]*`
 
-// tokenStart is what must stand in front of a token whose prefix is short or
-// common enough to occur inside a longer word or a blob of encoded text: the
-// start of the text, a character that is not part of a word, or the end of a
-// terminal control sequence ("\x1b[31m" leaves an "m" in front of the token, a
-// letter that a word boundary would count as part of a word). It is matched,
-// not asserted (RE2 has no lookbehind): the first group holds it, and the
-// replacement puts it back. The prefixes of GitHub, GitLab and Slack tokens
-// are long and specific, so those patterns take a token after any character:
-// "aghp_...", "7ghp_..." and "_ghp_..." are tokens too.
-const tokenStart = `(^|[^A-Za-z0-9_]|` + csi + `)`
+// tokenStart is what must stand in front of a token or a keyword whose prefix
+// is short or common enough to occur inside a longer word or a blob of encoded
+// text: a word boundary (zero width, so a character that an earlier match
+// ended on is still available to the next one), or a terminal CSI sequence.
+// "\x1b[31m" leaves an "m" in front of the token, a letter that a word
+// boundary counts as part of a word. The CSI is matched, not asserted (RE2 has
+// no lookbehind): it is the first group, and the replacement puts it back
+// (the group is empty when the boundary matched). The prefixes of GitHub,
+// GitLab and Slack tokens are long and specific, so those patterns take a
+// token after any character: "aghp_...", "7ghp_..." and "_ghp_..." are
+// tokens too.
+const tokenStart = `(?:\b|(` + csi + `))`
 
 // csi is a CSI sequence of a terminal (a color change, a cursor move): ESC [,
 // parameter bytes, intermediate bytes and a final byte. Other kinds of escape

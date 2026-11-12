@@ -75,12 +75,12 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 			detail += "; packages: " + pkgList(string(pkgs))
 		case errors.Is(perr, fs.ErrNotExist):
 		default:
-			failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootPkgsFile, hostText(perr.Error())))
+			failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootPkgsFile, perr.Error()))
 		}
 		ev = append(ev, result.Evidence{Subject: "reboot-required", Detail: detail})
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootFile, hostText(err.Error())))
+		failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootFile, err.Error()))
 	}
 
 	res, out := run(ctx, env, []string{"needrestart", "-b", "-k", "-r", "l"}, 30*time.Second)
@@ -130,7 +130,7 @@ func pkgList(content string) string {
 			names = append(names, "...")
 			break
 		}
-		names = append(names, hostText(line))
+		names = append(names, line)
 	}
 	if len(names) == 0 {
 		return "none listed"
@@ -178,10 +178,10 @@ func parseNeedrestart(out string) (*result.Evidence, string, error) {
 	}
 	detail := kind
 	if cur := kv["NEEDRESTART-KCUR"]; cur != "" {
-		detail += "; running " + hostText(cur)
+		detail += "; running " + cur
 	}
 	if exp := kv["NEEDRESTART-KEXP"]; exp != "" {
-		detail += "; expected " + hostText(exp)
+		detail += "; expected " + exp
 	}
 	return &result.Evidence{Subject: "kernel", Detail: detail}, "", nil
 }

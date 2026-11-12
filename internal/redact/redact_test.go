@@ -107,7 +107,10 @@ var positives = []struct {
 	{"url after a word that looks like a mailto link", "https://example.com mailto:admin@example.com", "mailto:admin", "https://[REDACTED]@example.com"},
 	{"authorization after a color sequence", "\x1b[31mAuthorization: Bearer abcdef0123456789abcdef", "abcdef0123456789", "\x1b[31mAuthorization: [REDACTED]"},
 	{"cookie after a color sequence", "\x1b[0mCookie: sid=abcdef", "abcdef", "\x1b[0mCookie: [REDACTED]"},
-	{"bearer after a color sequence", "\x1b[1msent bearer abcdef0123456789abcdef.xyz", "abcdef0123456789", "bearer [REDACTED]"},
+	{"bearer after a color sequence", "\x1b[1mbearer abcdef0123456789abcdef.xyz", "abcdef0123456789", "\x1b[1mbearer [REDACTED]"},
+	{"authorization behind a long s", "\u017fauthorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz", "authorization: [REDACTED]"},
+	{"cookie behind the Kelvin sign", "\u212acookie: sid=abcdef", "abcdef", "cookie: [REDACTED]"},
+	{"bearer behind a long s", "\u017fbearer abcdef0123456789abcdef", "abcdef0123456789", "bearer [REDACTED]"},
 	{"flag after a color sequence", "\x1b[32m--password hunter2", "hunter2", "--password [REDACTED]"},
 	{"pass after a color sequence", "\x1b[32mpass=hunter2", "hunter2", "pass=[REDACTED]"},
 	{"pwd after a color sequence", "\x1b[32mpwd=hunter2", "hunter2", "pwd=[REDACTED]"},
@@ -523,6 +526,17 @@ func TestTokensAfterGluedTextAndColorSequences(t *testing.T) {
 				t.Errorf("Redact(%q) = %q, want %q", in, got, want)
 			}
 		}
+	}
+}
+
+// A keyword that starts right where the value of the one before it ended
+// (the quote that closes a value is not consumed by the match) is found too.
+// Redacting the result again would swallow more, so this is not a table case.
+func TestKeywordRightBehindAQuotedValue(t *testing.T) {
+	in := `authorization: "A"authorization: "B"`
+	want := `authorization: [REDACTED]authorization: [REDACTED]`
+	if got := Default().Redact(in); got != want {
+		t.Errorf("Redact(%q) = %q, want %q", in, got, want)
 	}
 }
 
