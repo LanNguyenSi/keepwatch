@@ -38,6 +38,15 @@ report.
   cut at 20 to 400 characters, quotes inside a quoted line are no longer
   escaped, and sshd values keep the case the host printed.
 
+### Fixed
+
+- `keepwatch doctor` escapes every line it prints. A control byte (an escape
+  sequence, for one) in a unit-file value such as the `--config` path or in a
+  systemd error text reached the terminal raw, where it could move the cursor
+  or forge a line of the report the operator pastes into an issue. The area
+  and the message of a finding are now escaped once, as they are printed, so
+  the report is plain text and the finding keeps its raw text in memory.
+
 ## [0.1.0] - 2026-11-11
 
 The first release: stage 0, static posture checks of a Linux server with

@@ -268,22 +268,6 @@ func TestListPathsOfTheCapturedNamesIsSafe(t *testing.T) {
 	}
 }
 
-func TestQuoteUnprintable(t *testing.T) {
-	for in, want := range map[string]string{
-		"": "",
-		"systemctl show x exited with status 1: Failed to get properties: Bad message": "systemctl show x exited with status 1: Failed to get properties: Bad message",
-		`a "quoted" word and a back\slash`:                                             `a "quoted" word and a back\slash`,
-		"caf\u00e9":                                                                    "caf\u00e9",
-		"a\u009b31mb":                                                                  `"a\u009b31mb"`,
-		"a\u202eb":                                                                     `"a\u202eb"`,
-		"a\x1bb":                                                                       `"a\x1bb"`,
-		"a\rb":                                                                         `"a\rb"`,
-		"a\xffb":                                                                       `"a\xffb"`,
-	} {
-		got := quoteUnprintable(in)
-		if got != want {
-			t.Errorf("%q: got %s, want %s", in, got, want)
-		}
-		safeOutput(t, got)
-	}
-}
+// quoteUnprintable used to live here: the error texts of systemd go into the
+// messages raw now, and Report.Write escapes them once, which
+// TestDoctorEscapesWhatReachesTheOutput checks end to end.

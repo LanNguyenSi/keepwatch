@@ -2,6 +2,7 @@ package doctor_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/LanNguyenSi/keepwatch/internal/config"
 	"github.com/LanNguyenSi/keepwatch/internal/doctor"
+	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/install"
 )
 
@@ -197,7 +199,7 @@ func TestDoctorWithAConfigTheUnitsDoNotUse(t *testing.T) {
 		r.fs.AddDir("/srv/kw/state2", 0o700, 0)
 		r.configPath = cfgPath
 		rep := r.run()
-		if !has(rep, doctor.Problem, "units", unitFile(install.CheckService), `allows writes to "/srv/kw/state"`, "state_dir is /srv/kw/state2") {
+		if !has(rep, doctor.Problem, "units", unitFile(install.CheckService), "allows writes to /srv/kw/state", "state_dir is /srv/kw/state2") {
 			t.Errorf("ReadWritePaths:\n%s", dump(rep))
 		}
 		if !has(rep, doctor.Problem, "units", unitFile(install.CheckService), "runs with --notify, but notify.ntfy is not configured") {
@@ -249,6 +251,90 @@ func TestDoctorUnitWithAnUncleanConfigPath(t *testing.T) {
 			t.Errorf("%s:\n%s", bad, dump(rep))
 		}
 	}
+}
+
+// The defect this closes: an ESC byte in a value a root-owned unit file holds
+// or in the error of systemctl reached the terminal raw. The printed form is
+// escaped once, in Report.Write: no raw 0x1b byte is in the output, a
+// backslash stands once (no double escape), and the finding in memory keeps
+// the raw bytes.
+func TestDoctorEscapesWhatReachesTheOutput(t *testing.T) {
+	const esc = "\x1b"
+	t.Run("a unit file value with an ESC byte", func(t *testing.T) {
+		r := newRig(t)
+		for _, s := range bothServices {
+			editUnit(r, s, "ReadWritePaths="+stateDir, "ReadWritePaths="+stateDir+esc+"x")
+		}
+		rep := r.run()
+		if !has(rep, doctor.Problem, "units", "allows writes to "+stateDir+esc+"x but state_dir is "+stateDir) {
+			t.Errorf("the raw value is not in a finding:\n%s", dump(rep))
+		}
+		out := dump(rep)
+		if strings.ContainsRune(out, 0x1b) {
+			t.Errorf("the output holds a raw ESC:\n%q", out)
+		}
+		if !strings.Contains(out, "allows writes to "+`/var/lib/keepwatch\x1bx`) {
+			t.Errorf("the escaped value is not in the output:\n%q", out)
+		}
+		safeReport(t, rep)
+	})
+	t.Run("an unclean --config path with an ESC and a backslash", func(t *testing.T) {
+		r := newRig(t)
+		bad := "esc" + esc + `bs\.yaml`
+		for _, s := range bothServices {
+			editUnit(r, s, "--config "+cfgPath, "--config "+bad)
+		}
+		rep := r.run()
+		if !has(rep, doctor.Problem, "units", "which is not valid", "esc"+esc+`bs\.yaml is not a clean absolute path`) {
+			t.Errorf("the raw path is not in the finding:\n%s", dump(rep))
+		}
+		out := dump(rep)
+		if strings.ContainsRune(out, 0x1b) {
+			t.Errorf("the output holds a raw ESC:\n%q", out)
+		}
+		// The line of that message holds the ESC escaped and the backslash
+		// once: (install's own refusal of the value quotes it, and that is a
+		// different line.)
+		n := 0
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.Contains(l, "is not a clean absolute path") {
+				continue
+			}
+			n++
+			if !strings.Contains(l, `esc\x1bbs\.yaml is not a clean absolute path`) {
+				t.Errorf("the escaped form is not in the line:\n%q", l)
+			}
+			if strings.Contains(l, `\\`) {
+				t.Errorf("the backslash is escaped twice:\n%q", l)
+			}
+		}
+		if n != 2 {
+			t.Errorf("%d lines name the unclean path, want 2:\n%q", n, out)
+		}
+		safeReport(t, rep)
+	})
+	t.Run("a systemd error with an ESC and a backslash", func(t *testing.T) {
+		// The error of the run itself: systemctl's stderr is cut by the
+		// firstLine of install, which stands between its bytes and the
+		// report, while an error of the run reaches the message raw.
+		r := newRig(t)
+		showAnswers(r, install.CheckService, execx.Result{}, fmt.Errorf("systemctl show %s: dbus error \x1b[31mred\\backslash", install.CheckService))
+		rep := r.run()
+		if !has(rep, doctor.Problem, "units", "cannot ask systemd about "+install.CheckService+": systemctl show "+install.CheckService+": dbus error \x1b[31mred\\backslash. So doctor") {
+			t.Errorf("the raw error text is not in the finding:\n%s", dump(rep))
+		}
+		out := dump(rep)
+		if strings.ContainsRune(out, 0x1b) {
+			t.Errorf("the output holds a raw ESC:\n%q", out)
+		}
+		if !strings.Contains(out, `dbus error \x1b[31mred\backslash. So doctor`) {
+			t.Errorf("the escaped error text is not in the output:\n%q", out)
+		}
+		if strings.Contains(out, `red\\backslash`) {
+			t.Errorf("the backslash is escaped twice:\n%q", out)
+		}
+		safeReport(t, rep)
+	})
 }
 
 // Where the paths lie is judged by the placement check of install, with its

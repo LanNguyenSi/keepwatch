@@ -33,6 +33,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/install"
 	"github.com/LanNguyenSi/keepwatch/internal/probes"
+	"github.com/LanNguyenSi/keepwatch/internal/redact"
 )
 
 // Level ranks a finding.
@@ -136,10 +137,14 @@ func (r Report) count(l Level) int {
 	return n
 }
 
-// Write prints the report, one finding per line, and a summary.
+// Write prints the report, one finding per line, and a summary. Area and
+// Message are the one place where a finding's text is escaped: through
+// redact.Escape, so no control byte of a host value (systemd's words, a unit
+// file's values) reaches the terminal, and nothing else in the package needs
+// to escape before the text is stored. The summary lines are constants.
 func (r Report) Write(w io.Writer) {
 	for _, f := range r.Findings {
-		fmt.Fprintf(w, "%-7s %s: %s\n", f.Level, f.Area, f.Message)
+		fmt.Fprintf(w, "%-7s %s: %s\n", f.Level, redact.Escape(f.Area), redact.Escape(f.Message))
 	}
 	switch p, wn := r.Problems(), r.Warnings(); {
 	case p > 0:
@@ -323,7 +328,7 @@ type judged struct {
 func (d Deps) judge(path string) judged {
 	j := judged{path: path}
 	if !cleanAbs(path) {
-		j.loadErrs = []string{fmt.Sprintf("%q is not a clean absolute path", path)}
+		j.loadErrs = []string{fmt.Sprintf("%s is not a clean absolute path", path)}
 		return j
 	}
 	load := d.LoadConfig
@@ -607,7 +612,7 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 			continue // said where the configuration was judged
 		}
 		if stateDir := filepath.Clean(cfg.StateDir); in.ReadWritePaths != stateDir {
-			out.add(Problem, "units", "%s allows writes to %q but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", u.path, in.ReadWritePaths, stateDir)
+			out.add(Problem, "units", "%s allows writes to %s but state_dir is %s: under systemd the state could not be saved; run \"keepwatch install\" again", u.path, in.ReadWritePaths, stateDir)
 		}
 		d.unitNotify(out, u.path, in.Notify, cfg)
 	}
@@ -644,13 +649,13 @@ func (d Deps) units(ctx context.Context, out reporter, units []unitFile, unitsEr
 		v, err := install.Show(ctx, d.Runner, s, "LoadState", "Result", "ExecMainStatus", "ActiveState", "ExecMainStartTimestamp", "DropInPaths", "FragmentPath", "NeedDaemonReload")
 		if err != nil {
 			if !missing[s] {
-				out.add(Problem, "units", "cannot ask systemd about %s: %s. So doctor cannot tell whether drop-ins are merged into the service, which file systemd loaded and how the last run ended, and nothing says that the service runs as \"keepwatch install\" renders it. \"systemctl show %s\" fails, for one, when a drop-in of the unit has a file name that is not valid UTF-8", s, quoteUnprintable(err.Error()), s)
+				out.add(Problem, "units", "cannot ask systemd about %s: %s. So doctor cannot tell whether drop-ins are merged into the service, which file systemd loaded and how the last run ended, and nothing says that the service runs as \"keepwatch install\" renders it. \"systemctl show %s\" fails, for one, when a drop-in of the unit has a file name that is not valid UTF-8", s, err.Error(), s)
 			}
 			continue
 		}
 		if v["LoadState"] != "loaded" {
 			if !missing[s] {
-				out.add(Problem, "units", "systemd has not loaded %s although its unit file is there (load state %q), so the timer cannot start the service: the unit is masked, or systemd refuses a setting of the unit file or of a drop-in. \"systemctl status %s\" shows which", s, v["LoadState"], s)
+				out.add(Problem, "units", "systemd has not loaded %s although its unit file is there (load state %s), so the timer cannot start the service: the unit is masked, or systemd refuses a setting of the unit file or of a drop-in. \"systemctl status %s\" shows which", s, v["LoadState"], s)
 			}
 			continue
 		}
@@ -819,21 +824,13 @@ func printable(s string) bool {
 	return true
 }
 
-// quoteUnprintable returns a text of another program for a message: as it is
-// when it is printable, and quoted like a path of listPaths when it is not.
-func quoteUnprintable(s string) string {
-	if printable(s) {
-		return s
-	}
-	return strconv.Quote(s)
-}
-
 // listPaths joins paths for a message. The paths are file names of the host,
 // so they can hold any byte but NUL. One that is printable and holds no blank,
 // no double quote and no backslash is written as it is; every other one is
 // written as strconv.Quote writes it (\r, \x1b, \x7f, \u202e, \xff for a byte
-// that is not UTF-8), so that no control character and no byte that is not
-// UTF-8 reaches the output and the end of each path can be seen.
+// that is not UTF-8), so that the end of each path in the list can be seen:
+// control characters are neutralized once, at the output (Report.Write), but
+// only the quotes tell where one path of the list ends and the next begins.
 func listPaths(paths []string) string {
 	q := make([]string, len(paths))
 	for i, p := range paths {
