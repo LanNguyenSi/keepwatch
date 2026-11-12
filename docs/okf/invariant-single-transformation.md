@@ -3,7 +3,7 @@ type: invariant
 title: Host text is transformed once, at the last moment
 description: Probes hand on the raw host text; exactly one transformation (redact, escape, cut) is applied, and only where the text leaves the program or is stored. Which consumers apply it, and which deliberately do not.
 tags: [redaction, output-safety, state, invariants]
-timestamp: 2026-11-12T11:02:57Z
+timestamp: 2026-11-12T12:57:07Z
 sources:
   - internal/result/result.go
   - internal/probes/run.go
@@ -96,10 +96,12 @@ Two consequences live between files and belong to no single package:
    (`internal/diff/diff.go:169#"func Compute"`), cannot be poisoned by a
    display form at all.
 2. `doctor` is deliberately outside this system. It prints host and systemd
-   paths that never passed through a probe, so it quotes them itself
-   (`internal/doctor/doctor.go:837-846#"func listPaths"`) and prints only
+   paths that never passed through a probe. Its output is escaped once, in
+   `Report.Write` (`redact.Escape`, `internal/doctor/doctor.go:140-148#"redact.Escape"`),
+   and `listPaths` stays only as the list delimiter
+   (`internal/doctor/doctor.go:834-843#"func listPaths"`). It prints only
    `scheme://host` of a notification URL because "doctor's output does not go
-   through the redactor" (`internal/doctor/doctor.go:916-917#"does not go through the redactor"`).
+   through the redactor" (`internal/doctor/doctor.go:913-914#"does not go through the redactor"`).
    Anything added to a doctor message must therefore stay free of secret
    material by construction, the way `origin` keeps the user info of a URL
    out of it.

@@ -4,6 +4,15 @@
 
 ## 2026-11-12
 
+- Re-verified `invariant-doctor-effective-unit.md`, `invariant-placement.md`,
+  `invariant-single-transformation.md`, `limit-known-limits.md` and
+  `module-execx.md` after doctor started to escape every printed line once in
+  `Report.Write` and `disk.usage` gained the sibling-mount fallback. The
+  doctor claims about quoting were corrected (escaping is done once at the
+  output, `listPaths` only keeps the list delimiters visible), and the
+  citations into `internal/doctor/doctor.go` moved by a few lines and were
+  checked by script again (file, line range, anchor inside the range). No doc
+  cites `disk.go` or `docs/checks.md`.
 - Re-verified `invariant-single-transformation.md`, `limit-known-limits.md`
   and `overview-run.md` after probes stopped cutting, escaping and replacing
   host text, and the redactor learned the shapes behind a separator, glued to

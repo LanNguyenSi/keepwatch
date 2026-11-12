@@ -3,7 +3,7 @@ type: limit
 title: What the guarantees do not cover
 description: The known limits of the trust, redaction and coordination machinery, collected with the code or reference line that states each, so a reviewer can tell a gap from a promise.
 tags: [limits, trust, redaction, concurrency]
-timestamp: 2026-11-12T11:02:57Z
+timestamp: 2026-11-12T12:57:07Z
 sources:
   - internal/cli/report.go
   - internal/config/walk.go
@@ -98,7 +98,7 @@ adjacent ones stop short.
 - **Drop-ins are counted, not read.** `doctor` judges a drop-in's existence
   and location, never its content, and says so in the finding
   (`docs/install.md:371#"judged by its existence"`,
-  `internal/doctor/doctor.go:694-699#"does not judge what they change"`).
+  `internal/doctor/doctor.go:699-704#"does not judge what they change"`).
 - **History degrades under pressure.** `history.json` is capped; when
   unusually long subjects push it past its limit, the oldest runs are
   dropped before anything is refused (`internal/history/history.go:352-353#"until the file fits"`).
