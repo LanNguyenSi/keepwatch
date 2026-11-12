@@ -3,7 +3,7 @@ type: module
 title: execx, the only seam that starts a program
 description: The execution layer's contract as its callers must know it - fixed program table, its own pipe copies, the two incomplete-output signals, and the process-group kill that no os/exec default gives.
 tags: [execx, probes, sandbox]
-timestamp: 2026-11-11T10:18:36Z
+timestamp: 2026-11-12T12:57:07Z
 sources:
   - internal/execx/execx.go
   - internal/execx/real.go
@@ -35,7 +35,7 @@ lets a multi-call binary like busybox serve as `ss`
 (`internal/execx/real.go:158#"multi-call"`). `doctor` calls the
 same `resolve` through `Resolve` so that its program answers are exactly the
 checks' (`internal/execx/real.go:207-210#"its answer is the one the"`,
-`internal/doctor/doctor.go:65#"the execution layer would run"`).
+`internal/doctor/doctor.go:66#"the execution layer would run"`).
 
 **Output is copied by execx, on purpose.** `Run` wires the child's stdout
 and stderr into pipes it creates and drains itself

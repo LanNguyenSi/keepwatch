@@ -3,7 +3,7 @@ type: invariant
 title: One list, one rule for where the scheduled run's paths may lie
 description: install and doctor share a single manifest of paths and a single placement check, and two tests pin the sandbox table that check uses to both the unit hardening and a measured real sandbox.
 tags: [install, doctor, sandbox, systemd, invariants]
-timestamp: 2026-11-11T10:18:36Z
+timestamp: 2026-11-12T12:57:07Z
 sources:
   - internal/install/placement.go
   - internal/install/trustedpath.go
@@ -63,9 +63,9 @@ which is the same one file `doctor` probes (`internal/install/stateprobe.go:9-10
 so the two can never disagree about a read-only file system. `doctor` skips
 the probe exactly when placement already blocked the directory, so it never
 writes through a path it cannot vouch for
-(`internal/doctor/doctor.go:227-229#"install.Blocks(main.placement"`), and it
+(`internal/doctor/doctor.go:232-234#"install.Blocks(main.placement"`), and it
 judges an installed unit's `ExecStart` program with the same manifest
-(`internal/doctor/doctor.go:577#"install.Paths{Binary: in.Binary}"`). Both
+(`internal/doctor/doctor.go:582#"install.Paths{Binary: in.Binary}"`). Both
 commands print the identical sentence, because both print
 `PlacementProblem.Error()` verbatim
 (`internal/install/placement.go:111#"install and doctor both print exactly"`).
