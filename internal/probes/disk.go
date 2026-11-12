@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/bits"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,7 +52,13 @@ const defaultStatfsTimeout = 10 * time.Second
 // point is kept, and on a tie the first one in mountinfo order. Usage comes
 // from statfs(2) on the mount point
 // (injected, Env.Statfs), with the timeout of Env.StatfsTimeout (default 10
-// seconds) per call; a mount that cannot be read, times out or reports
+// seconds) per call. When the kept mount cannot be read or times out, the
+// other mounts of the same device are tried in turn, shortest first, until one
+// reads: a bind mount that cannot be statted through (a permission problem, a
+// hung path, a lazily unmounted point) does not make the whole device
+// unreadable. The device is still judged once and the finding stays keyed on
+// the kept mount point, which the detail names as read through a sibling when
+// a fallback answered. A device whose every mount fails, times out or reports
 // inconsistent numbers is error with the findings of the others kept.
 //
 // Usage is computed like df: used blocks over used plus the blocks available
@@ -99,6 +106,14 @@ type diskProbe struct {
 
 type mount struct{ point, fstype, dev string }
 
+// device is one device (major:minor) with all its wanted mounts: first the
+// kept mount (the one that judges the device), then its siblings. The list is
+// in the order the mounts are tried: the kept mount first (the shortest mount
+// point, the first in mountinfo order on a tie), then the others shortest
+// first and in mountinfo order on a tie. The siblings are the fallback for a
+// kept mount that cannot be read (see statfsDevice).
+type device struct{ mounts []mount }
+
 func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	b, err := env.FS.ReadFile(mountinfoFile, maxMountinfo)
 	if err != nil {
@@ -114,8 +129,8 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 			wanted = append(wanted, m)
 		}
 	}
-	wanted = dedupeByDevice(wanted)
-	if len(wanted) == 0 {
+	devices := dedupeByDevice(wanted)
+	if len(devices) == 0 {
 		return Outcome{Status: result.Skipped, Summary: "no mounted file system of the checked types, check skipped"}
 	}
 
@@ -125,15 +140,25 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	}
 	var fails, warns []result.Evidence
 	var causes []string
-	for _, m := range wanted {
-		st, serr := statfsWithTimeout(ctx, env.statfs(), m.point, timeout)
+	for _, dv := range devices {
+		kept := dv.mounts[0]
+		st, read, serr := statfsDevice(ctx, env.statfs(), dv, timeout)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %s", m.point, serr.Error()))
+			// the finding is about the kept mount; the siblings that failed too
+			// are named by count so a whole unreadable device says so. With no
+			// sibling the text is the one a single-mount device always gave.
+			cause := fmt.Sprintf("statfs %s: %s", kept.point, serr.Error())
+			if n := len(dv.mounts) - 1; n > 0 {
+				cause += fmt.Sprintf(", and %d other mount(s) of the device failed as well", n)
+			}
+			causes = append(causes, cause)
 			continue
 		}
 		blocks, inodes, serr := usagePercent(st)
 		if serr != nil {
-			causes = append(causes, fmt.Sprintf("statfs %s: %v", m.point, serr))
+			// bad numbers are not an unreadable path: the device was read, so
+			// no sibling is tried; the finding stays keyed on the kept mount.
+			causes = append(causes, fmt.Sprintf("statfs %s: %v", kept.point, serr))
 			continue
 		}
 		worst := blocks
@@ -143,7 +168,11 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 			worst = max(worst, inodes)
 		}
 		// the raw mount point: it is the key of the item, only the report cleans it
-		ev := result.Evidence{Subject: m.point, Detail: fmt.Sprintf("%s (%s)", detail, m.fstype)}
+		via := ""
+		if read.point != kept.point {
+			via = ", read via " + read.point
+		}
+		ev := result.Evidence{Subject: kept.point, Detail: fmt.Sprintf("%s (%s%s)", detail, kept.fstype, via)}
 		switch {
 		case worst >= d.fail:
 			fails = append(fails, ev)
@@ -163,7 +192,7 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 	switch {
 	case len(fails) > 0:
 		shown, hidden, set := limitEvidence(fails)
-		s := fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(fails), len(wanted), d.fail, subjectList(shown, 5))
+		s := fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(fails), len(devices), d.fail, subjectList(shown, 5))
 		if len(warns) > 0 {
 			s += fmt.Sprintf("; %d more at or above %d%%", len(warns), d.warn)
 		}
@@ -173,35 +202,63 @@ func (d diskProbe) Run(ctx context.Context, env *Env) Outcome {
 		shown, hidden, set := limitEvidence(warns)
 		return Outcome{
 			Status:   result.Warn,
-			Summary:  fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(warns), len(wanted), d.warn, subjectList(shown, 5)) + moreNote(hidden),
+			Summary:  fmt.Sprintf("%d of %d file system(s) at or above %d%%: %s", len(warns), len(devices), d.warn, subjectList(shown, 5)) + moreNote(hidden),
 			Evidence: shown,
 			Set:      set,
 		}
 	}
-	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d file system(s) below %d%%", len(wanted), d.warn)}
+	return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d file system(s) below %d%%", len(devices), d.warn)}
 }
 
-// dedupeByDevice judges each device (major:minor) once: of the mounts that
-// share one it keeps the one with the shortest mount point, the first in
-// order on a tie, at the position of the device's first appearance. Bind
-// mounts (a systemd sandbox bind-mounting /tmp, /var/tmp and a state
-// directory of the file system it already sees) and subvolumes of one device
-// (btrfs mounted at / and /home) would otherwise be judged several times
-// with the same numbers.
-func dedupeByDevice(ms []mount) []mount {
+// dedupeByDevice judges each device (major:minor) once: it groups the mounts
+// that share one under the device's first appearance and orders them for
+// statfsDevice (the kept mount first: the shortest mount point, the first in
+// order on a tie, then the others the same way). Bind mounts (a systemd
+// sandbox bind-mounting /tmp, /var/tmp and a state directory of the file
+// system it already sees) and subvolumes of one device (btrfs mounted at /
+// and /home) would otherwise be judged several times with the same numbers.
+// The other mounts are kept as the fallback for a kept mount that cannot be
+// read.
+func dedupeByDevice(ms []mount) []device {
 	at := make(map[string]int, len(ms))
-	out := make([]mount, 0, len(ms))
+	out := make([]device, 0, len(ms))
 	for _, m := range ms {
 		if i, ok := at[m.dev]; ok {
-			if len(m.point) < len(out[i].point) {
-				out[i] = m
-			}
+			out[i].mounts = append(out[i].mounts, m)
 			continue
 		}
 		at[m.dev] = len(out)
-		out = append(out, m)
+		out = append(out, device{mounts: []mount{m}})
+	}
+	for i := range out {
+		sort.SliceStable(out[i].mounts, func(a, b int) bool {
+			return len(out[i].mounts[a].point) < len(out[i].mounts[b].point)
+		})
 	}
 	return out
+}
+
+// statfsDevice reads one device: it tries the kept mount first, then the
+// siblings of the same device in order, and stops at the first that reads. A
+// bind mount that cannot be statted through (a permission problem, a hung
+// path, a lazily unmounted point) would otherwise make the whole device
+// unreadable, though another mount point of it answers. Each attempt gets its
+// own timeout and they run one after another, so the whole is bounded by the
+// number of mounts of the device. It returns the usage and the mount it read;
+// when none read, it returns the error of the kept mount (the mount the
+// finding names) and the kept mount.
+func statfsDevice(ctx context.Context, f StatfsFunc, dv device, timeout time.Duration) (Statfs, mount, error) {
+	var keptErr error
+	for i, m := range dv.mounts {
+		st, serr := statfsWithTimeout(ctx, f, m.point, timeout)
+		if serr == nil {
+			return st, m, nil
+		}
+		if i == 0 {
+			keptErr = serr
+		}
+	}
+	return Statfs{}, dv.mounts[0], keptErr
 }
 
 // statfsWithTimeout calls f in its own goroutine and gives up after timeout. A

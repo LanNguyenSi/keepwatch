@@ -188,7 +188,13 @@ inodes, computed like `df`. Each statfs call has a timeout. Mounts that share
 one device (the major:minor of mountinfo) are judged once, at the entry with
 the shortest mount point (the first one in mountinfo order on a tie): a bind
 mount, such as the ones a systemd sandbox adds for `/tmp`, `/var/tmp` and a
-state directory of the file system it already sees, is not counted again.
+state directory of the file system it already sees, is not counted again. If
+that kept mount cannot be read or its call times out, the other mounts of the
+same device are tried in turn (shortest first) until one reads, so a bind mount
+that cannot be statted through does not make the whole device unreadable; the
+device is still judged once, keyed on the kept mount point, and the detail names
+the mount that answered (`... (ext4, read via /other/point)`). Only when every
+mount of the device fails is it an `error`.
 
 `cert_expiry` reads certificate files (`paths`, and files matching `globs`;
 setting `paths` does not remove the default glob, `globs: []` does) and examines

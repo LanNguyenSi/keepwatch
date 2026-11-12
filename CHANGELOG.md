@@ -38,6 +38,14 @@ report.
   cut at 20 to 400 characters, quotes inside a quoted line are no longer
   escaped, and sshd values keep the case the host printed.
 
+### Fixed
+
+- The disk usage check now reads a file system through another mount point of
+  the same device when the one it kept cannot be statted (a permission problem,
+  a hung path, a lazily unmounted point), instead of reporting the whole device
+  as unreadable. The device is still judged once, on the same mount point it
+  always reported, and the finding names the mount that answered.
+
 ## [0.1.0] - 2026-11-11
 
 The first release: stage 0, static posture checks of a Linux server with
