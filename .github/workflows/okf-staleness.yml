@@ -1,7 +1,7 @@
 name: OKF staleness
 
 # GENERATED FROM THE OKF-KIT TEMPLATE `templates/okf-staleness.yml` of the
-# okf-kit package, pinned to okf-kit 0.20.0 below. Do not hand-edit this
+# okf-kit package, pinned to okf-kit 0.21.0 below. Do not hand-edit this
 # file outside the lines marked "REPO-SPECIFIC": re-sync it from the
 # template whenever the pin moves.
 # A repo that deviates documents the deviation in a comment block at the
@@ -18,10 +18,6 @@ name: OKF staleness
 # protection: a PR that removes or renames docs/okf goes red here by
 # design (tool-error posture, exit 2), and warn-only must stay
 # non-blocking.
-#
-# Deviation: okf-kit's citations-resolve rule skips `.go` files, so in
-# this repo the job catches STALE docs and structure errors, not broken
-# line citations into Go code.
 
 on:
   pull_request:
@@ -67,7 +63,7 @@ jobs:
         # upgrade, and record each move in the bundle's log.md together
         # with the old and the new version's measured verdict on this
         # bundle.
-        run: npm install -g okf-kit@0.20.0 --no-audit --no-fund
+        run: npm install -g okf-kit@0.21.0 --no-audit --no-fund
 
       - name: Assert CLI is alive (output, not exit code)
         shell: bash
@@ -135,7 +131,7 @@ jobs:
               echo "closing-brace-start-line, missing-file, inverted-range,"
               echo "range-exceeds-file, path-traversal-rejected) means a"
               echo "\`path:N\`/\`path:N-M\` citation (recognised"
-              echo "extensions: .ts, .js, .mjs, .md, .yml, .yaml, .json, .prisma)"
+              echo "extensions: .ts, .js, .mjs, .md, .yml, .yaml, .json, .prisma, .go)"
               echo "in the doc's prose no longer points at real content, even"
               echo "though the source file itself is not stale: re-check the"
               echo "citation against the file's current line numbers and"

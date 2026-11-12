@@ -3,7 +3,7 @@ type: module
 title: execx, the only seam that starts a program
 description: The execution layer's contract as its callers must know it - fixed program table, its own pipe copies, the two incomplete-output signals, and the process-group kill that no os/exec default gives.
 tags: [execx, probes, sandbox]
-timestamp: 2026-11-12T12:57:07Z
+timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/execx/execx.go
   - internal/execx/real.go
@@ -61,8 +61,8 @@ period is one variable (`internal/execx/execx.go:12-13#"A variable so tests can 
 
 **Nothing outlives the call.** On unix the child gets its own process group;
 both the timeout/cancel path and the path after `Run` returns SIGKILL the
-whole group (`internal/execx/kill_unix.go:11-20#"kills the whole group"`,
-`internal/execx/kill_unix.go:22-30#"never outlive the call"`), and the same
+whole group (`internal/execx/kill_unix.go:11-12#"kills the whole group"`,
+`internal/execx/kill_unix.go:22-23#"never outlive the call"`), and the same
 duration bounds `os/exec`'s own `WaitDelay` (`internal/execx/kill_unix.go:19#"cmd.WaitDelay = waitDelay"`).
 A timeout is distinguishable from parent cancellation: hitting `Opts.Timeout`
 returns `ErrTimeout`, while a parent context ending first returns the

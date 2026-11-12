@@ -3,7 +3,7 @@ type: limit
 title: What the guarantees do not cover
 description: The known limits of the trust, redaction and coordination machinery, collected with the code or reference line that states each, so a reviewer can tell a gap from a promise.
 tags: [limits, trust, redaction, concurrency]
-timestamp: 2026-11-12T12:57:07Z
+timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/cli/report.go
   - internal/config/walk.go
@@ -103,7 +103,3 @@ adjacent ones stop short.
   unusually long subjects push it past its limit, the oldest runs are
   dropped before anything is refused (`internal/history/history.go:352-353#"until the file fits"`).
   It is a convenience for the weekly report, not a source of truth.
-- **This bundle's own citations into Go code are not checked by CI.**
-  okf-kit verifies structure and staleness, but its citation check skips
-  `.go` files, so a moved line or anchor there goes unnoticed; re-check the
-  cited ranges by hand when you edit a doc.

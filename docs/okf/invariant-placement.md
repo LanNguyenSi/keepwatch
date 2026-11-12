@@ -3,7 +3,7 @@ type: invariant
 title: One list, one rule for where the scheduled run's paths may lie
 description: install and doctor share a single manifest of paths and a single placement check, and two tests pin the sandbox table that check uses to both the unit hardening and a measured real sandbox.
 tags: [install, doctor, sandbox, systemd, invariants]
-timestamp: 2026-11-12T12:57:07Z
+timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/install/placement.go
   - internal/install/trustedpath.go
@@ -54,7 +54,7 @@ world-writable. Two cross-file contrasts give the rule its teeth:
 parent while missing (`internal/install/placement.go:190-196#"path.Dir(e.Path), KindDir"`),
 and `install` re-runs the whole placement check right after creating
 `state_dir`, before anything depends on it
-(`internal/install/install.go:188-192#"CheckPlacement(d.FS, Manifest(o.paths()))"`).
+(`internal/install/install.go:188-190#"CheckPlacement(d.FS, Manifest(o.paths()))"`).
 Ordering within install is fixed: refusal before any write
 (`internal/install/install.go:115#"CheckPlacement(fsys, Manifest(o.paths()))"`),
 then the write probe
