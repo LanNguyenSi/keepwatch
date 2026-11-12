@@ -4,6 +4,7 @@
 
 ## 2026-11-12
 
+- okf-kit pin moved from 0.20.0 to 0.21.0 in `.github/workflows/okf-staleness.yml`. Measured on this bundle: 0.20.0 reports no findings with and without `--require-anchors`, because it does not collect citations into `.go` files at all; 0.21.0 resolves the bundle's 138 Go citations (no missing file, no range past the end) and, with `--require-anchors`, reported 13 anchor-position warnings (11 anchors not on the last line of their range, 2 anchors occurring twice in one range). Those 13 citations were narrowed so the anchor sits on the range's last line (one moved to a unique anchor); after that both modes report no findings. The workflow's Go deviation comment and the known-limits entry saying Go citations are not checked are removed, since they no longer hold.
 - Re-verified `invariant-doctor-effective-unit.md`, `invariant-placement.md`,
   `invariant-single-transformation.md`, `limit-known-limits.md` and
   `module-execx.md` after doctor started to escape every printed line once in

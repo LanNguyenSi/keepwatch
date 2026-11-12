@@ -3,7 +3,7 @@ type: invariant
 title: Host text is transformed once, at the last moment
 description: Probes hand on the raw host text; exactly one transformation (redact, escape, cut) is applied, and only where the text leaves the program or is stored. Which consumers apply it, and which deliberately do not.
 tags: [redaction, output-safety, state, invariants]
-timestamp: 2026-11-12T12:57:07Z
+timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/result/result.go
   - internal/probes/run.go
@@ -59,7 +59,7 @@ display and compares a lower case copy
 pattern is case sensitive.
 
 The single transformation is `redact.Redactor.Clean`: redact, then escape,
-then cut to `MaxFieldRunes` (`internal/redact/redact.go:250-255#"func (r *Redactor) Clean"`).
+then cut to `MaxFieldRunes` (`internal/redact/redact.go:250-252#"func (r *Redactor) Clean"`).
 Its order is itself an invariant, documented above the package
 (`internal/redact/redact.go:13#"The order matters"`), and the escaping
 step is specified in `docs/running.md` under "Output safety"; this bundle
@@ -97,9 +97,9 @@ Two consequences live between files and belong to no single package:
    display form at all.
 2. `doctor` is deliberately outside this system. It prints host and systemd
    paths that never passed through a probe. Its output is escaped once, in
-   `Report.Write` (`redact.Escape`, `internal/doctor/doctor.go:140-148#"redact.Escape"`),
+   `Report.Write` (`redact.Escape`, `internal/doctor/doctor.go:140-147#"redact.Escape(f.Message)"`),
    and `listPaths` stays only as the list delimiter
-   (`internal/doctor/doctor.go:834-843#"func listPaths"`). It prints only
+   (`internal/doctor/doctor.go:834#"func listPaths"`). It prints only
    `scheme://host` of a notification URL because "doctor's output does not go
    through the redactor" (`internal/doctor/doctor.go:913-914#"does not go through the redactor"`).
    Anything added to a doctor message must therefore stay free of secret

@@ -3,7 +3,7 @@ type: invariant
 title: doctor judges the unit systemd runs, not the file install wrote
 description: The file-equals-rendering comparison plus four properties asked of systemd per service, and the classification rule that tells a hostile drop-in from a host-wide one.
 tags: [doctor, systemd, units, invariants]
-timestamp: 2026-11-12T12:57:07Z
+timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/doctor/doctor.go
   - internal/install/units.go
@@ -32,7 +32,7 @@ option would pass every other check
 
 **Systemd gets the last word.** For each service whose file exists, `doctor`
 asks `systemctl show` for eight properties at once
-(`internal/doctor/doctor.go:649-655#"NeedDaemonReload"`): if the question
+(`internal/doctor/doctor.go:649#"NeedDaemonReload"`): if the question
 itself fails, that is a problem, because then none of the answers below
 exists (`internal/doctor/doctor.go:652#"cannot ask systemd about"`); a file
 that is simply missing is the only quiet case. For a loaded unit,
@@ -45,10 +45,10 @@ judges:
 - `NeedDaemonReload=yes` is a problem: systemd still runs the old merged
   unit, which `install` does not fix by re-verifying, since it reloads only
   when it writes (`internal/doctor/doctor.go:682-684#"has not reloaded"`,
-  `internal/install/install.go:230-233#"daemon-reload"`);
+  `internal/install/install.go:230-231#"daemon-reload"`);
 - `LoadState` other than `loaded` is a problem naming the state, because the
   timer cannot start it
-  (`internal/doctor/doctor.go:656-661#"systemd has not loaded"`);
+  (`internal/doctor/doctor.go:656-658#"systemd has not loaded"`);
 - every drop-in `DropInPaths` reports is classified by one rule: a drop-in
   whose directory is named `service.d` holds for every service on the host
   and may come from the system, an image or a generator, so it is a warning;
@@ -62,9 +62,9 @@ bytes), so the property value is un-quoted exactly the way `systemctl`
 quotes it (`internal/doctor/doctor.go:732#"func splitQuoted"`) and re-quoted
 with Go escapes where a path holds a space, a quote, a backslash or an
 unprintable byte, so the end of each path in the list stays visible
-(`internal/doctor/doctor.go:834-843#"func listPaths"`). Control bytes are
+(`internal/doctor/doctor.go:834#"func listPaths"`). Control bytes are
 neutralized once, for every finding, when the report is written
-(`internal/doctor/doctor.go:140-148#"redact.Escape"`). The two functions
+(`internal/doctor/doctor.go:140-147#"redact.Escape(f.Message)"`). The two functions
 exist so that a crafted file name cannot forge a `doctor` line; the failure
 mode of a non-UTF-8 name (systemd itself refuses to answer) is documented in
 `docs/install.md`, and lands in the cannot-ask branch above.
@@ -74,8 +74,8 @@ file named by an absolute `--config` in the `ExecStart` of the first of our
 installed services that has one, and falls back to the default path
 otherwise; a service
 running with another file is a problem naming both files, and is judged by
-its own file too (`internal/doctor/doctor.go:290-311#"func (d Deps) configPath"`,
-`internal/doctor/doctor.go:596-610#"but this doctor run examined"`). The
+its own file too (`internal/doctor/doctor.go:290-292#"func (d Deps) configPath"`,
+`internal/doctor/doctor.go:596-597#"but this doctor run examined"`). The
 reason spans files: every other area of the report speaks about the examined
 configuration, so the units area must say which one the scheduled runs will
 actually load.
