@@ -518,14 +518,18 @@ func TestDoctorReportsAServiceSystemdDoesNotAnswerFor(t *testing.T) {
 			}
 		}
 	})
-	t.Run("an error text that is not printable is quoted", func(t *testing.T) {
+	t.Run("an error text that is not printable is escaped at the output", func(t *testing.T) {
 		// The first line of the error output of systemctl with a C1 control
-		// and a character that reverses the direction of the text.
+		// and a character that reverses the direction of the text. The raw
+		// text is the finding; only the printed form carries the escapes.
 		r := newRig(t)
 		showAnswers(r, install.CheckService, execx.Result{ExitCode: 1, Stderr: []byte("Failed: \u009b31mred\u202e\n")}, nil)
 		rep := r.run()
-		if !has(rep, doctor.Problem, "units", "cannot ask systemd about "+install.CheckService+`: "systemctl show `+install.CheckService+` exited with status 1: Failed: \u009b31mred\u202e". So doctor`) {
-			t.Errorf("\n%s", dump(rep))
+		if !has(rep, doctor.Problem, "units", "cannot ask systemd about "+install.CheckService+": systemctl show "+install.CheckService+" exited with status 1: Failed: \u009b31mred\u202e. So doctor") {
+			t.Errorf("the raw error text is not in the finding:\n%s", dump(rep))
+		}
+		if !strings.Contains(dump(rep), `exited with status 1: Failed: \u009b31mred\u202e. So doctor`) {
+			t.Errorf("the escaped error text is not in the output:\n%q", dump(rep))
 		}
 		safeReport(t, rep)
 	})
@@ -543,7 +547,7 @@ func TestDoctorReportsAServiceSystemdDidNotLoad(t *testing.T) {
 				r := newRig(t)
 				r.sd.Props[svc] = map[string]string{"LoadState": state, "ExecMainStartTimestamp": ""}
 				rep := r.run()
-				if !has(rep, doctor.Problem, "units", "systemd has not loaded "+svc+" although its unit file is there", `load state "`+state+`"`, "timer cannot start", `"systemctl status `+svc+`"`) {
+				if !has(rep, doctor.Problem, "units", "systemd has not loaded "+svc+" although its unit file is there", "load state "+state, "timer cannot start", `"systemctl status `+svc+`"`) {
 					t.Errorf("not reported:\n%s", dump(rep))
 				}
 				if rep.Problems() != 1 || rep.Warnings() != 0 {
@@ -667,8 +671,11 @@ func TestDoctorPrintsDropInNamesSafely(t *testing.T) {
 		r := newRig(t)
 		r.sd.Props[install.CheckService] = map[string]string{"LoadState": "x\x1b[31m\r"}
 		rep := r.run()
-		if !has(rep, doctor.Problem, "units", `load state "x\x1b[31m\r"`) {
-			t.Errorf("\n%q", dump(rep))
+		if !has(rep, doctor.Problem, "units", "load state x\x1b[31m\r") {
+			t.Errorf("the raw state is not in the finding:\n%q", dump(rep))
+		}
+		if !strings.Contains(dump(rep), `load state x\x1b[31m\r), so`) {
+			t.Errorf("the escaped state is not in the output:\n%q", dump(rep))
 		}
 		safeReport(t, rep)
 	})

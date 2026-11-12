@@ -626,6 +626,35 @@ func TestReportWriteFormat(t *testing.T) {
 	}
 }
 
+// Write is the one place where a finding's text is escaped: the area and the
+// message go through redact.Escape, so no control byte reaches the terminal,
+// a printable line is printed byte-identical, a backslash stands once, and the
+// findings keep their raw bytes for whoever reads them in memory.
+func TestReportWriteEscapesEveryLine(t *testing.T) {
+	rep := doctor.Report{Findings: []doctor.Finding{
+		{Level: doctor.OK, Area: "es\x1b[31mcapes", Message: "a \x1b[31mmessage and a back\\slash"},
+		{Level: doctor.Warn, Area: "plain", Message: "an ordinary message: 100% (fine)"},
+	}}
+	out := dump(rep)
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("the output holds a raw ESC:\n%q", out)
+	}
+	for _, want := range []string{
+		`ok      es\x1b[31mcapes: a \x1b[31mmessage and a back\slash`,
+		"warn    plain: an ordinary message: 100% (fine)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%q", want, out)
+		}
+	}
+	if strings.Contains(out, `back\\slash`) {
+		t.Errorf("the backslash is escaped twice:\n%q", out)
+	}
+	if !strings.ContainsRune(rep.Findings[0].Area, 0x1b) || !strings.ContainsRune(rep.Findings[0].Message, 0x1b) {
+		t.Error("Write changed the text stored in the finding")
+	}
+}
+
 func TestOSStateProber(t *testing.T) {
 	newDir := func(t *testing.T, mode os.FileMode) string {
 		d := filepath.Join(t.TempDir(), "state")
