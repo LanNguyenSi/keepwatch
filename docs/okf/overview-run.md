@@ -3,7 +3,7 @@ type: overview
 title: The life of one check run
 description: The fixed order a `keepwatch check` moves through the packages, and what a failure at each stage deliberately leaves behind.
 tags: [run-flow, state, notification, exit-codes]
-timestamp: 2026-11-11T10:18:36Z
+timestamp: 2026-11-12T11:02:57Z
 sources:
   - internal/cli/cli.go
   - internal/cli/check.go

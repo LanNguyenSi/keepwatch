@@ -3,7 +3,7 @@ type: limit
 title: What the guarantees do not cover
 description: The known limits of the trust, redaction and coordination machinery, collected with the code or reference line that states each, so a reviewer can tell a gap from a promise.
 tags: [limits, trust, redaction, concurrency]
-timestamp: 2026-11-11T10:18:36Z
+timestamp: 2026-11-12T11:02:57Z
 sources:
   - internal/cli/report.go
   - internal/config/walk.go
@@ -82,6 +82,14 @@ adjacent ones stop short.
     as `https://example.com mailto:admin@example.com`, which is accepted and
     pinned in the tests (the URL rule is
     `internal/redact/redact.go:126#"scheme://user:password@host and scheme://token@host"`);
+  - the keyword rules for `pass`, `pwd`, `NAME_KEY` and flags take the
+    character in front of the keyword into their match, so a second value that
+    starts right where a quoted first one ended (`pass="A"pass="B"`,
+    `DB_KEY="A"DB_KEY="B"`, `--password "A"--password "B"`) is not found, and
+    neither is `pass`, `pwd` or a flag behind U+017F or U+212A, letters that fold
+    to `s` and `k` (the rules for `Authorization`, `Cookie` and `bearer` use a
+    zero-width boundary and do find these); pinned by
+    `TestMoreShapesLeftOutOnPurpose`;
   - a secret with no shape of its own, as before.
 - **A check-then-exec gap remains.** Trust in execx rests on the trusted
   directories being root-owned; Go has no `fexecve`, so anyone who could

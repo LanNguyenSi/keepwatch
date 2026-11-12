@@ -540,6 +540,31 @@ func TestKeywordRightBehindAQuotedValue(t *testing.T) {
 	}
 }
 
+// More shapes left out, and these are as at the base of the CSI change: the
+// rules for pass, pwd, NAME_KEY and flags take the character in front of the
+// keyword into the match, so a second value that starts where the quoted first
+// one ended is not found, and neither is a keyword behind U+017F or U+212A
+// (letters that fold to s and k, so the rule counts them as part of a word).
+// The first value is redacted; the output pins what is left.
+func TestMoreShapesLeftOutOnPurpose(t *testing.T) {
+	r := Default()
+	for name, c := range map[string]struct{ in, want string }{
+		"second pass behind a quoted first":     {`pass="A"pass="B"`, `pass=[REDACTED]pass="B"`},
+		"second pwd behind a quoted first":      {`pwd="A"pwd="B"`, `pwd=[REDACTED]pwd="B"`},
+		"second NAME_KEY behind a quoted first": {`DB_KEY="A"DB_KEY="B"`, `DB_KEY=[REDACTED]DB_KEY="B"`},
+		"second flag behind a quoted first":     {`--password "A"--password "B"`, `--password [REDACTED] "B"`},
+		"pass behind a long s":                  {"\u017fpass=hunter2", "\u017fpass=hunter2"},
+		"pwd behind the Kelvin sign":            {"\u212apwd=hunter2", "\u212apwd=hunter2"},
+		"flag behind a long s":                  {"\u017f--password hunter2", "\u017f--password hunter2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := r.Redact(c.in); got != c.want {
+				t.Errorf("Redact(%q) = %q, want %q (left out on purpose)", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // Shapes the patterns leave out on purpose: each would cost false positives
 // that a report of host output cannot afford, or cannot be told from text that
 // is no secret. The list is in docs/okf/limit-known-limits.md.
