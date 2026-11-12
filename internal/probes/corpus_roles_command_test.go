@@ -183,7 +183,7 @@ func commandRoles() []corpusRole {
 			return ss(t, plain(listen+" users:((\"x\",pid=1,fd=3))\n"), listen+" users:((\""+f+"\",pid=1,fd=3))\n", nil)
 		}},
 		{name: "listeners process listing that fails", kind: "listeners", status: result.Fail, noWS: true, run: func(t *testing.T, f string) probes.Outcome {
-			return ss(t, listen+"\n", "", &execx.Result{ExitCode: 1, Stderr: []byte(f + "\n")})
+			return ss(t, listen+"\nLISTEN 0 5 0.0.0.0:9001 0.0.0.0:*\n", "", &execx.Result{ExitCode: 1, Stderr: []byte(f + "\n")})
 		}},
 
 		// reboot_required

@@ -65,26 +65,105 @@ func TestListenersPartialResultStatesTheProcessNoteOnce(t *testing.T) {
 }
 
 // A piece of host text is copied into an outcome at most twice (a firewall
-// table that drops for both address families is named in both), never once per
-// item of a list.
-func TestNoPieceOfHostTextIsCopiedMoreThanTwice(t *testing.T) {
-	big := strings.Repeat("a", 100<<10)
+// table that drops for both address families is named in both). This guards a
+// piece against being copied into a list of items, with the 150-listener test
+// above as the guard for the note of a failed ss -p run (the listeners role
+// here has two sockets, so a copy per item is three copies). It also holds that
+// the whole piece is still in the text of the outcome: a probe that cuts a
+// piece, at whatever length, fails it.
+func TestNoPieceOfHostTextIsCopiedMoreThanTwiceOrCut(t *testing.T) {
 	for _, role := range commandRoles() {
 		t.Run(role.name, func(t *testing.T) {
+			// not a valid keyword, package name or number: the place keeps it
+			big := "A." + strings.Repeat("a", hostFileLimit(role, 100<<10))
 			o := role.run(t, big)
 			if n := outcomeText(o.Summary, o.Evidence); n > 2*len(big)+4096 {
 				t.Fatalf("a piece of %d bytes is in the outcome %.1f times", len(big), float64(n)/float64(len(big)))
+			}
+			if !outcomeHolds(o.Summary, o.Evidence, big) {
+				t.Fatalf("the piece of %d bytes is cut in the outcome", len(big))
 			}
 		})
 	}
 }
 
+// hostFileLimit is n, or less where the host text comes from a file that the
+// probe refuses above a size (the package list of a reboot check: 64 KiB).
+func hostFileLimit(role corpusRole, n int) int {
+	if role.name == "reboot package list" {
+		return min(n, 60<<10)
+	}
+	return n
+}
+
+// outcomeHolds says whether want is whole in the summary or in a detail.
+func outcomeHolds(summary string, ev []result.Evidence, want string) bool {
+	if strings.Contains(summary, want) {
+		return true
+	}
+	for _, e := range ev {
+		if strings.Contains(e.Detail, want) || strings.Contains(e.Subject, want) {
+			return true
+		}
+	}
+	return false
+}
+
+const longToken = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+
+// longHostTexts are texts in which a token stands across, or ends at, a byte
+// offset where a cut of that length would split it: after a long value that
+// Clean redacts to a few characters (so the offset lands in the shown text),
+// or followed by bytes that are not valid UTF-8 (so a walk back to a character
+// boundary would drop the end of the token). sep is what stands around the
+// token: white space where the place allows it.
+//
+// tail is what follows the token in the second text: bytes that are not valid
+// UTF-8 (for a place that can hold them) or a valid character.
+func longHostTexts(sep, tail string) map[string]string {
+	m := map[string]string{}
+	pw := "password="
+	for _, at := range []int{16384, 32768, 65536} {
+		m[fmt.Sprintf("token across byte %d after a long value", at)] = pw + strings.Repeat("v", at-20-len(pw)-len(sep)) + sep + longToken + sep + "tail"
+		m[fmt.Sprintf("token ending at byte %d, then %d bytes of tail", at, 33<<10)] = pw + strings.Repeat("v", at-len(longToken)-len(pw)-len(sep)) + sep + longToken + strings.Repeat(tail, 33<<10/len(tail))
+	}
+	return m
+}
+
+// Every command role keeps such a text whole, and the token in it is gone from
+// every output when the text is followed to the report.
+func TestLongHostTextIsKeptWholeByEveryRole(t *testing.T) {
+	for _, role := range commandRoles() {
+		sep := " "
+		if role.noWS {
+			sep = ","
+		}
+		tail := "\x80"
+		if strings.HasPrefix(role.name, "firewall nft") {
+			tail = "€" // JSON cannot carry a byte that is not UTF-8
+		}
+		for name, frag := range longHostTexts(sep, tail) {
+			if len(frag) > hostFileLimit(role, len(frag)) {
+				continue
+			}
+			t.Run(role.name+"/"+name, func(t *testing.T) {
+				o := role.run(t, frag)
+				if o.Status != role.status {
+					t.Fatalf("status %s (%.80q), want %s", o.Status, o.Summary, role.status)
+				}
+				if !outcomeHolds(o.Summary, o.Evidence, frag) {
+					t.Fatalf("the text of %d bytes is cut in the outcome", len(frag))
+				}
+			})
+		}
+	}
+}
+
 // Host text is long, and a pattern that matches a lot sits in front of a
 // secret: no step between the host and the report may cut the text where it
-// would split the secret, however the text came to be that long. Both cases
-// are followed to every output.
+// would split the secret, however the text came to be that long. The texts of
+// longHostTexts are followed to every output.
 func TestLongHostTextIsRedactedBeforeItIsCut(t *testing.T) {
-	const token = "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
 	var role corpusRole
 	for _, r := range commandRoles() {
 		if r.name == "run command that cannot be started" {
@@ -92,16 +171,7 @@ func TestLongHostTextIsRedactedBeforeItIsCut(t *testing.T) {
 		}
 	}
 	red := redact.Default()
-	for name, frag := range map[string]string{
-		// bytes that are not valid UTF-8 after the token
-		"token, then 33 KiB of continuation bytes":    "x. " + token + " " + strings.Repeat("\x80", 33<<10),
-		"token glued to 33 KiB of continuation bytes": "x. " + token + strings.Repeat("\x80", 33<<10),
-		// a long value that Clean redacts to a few characters, so that what
-		// stands at byte 32768 of the host text is within the first runes of
-		// the shown text
-		"long redacted value, token at byte 32768":     "password=" + strings.Repeat("v", 32768-len("password=")-len(token)-12) + " x " + token + " tail",
-		"long redacted value, token across byte 32768": "password=" + strings.Repeat("v", 32768-len("password=")-20) + " x " + token + " tail",
-	} {
+	for name, frag := range longHostTexts(" ", "\x80") {
 		t.Run(name, func(t *testing.T) {
 			o := role.run(t, frag)
 			saw := false
