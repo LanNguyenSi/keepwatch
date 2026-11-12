@@ -206,7 +206,7 @@ func (u updatesProbe) Run(ctx context.Context, env *Env) Outcome {
 			other++
 			continue
 		}
-		ev = append(ev, result.Evidence{Subject: p.name, Detail: clean(p.detail(), 200)})
+		ev = append(ev, result.Evidence{Subject: p.name, Detail: p.detail()})
 	}
 	base := fmt.Sprintf("%d other upgrade(s) pending", other)
 	if sim.notUpgraded > 0 {
@@ -264,7 +264,7 @@ func orNone(s string) string {
 func (u updatesProbe) listAge(env *Env) (note string, stale bool, err error) {
 	files, gerr := env.glob(aptListsGlob)
 	if gerr != nil {
-		return "", false, fmt.Errorf("listing the apt package lists failed: %s", clean(gerr.Error(), 150))
+		return "", false, fmt.Errorf("listing the apt package lists failed: %s", gerr.Error())
 	}
 	var newest time.Time
 	for _, f := range files {
@@ -368,7 +368,7 @@ func parseAptSimulation(out string) (aptSim, error) {
 		if inKept && line != "" && line[0] == ' ' {
 			for _, name := range strings.Fields(line) {
 				if !aptNameRe.MatchString(name) {
-					return aptSim{}, fmt.Errorf("line %d: %q is not a package name in the list of kept back packages", i+1, clean(name, 60))
+					return aptSim{}, fmt.Errorf("line %d: %s is not a package name in the list of kept back packages", i+1, quoted(name))
 				}
 				if !seenKept[name] {
 					seenKept[name] = true
@@ -407,7 +407,7 @@ func parseAptSimulation(out string) (aptSim, error) {
 			}
 		}
 		if !known {
-			return aptSim{}, fmt.Errorf("line %d is not a line of apt's simulation: %q", i+1, clean(line, 60))
+			return aptSim{}, fmt.Errorf("line %d is not a line of apt's simulation: %s", i+1, quoted(line))
 		}
 	}
 	if summaries != 1 {
@@ -433,7 +433,7 @@ func atoi(s string) int {
 func parseAptInst(line string) (aptPkg, error) {
 	m := aptInstRe.FindStringSubmatch(line)
 	if m == nil || !aptNameRe.MatchString(m[1]) {
-		return aptPkg{}, fmt.Errorf("cannot read the Inst line %q", clean(line, 80))
+		return aptPkg{}, fmt.Errorf("cannot read the Inst line %s", quoted(line))
 	}
 	p := aptPkg{name: m[1], oldVer: m[2], newVer: m[3]}
 	seen := map[string]bool{}
@@ -664,7 +664,7 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 			}
 			cur = l.name
 			if !wanted[cur] {
-				return nil, fmt.Errorf("line %d: a package that was not asked for: %q", i+1, clean(cur, 60))
+				return nil, fmt.Errorf("line %d: a package that was not asked for: %s", i+1, quoted(cur))
 			}
 			if described[cur] {
 				return nil, fmt.Errorf("package %s is described twice", cur)
@@ -672,14 +672,14 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 			described[cur] = true
 			above, haveRow, rowAbove, rowVer, instVer, installedRows = true, false, false, "", "", 0
 		case "":
-			return nil, fmt.Errorf("line %d is not a line of apt-cache policy: %q", i+1, clean(line, 60))
+			return nil, fmt.Errorf("line %d is not a line of apt-cache policy: %s", i+1, quoted(line))
 		case "installed", "candidate", "pin", "table":
 			if cur == "" {
-				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+				return nil, fmt.Errorf("line %d is not part of a package: %s", i+1, quoted(line))
 			}
 		case "row", "row-phased", "row-installed", "row-installed-phased":
 			if cur == "" {
-				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+				return nil, fmt.Errorf("line %d is not part of a package: %s", i+1, quoted(line))
 			}
 			haveRow = true
 			if strings.HasPrefix(l.shape, "row-installed") {
@@ -691,7 +691,7 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 			}
 		default: // an origin line
 			if cur == "" {
-				return nil, fmt.Errorf("line %d is not part of a package: %q", i+1, clean(line, 60))
+				return nil, fmt.Errorf("line %d is not part of a package: %s", i+1, quoted(line))
 			}
 			if !haveRow {
 				return nil, fmt.Errorf("line %d: an origin line before any version", i+1)
@@ -709,7 +709,7 @@ func parseAptPolicy(out string, want []string) (map[string]aptNewerSecurity, err
 	}
 	for _, w := range want {
 		if !described[w] {
-			return nil, fmt.Errorf("package %s is not described", clean(w, 60))
+			return nil, fmt.Errorf("package %s is not described", w)
 		}
 	}
 	return found, nil

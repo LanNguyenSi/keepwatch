@@ -32,6 +32,9 @@ type corpusRole struct {
 	// text of its own (it holds the "//"), "host" after a scheme the place
 	// supplies itself.
 	url string
+	// noNL: the place is one line of the host's output (a second line is a
+	// line of its own, which the probe reads or reports separately).
+	noNL bool
 	// maxPad: the probe reads this place with a small limit (the name of a
 	// process), so the padding is cut to this many characters
 	maxPad int
@@ -99,7 +102,7 @@ func corpusRoles() []corpusRole {
 		return exec(dockerProbe(t), r, probestest.FakeFS{})
 	}
 
-	return []corpusRole{
+	roles := []corpusRole{
 		// cert_expiry
 		{name: "cert failing item", kind: "cert_expiry", status: result.Fail, run: func(t *testing.T, f string) probes.Outcome {
 			ex, _ := certPEMs(t)
@@ -287,4 +290,5 @@ func corpusRoles() []corpusRole {
 			return keys(t, fsys, "authorizedkeysfile .ssh/authorized_keys", "authorizedkeyscommand none")
 		}},
 	}
+	return append(roles, commandRoles()...)
 }

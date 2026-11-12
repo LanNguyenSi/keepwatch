@@ -8,6 +8,36 @@ report.
 
 ## [Unreleased]
 
+### Security
+
+- Probes no longer cut, escape or replace characters of command output and
+  error text before it is redacted. The firewall, security updates, listeners,
+  reboot, package, sshd, fail2ban and service checks used to cut such text to a
+  few dozen characters (and replace control characters by `?`) first, so a
+  token that straddled the cut kept a prefix that no pattern matched and
+  reached the report. The one change is now made where the text leaves the
+  program, as for the other checks. The note about a failed `ss -p` run in the
+  listeners check now stands once in the summary instead of in every item.
+- Redaction closes two gaps. A GitHub, GitLab or Slack token glued to the text
+  in front of it (`aghp_...`, a digit or an underscore before it) is found, and
+  so is any token behind a terminal color sequence. URL user info of the form
+  `user:password` is found when host text and a comma, a space or a tab stand
+  between the scheme and the user info (`tcp://host, user:password@host`), and
+  a URL scheme glued to a digit or an underscore is recognised. Token-only user
+  info behind host text and short or common token prefixes glued to a word stay
+  as before, to keep ordinary text from being redacted. Keyword rules
+  (`Authorization`, `Cookie`, `bearer`, `--password`, `pass=`, `pwd=`) now also
+  work directly behind a terminal color sequence, and a second `user:password`
+  behind the first one in a list of URLs is found too.
+
+### Changed
+
+- Report texts of the firewall, security updates, listeners, reboot, package,
+  sshd, fail2ban and service checks show host text as it is: control
+  characters appear escaped (`\x1b`) instead of as `?`, texts are no longer
+  cut at 20 to 400 characters, quotes inside a quoted line are no longer
+  escaped, and sshd values keep the case the host printed.
+
 ## [0.1.0] - 2026-11-11
 
 The first release: stage 0, static posture checks of a Linux server with

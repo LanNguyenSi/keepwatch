@@ -86,8 +86,9 @@ const trustedMaxOutput = int64(64 << 20)
 // Each listener that is not allowed is one evidence item with subject
 // "<proto>/<address>:<port>" (IPv6 in brackets, the interface suffix kept
 // after the address, for example "udp/[fe80::1]%eth0:546") and the owning
-// process names in the detail, shown quoted and sanitised, never
-// interpreted.
+// process names in the detail, shown in quotes, raw (the report escapes
+// them), never interpreted. When the best-effort ss -p run fails, the summary
+// says so once.
 //
 // At most 100 evidence items are returned, sorted by subject: the first 99
 // and a marker item "(N more not shown)"; the summary says "and N more". The
@@ -208,10 +209,12 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	sort.Slice(bad, func(i, j int) bool { return bad[i].subject() < bad[j].subject() })
 
 	var ev []result.Evidence
+	note := ""
 	if len(bad) > 0 {
-		procs, note := l.processes(ctx, env)
+		var procs map[string][]string
+		procs, note = l.processes(ctx, env)
 		for _, s := range bad {
-			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()], note)})
+			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()])})
 		}
 	}
 	// A local user can open tens of thousands of sockets, so the evidence is
@@ -222,13 +225,14 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	case len(failures) > 0:
 		o := partialError(failures, ev)
 		o.Evidence, o.Set = shown, set
+		o.Summary += noteSuffix(note)
 		return o
 	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
 	}
 	return Outcome{
 		Status:   result.Fail,
-		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden),
+		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden) + noteSuffix(note),
 		Evidence: shown,
 		Set:      set,
 	}
@@ -260,16 +264,23 @@ func (l listenersProbe) processes(ctx context.Context, env *Env) (map[string][]s
 	if len(problems) == 0 {
 		return names, ""
 	}
-	return names, "process names may be missing, " + clean(strings.Join(problems, "; "), 200)
+	return names, "process names may be missing, " + strings.Join(problems, "; ")
 }
 
-// processDetail renders the detail of one listener.
-func processDetail(names []string, note string) string {
-	d := "listening, processes: " + procList(names)
-	if note != "" {
-		d += " (" + note + ")"
+// processDetail renders the detail of one listener. The note about a ss -p
+// run that went wrong is not repeated here: it can hold a line of the host's
+// output, and one copy per listener would multiply it by the number of
+// listeners. It stands once in the summary (see noteSuffix).
+func processDetail(names []string) string {
+	return "listening, processes: " + procList(names)
+}
+
+// noteSuffix is the note of processes as the end of a summary.
+func noteSuffix(note string) string {
+	if note == "" {
+		return ""
 	}
-	return d
+	return "; " + note
 }
 
 // allowed reports whether an allowlist entry covers the socket. The "*" that
@@ -291,10 +302,8 @@ func allowed(rules []ListenerRule, s socket) bool {
 	return false
 }
 
-const (
-	maxProcNames = 5
-	maxProcRunes = 32
-)
+// maxProcNames is how many process names one listener shows.
+const maxProcNames = 5
 
 var zonePattern = regexp.MustCompile(`^%[A-Za-z0-9._@-]{1,32}$`)
 
@@ -319,7 +328,7 @@ func parseSS(out, proto, wantState string) ([]socket, error) {
 		}
 		f := strings.Fields(line)
 		if len(f) != 5 || f[0] != wantState {
-			return nil, fmt.Errorf("line %d does not look like a %s listener: %q", i+1, proto, clean(line, 60))
+			return nil, fmt.Errorf("line %d does not look like a %s listener: %s", i+1, proto, quoted(line))
 		}
 		s, err := parseLocal(f[3])
 		if err != nil {
@@ -378,18 +387,18 @@ func parseProcesses(out, proto, wantState string, names map[string][]string) boo
 func parseLocal(col string) (socket, error) {
 	i := strings.LastIndexByte(col, ':')
 	if i < 0 {
-		return socket{}, fmt.Errorf("local address %q has no port", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has no port", quoted(col))
 	}
 	host, portStr := col[:i], col[i+1:]
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 || portStr != strconv.Itoa(port) {
-		return socket{}, fmt.Errorf("local address %q has an invalid port", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has an invalid port", quoted(col))
 	}
 	s := socket{port: port}
 	if j := strings.IndexByte(host, '%'); j >= 0 {
 		host, s.zone = host[:j], host[j:]
 		if !zonePattern.MatchString(s.zone) {
-			return socket{}, fmt.Errorf("local address %q has an invalid interface suffix", clean(col, 60))
+			return socket{}, fmt.Errorf("local address %s has an invalid interface suffix", quoted(col))
 		}
 	}
 	if host == "*" {
@@ -399,20 +408,20 @@ func parseLocal(col string) (socket, error) {
 	bracketed := strings.HasPrefix(host, "[")
 	if bracketed {
 		if !strings.HasSuffix(host, "]") {
-			return socket{}, fmt.Errorf("local address %q has unbalanced brackets", clean(col, 60))
+			return socket{}, fmt.Errorf("local address %s has unbalanced brackets", quoted(col))
 		}
 		host = host[1 : len(host)-1]
 	}
 	a, err := netip.ParseAddr(host)
 	// ss brackets IPv6 addresses and only those.
 	if err != nil || a.Zone() != "" || bracketed != a.Is6() {
-		return socket{}, fmt.Errorf("local address %q has an invalid host", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has an invalid host", quoted(col))
 	}
 	s.addr = a
 	return s, nil
 }
 
-// procList renders process names as quoted, sanitised text.
+// procList renders process names as quoted text, raw inside the quotes.
 func procList(names []string) string {
 	if len(names) == 0 {
 		return "unknown"
@@ -420,7 +429,7 @@ func procList(names []string) string {
 	var shown []string
 	seen := map[string]bool{}
 	for _, n := range names {
-		q := strconv.Quote(clean(n, maxProcRunes))
+		q := quoted(n)
 		if seen[q] {
 			continue
 		}

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"regexp"
 	"strings"
 	"time"
 
@@ -76,12 +75,12 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 			detail += "; packages: " + pkgList(string(pkgs))
 		case errors.Is(perr, fs.ErrNotExist):
 		default:
-			failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootPkgsFile, clean(perr.Error(), 150)))
+			failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootPkgsFile, perr.Error()))
 		}
 		ev = append(ev, result.Evidence{Subject: "reboot-required", Detail: detail})
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootFile, clean(err.Error(), 150)))
+		failures = append(failures, fmt.Sprintf("cannot read %s: %s", rebootFile, err.Error()))
 	}
 
 	res, out := run(ctx, env, []string{"needrestart", "-b", "-k", "-r", "l"}, 30*time.Second)
@@ -119,8 +118,6 @@ func (rebootProbe) Run(ctx context.Context, env *Env) Outcome {
 	return Outcome{Status: result.Pass, Summary: summary}
 }
 
-var pkgNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+.:_-]{0,127}$`)
-
 // pkgList renders the package names of a reboot-required.pkgs file.
 func pkgList(content string) string {
 	var names []string
@@ -128,9 +125,6 @@ func pkgList(content string) string {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
-		}
-		if !pkgNamePattern.MatchString(line) {
-			line = clean(line, 40)
 		}
 		if len(names) == maxRebootPkgs {
 			names = append(names, "...")
@@ -169,7 +163,7 @@ func parseNeedrestart(out string) (*result.Evidence, string, error) {
 	}
 	// Exactly one digit from 0 to 3: no sign, no padding.
 	if len(raw) != 1 || raw[0] < '0' || raw[0] > '3' {
-		return nil, "", fmt.Errorf("unexpected NEEDRESTART-KSTA value %q", clean(raw, 20))
+		return nil, "", fmt.Errorf("unexpected NEEDRESTART-KSTA value %s", quoted(raw))
 	}
 	ksta := int(raw[0] - '0')
 	switch ksta {
@@ -184,10 +178,10 @@ func parseNeedrestart(out string) (*result.Evidence, string, error) {
 	}
 	detail := kind
 	if cur := kv["NEEDRESTART-KCUR"]; cur != "" {
-		detail += "; running " + clean(cur, 60)
+		detail += "; running " + cur
 	}
 	if exp := kv["NEEDRESTART-KEXP"]; exp != "" {
-		detail += "; expected " + clean(exp, 60)
+		detail += "; expected " + exp
 	}
 	return &result.Evidence{Subject: "kernel", Detail: detail}, "", nil
 }

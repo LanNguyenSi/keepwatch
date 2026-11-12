@@ -72,6 +72,48 @@ var positives = []struct {
 	{"two secrets in one text", "password=one token=two", "one", "password=[REDACTED] token=[REDACTED]"},
 	{"multi line", "a\npassword=hunter2\nb", "hunter2", "a\npassword=[REDACTED]\nb"},
 
+	// A token glued to the text in front of it, and a terminal color
+	// sequence in front of a token.
+	{"github token after a letter", "a" + fakeGitHub, fakeGitHub[4:], "a[REDACTED]"},
+	{"github token after a digit", "7" + fakeGitHub, fakeGitHub[4:], "7[REDACTED]"},
+	{"github token after an underscore", "run_" + fakeGitHub, fakeGitHub[4:], "run_[REDACTED]"},
+	{"github token after a color sequence", "\x1b[31m" + fakeGitHub, fakeGitHub[4:], "\x1b[31m[REDACTED]"},
+	{"github token after a long color sequence", "\x1b[1;38;5;196m" + fakeGitHub + "\x1b[0m", fakeGitHub[4:], "\x1b[1;38;5;196m[REDACTED]\x1b[0m"},
+	{"github pat after a letter", "x" + fakeGHPAT, fakeGHPAT[8:], "x[REDACTED]"},
+	{"gitlab token after a digit", "5" + fakeGitLab, fakeGitLab[8:], "5[REDACTED]"},
+	{"slack token after a letter", "v" + fakeSlack, fakeSlack[6:], "v[REDACTED]"},
+	{"aws key id after a color sequence", "\x1b[31m" + fakeAWS, fakeAWS[4:], "\x1b[31m[REDACTED]"},
+	{"sk key after a color sequence", "\x1b[0m" + fakeSK, fakeSK[6:], "\x1b[0m[REDACTED]"},
+	{"ntfy token after a color sequence", "\x1b[2m" + fakeNtfy, fakeNtfy[6:], "\x1b[2m[REDACTED]"},
+	{"google key after a color sequence", "\x1b[2m" + fakeGoogle, fakeGoogle[6:], "\x1b[2m[REDACTED]"},
+	{"stripe key after a color sequence", "\x1b[2m" + fakeStripe, fakeStripe[8:], "\x1b[2m[REDACTED]"},
+	{"jwt after a color sequence", "\x1b[2m" + fakeJWT, fakeJWT[8:], "\x1b[2m[REDACTED]"},
+	{"aws key id at the start", fakeAWS, fakeAWS[4:], "[REDACTED]"},
+
+	// User info that is not directly behind the scheme, and a scheme glued to
+	// the text in front of it.
+	{"url user info after a space", "tcp:// bob:s3cret@host.example:2375", "s3cret", "tcp://[REDACTED]@host.example:2375"},
+	{"url user info after a tab", "tcp://\tbob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info after host text and a space", "tcp://aaa. bob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info after host text and a tab", "tcp://aaa.\tbob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info after host text and a comma", "tcp://aaa.,bob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info after host text, a comma and a space", "tcp://aaa., bob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info after a comma, a space and a tab", "tcp://, \tbob:s3cret@host.example", "s3cret", "tcp://[REDACTED]@host.example"},
+	{"url user info, empty user, after a space", "redis://x :hunter2@host.example", "hunter2", "redis://[REDACTED]@host.example"},
+	{"url scheme after a digit", "1https://bob:s3cret@host.example/x", "s3cret", "1https://[REDACTED]@host.example/x"},
+	{"url scheme after an underscore", "_ssh://bob:s3cret@host.example", "s3cret", "_ssh://[REDACTED]@host.example"},
+
+	{"url second credential behind the first", "tcp://u:p@h1.example, bob:s3cret@h2.example", "s3cret", "tcp://[REDACTED]@h2.example"},
+	{"url after a word that looks like a mailto link", "https://example.com mailto:admin@example.com", "mailto:admin", "https://[REDACTED]@example.com"},
+	{"authorization after a color sequence", "\x1b[31mAuthorization: Bearer abcdef0123456789abcdef", "abcdef0123456789", "\x1b[31mAuthorization: [REDACTED]"},
+	{"cookie after a color sequence", "\x1b[0mCookie: sid=abcdef", "abcdef", "\x1b[0mCookie: [REDACTED]"},
+	{"bearer after a color sequence", "\x1b[1mbearer abcdef0123456789abcdef.xyz", "abcdef0123456789", "\x1b[1mbearer [REDACTED]"},
+	{"authorization behind a long s", "\u017fauthorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz", "authorization: [REDACTED]"},
+	{"cookie behind the Kelvin sign", "\u212acookie: sid=abcdef", "abcdef", "cookie: [REDACTED]"},
+	{"bearer behind a long s", "\u017fbearer abcdef0123456789abcdef", "abcdef0123456789", "bearer [REDACTED]"},
+	{"flag after a color sequence", "\x1b[32m--password hunter2", "hunter2", "--password [REDACTED]"},
+	{"pass after a color sequence", "\x1b[32mpass=hunter2", "hunter2", "pass=[REDACTED]"},
+	{"pwd after a color sequence", "\x1b[32mpwd=hunter2", "hunter2", "pwd=[REDACTED]"},
 	// Env-style names: the secret word is the last word of the name.
 	{"secret key", "SECRET_KEY=hunter2 next", "hunter2", "SECRET_KEY=[REDACTED] next"},
 	{"secret-key lower", "secret-key: hunter2", "hunter2", "secret-key: [REDACTED]"},
@@ -223,6 +265,23 @@ var negatives = []string{
 	"id: 0123456789abcdef0123456789abcdef",
 	"sha256:" + strings.Repeat("ab", 32),
 	"héllo wörld, 日本語",
+	// Words and lists that only look like the shapes above.
+	"highghp is a word",
+	"ghpx and ghp_ and ghp_short",
+	"see ghp for details",
+	"xox is not a slack token",
+	"tcp://127.0.0.1:2375, udp://[::]:53",
+	"tcp://127.0.0.1:2375 udp://[::]:53",
+	"https://example.com/a, b:c@d.example",
+	"https://example.com, then mail admin@example.com",
+	"https://example.com/docs, user:pw@host is not a url",
+	"allowed hosts: https://a.example, https://b.example",
+	"owners: a@x.example, b@y.example, c@z.example",
+	"http://localhost:8080 admin@corp.example",
+	"http://localhost:8080, admin@corp.example",
+	"a, b, c: d@e",
+	"scheme:// alone",
+	"https:// ",
 	"",
 }
 
@@ -444,6 +503,107 @@ func TestTokenPrefixFamilies(t *testing.T) {
 	}
 }
 
+// A token with a long, specific prefix is a token whatever stands in front of
+// it; a color sequence in front of any token leaves a letter that a word
+// boundary counts as part of a word.
+func TestTokensAfterGluedTextAndColorSequences(t *testing.T) {
+	r := Default()
+	specific := []string{fakeGitHub, fakeGHPAT, fakeGitLab, fakeSlack}
+	for _, s := range specific {
+		for _, front := range []string{"a", "Z", "7", "_", "x_", "word", "\x1b[31m", "\x1b[m"} {
+			in := "k=" + front + s + " end"
+			if got := r.Redact(in); strings.Contains(got, s[6:]) || !strings.HasSuffix(got, "[REDACTED] end") {
+				t.Errorf("Redact(%q) = %q", in, got)
+			}
+		}
+	}
+	all := append([]string{fakeAWS, fakeNtfy, fakeGoogle, fakeStripe, fakeJWT, fakeSK, fakeSKAnt}, specific...)
+	for _, s := range all {
+		for _, seq := range []string{"\x1b[31m", "\x1b[0m", "\x1b[1;4;38;5;196m", "\x1b[m", "\x1b[?25h"} {
+			in := "k=" + seq + s + " end"
+			want := "k=" + seq + "[REDACTED] end"
+			if got := r.Redact(in); got != want {
+				t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+			}
+		}
+	}
+}
+
+// A keyword that starts right where the value of the one before it ended
+// (the quote that closes a value is not consumed by the match) is found too.
+// Redacting the result again would swallow more, so this is not a table case.
+func TestKeywordRightBehindAQuotedValue(t *testing.T) {
+	in := `authorization: "A"authorization: "B"`
+	want := `authorization: [REDACTED]authorization: [REDACTED]`
+	if got := Default().Redact(in); got != want {
+		t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// More shapes left out, and these are as at the base of the CSI change: the
+// rules for pass, pwd, NAME_KEY and flags take the character in front of the
+// keyword into the match, so a second value that starts where the quoted first
+// one ended is not found, and neither is a keyword behind U+017F or U+212A
+// (letters that fold to s and k, so the rule counts them as part of a word).
+// The first value is redacted; the output pins what is left.
+func TestMoreShapesLeftOutOnPurpose(t *testing.T) {
+	r := Default()
+	for name, c := range map[string]struct{ in, want string }{
+		"second pass behind a quoted first":     {`pass="A"pass="B"`, `pass=[REDACTED]pass="B"`},
+		"second pwd behind a quoted first":      {`pwd="A"pwd="B"`, `pwd=[REDACTED]pwd="B"`},
+		"second NAME_KEY behind a quoted first": {`DB_KEY="A"DB_KEY="B"`, `DB_KEY=[REDACTED]DB_KEY="B"`},
+		"second flag behind a quoted first":     {`--password "A"--password "B"`, `--password [REDACTED] "B"`},
+		"pass behind a long s":                  {"\u017fpass=hunter2", "\u017fpass=hunter2"},
+		"pwd behind the Kelvin sign":            {"\u212apwd=hunter2", "\u212apwd=hunter2"},
+		"flag behind a long s":                  {"\u017f--password hunter2", "\u017f--password hunter2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := r.Redact(c.in); got != c.want {
+				t.Errorf("Redact(%q) = %q, want %q (left out on purpose)", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// Shapes the patterns leave out on purpose: each would cost false positives
+// that a report of host output cannot afford, or cannot be told from text that
+// is no secret. The list is in docs/okf/limit-known-limits.md.
+func TestShapesLeftOutOnPurpose(t *testing.T) {
+	r := Default()
+	for name, in := range map[string]string{
+		// a short or common prefix glued to a word or an underscore
+		"aws key id after a letter":      "x" + fakeAWS,
+		"aws key id after an underscore": "_" + fakeAWS,
+		"aws key id after a digit":       "7" + fakeAWS,
+		"sk key after a letter":          "desk-" + strings.Repeat("a", 30),
+		"ntfy token after a letter":      "x" + fakeNtfy,
+		"stripe key after a letter":      "task_live_" + strings.Repeat("a", 20),
+		// a word character right behind a token
+		"github token before an underscore": fakeGitHub + "_x",
+		// user info that is a token alone, behind host text: it cannot be told
+		// from an address in a list
+		"token user info after host text and a space": "tcp://host token@host.example",
+		"token user info after a comma and a space":   "tcp://host, token@host.example",
+		// escape sequences that are not a CSI sequence
+		"aws key id after ESC ( B":      "\x1b(B" + fakeAWS,
+		"aws key id after ESC c":        "\x1bc" + fakeAWS,
+		"aws key id after an 8-bit CSI": "\u009b31m" + fakeAWS,
+		"aws key id after an open CSI":  "\x1b[31" + fakeAWS,
+		"cookie after ESC ( B":          "\x1b(BCookie: sid=abcdef",
+		"pass after an 8-bit CSI":       "\u009b31mpass=hunter2",
+		// two separators in a row, a newline, a NUL
+		"user info after two hops":   "tcp://a b c:pw@host.example",
+		"user info after a newline":  "tcp://a\nbob:s3cret@host.example",
+		"user info after a NUL byte": "tcp://a\x00bob:s3cret@host.example",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := r.Redact(in); got != in {
+				t.Errorf("Redact(%q) = %q, want it unchanged (left out on purpose)", in, got)
+			}
+		})
+	}
+}
+
 func TestSecretWordsInNames(t *testing.T) {
 	r := Default()
 	for _, name := range []string{"password", "passwd", "passphrase", "secret", "token", "api_key", "api-key", "apikey", "access_key", "access-key", "accesskey",
@@ -477,6 +637,9 @@ func TestBuiltinPatternsOnAdversarialText(t *testing.T) {
 		"flags with NUL":      {strings.Repeat("--token\x00", 5000) + "hunter2", true},
 		"urls":                {strings.Repeat("a://@", 5000), false},
 		"user info, no @":     {"https://" + strings.Repeat("a:", 20000), false},
+		"scheme hops":         {strings.Repeat("a:// b ", 5000) + "x", false},
+		"scheme, hop, colon":  {strings.Repeat("a://b, c:", 5000), false},
+		"control sequences":   {strings.Repeat("\x1b[", 20000) + fakeAWS, false},
 		"long PEM headers":    {strings.Repeat("-----begin ", 5000), false},
 	} {
 		t.Run(name, func(t *testing.T) {

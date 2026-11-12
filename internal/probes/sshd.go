@@ -102,41 +102,50 @@ func (s sshdProbe) Run(ctx context.Context, env *Env) Outcome {
 	if len(found) == 0 {
 		return *errorOutcome("sshd -T did not print the option %q", s.option)
 	}
-	var bad []string
+	// norm is compared with the allowed values; raw is what is shown, so the
+	// case of a value is the one the host printed (a pattern such as an AWS
+	// key id is case sensitive).
+	var bad, shown []string
 	for _, v := range found {
-		if !contains(s.allow, v) {
-			bad = append(bad, v)
+		shown = append(shown, v.raw)
+		if !contains(s.allow, v.norm) {
+			bad = append(bad, v.raw)
 		}
 	}
 	if len(bad) == 0 {
-		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("sshd %s is %s", s.option, strings.Join(found, ", "))}
+		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("sshd %s is %s", s.option, strings.Join(shown, ", "))}
 	}
 	return Outcome{
 		Status:  result.Fail,
-		Summary: fmt.Sprintf("sshd %s is %s, expected %s", s.option, clean(strings.Join(bad, ", "), 80), strings.Join(s.allow, " or ")),
+		Summary: fmt.Sprintf("sshd %s is %s, expected %s", s.option, strings.Join(bad, ", "), strings.Join(s.allow, " or ")),
 		Evidence: []result.Evidence{{
 			Subject: s.option,
-			Detail:  fmt.Sprintf("effective value: %s; allowed: %s", clean(strings.Join(bad, ", "), 80), strings.Join(s.allow, ", ")),
+			Detail:  fmt.Sprintf("effective value: %s; allowed: %s", strings.Join(bad, ", "), strings.Join(s.allow, ", ")),
 		}},
 	}
 }
+
+// sshdValue is one value of an sshd -T line: norm is lower case with white
+// space collapsed (what is compared), raw keeps the case the host printed.
+type sshdValue struct{ norm, raw string }
 
 var sshdKeyword = regexp.MustCompile(`^[a-z0-9]+$`)
 
 // parseSSHDConfig reads sshd -T output into keyword -> values (lower case,
 // one entry per line, whitespace collapsed). An empty output or a line that
 // does not start with a keyword is an error.
-func parseSSHDConfig(out string) (map[string][]string, error) {
-	values := map[string][]string{}
+func parseSSHDConfig(out string) (map[string][]sshdValue, error) {
+	values := map[string][]sshdValue{}
 	for i, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
 		kw, rest, _ := strings.Cut(line, " ")
 		if !sshdKeyword.MatchString(kw) {
-			return nil, fmt.Errorf("line %d is not a keyword line: %q", i+1, clean(line, 60))
+			return nil, fmt.Errorf("line %d is not a keyword line: %s", i+1, quoted(line))
 		}
-		values[kw] = append(values[kw], strings.ToLower(strings.Join(strings.Fields(rest), " ")))
+		raw := strings.Join(strings.Fields(rest), " ")
+		values[kw] = append(values[kw], sshdValue{norm: strings.ToLower(raw), raw: raw})
 	}
 	if len(values) == 0 {
 		return nil, fmt.Errorf("empty output")
