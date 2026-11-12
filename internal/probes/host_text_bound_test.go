@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/probes/probestest"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
 
@@ -108,5 +109,17 @@ func TestEveryPieceOfHostTextIsBounded(t *testing.T) {
 				t.Fatalf("the outcome holds %d bytes of text", n)
 			}
 		})
+	}
+}
+
+// The package list file may be up to 64 KiB, which is more than the cut: a
+// line of it is cut too.
+func TestRebootPackageListLineIsCut(t *testing.T) {
+	line := strings.Repeat("p", 60<<10)
+	r := newRunner().AddResult(needrestartArgv, inline(needrestartOut("1"), 0))
+	o := exec(rebootProbe(t), r, probestest.MemFS{rebootFile: "x", pkgsFile: line + "\n"})
+	wantStatus(t, o, result.Fail)
+	if n := outcomeText(o.Summary, o.Evidence); n > 34<<10 {
+		t.Fatalf("the outcome holds %d bytes of text for a 60 KiB line", n)
 	}
 }
