@@ -49,8 +49,25 @@ func secretKinds() []secretKind {
 }
 
 // what stands in front of the secret, directly: nothing, white space, a
-// punctuation mark, and control characters.
-var corpusSeparators = []string{"", " ", "-", "\t", "\n", "\x01", "\x1b", "?"}
+// punctuation mark, control characters, a character that makes the secret
+// part of a longer word, and a terminal color sequence.
+var corpusSeparators = []string{"", " ", "-", "\t", "\n", "\x01", "\x1b", "?", ",", ", ", "a", "7", "_", "\x1b[31m"}
+
+// foundAfter says whether the built-in patterns find a secret of kind k right
+// behind sep. Most separators end a word; the ones that glue the secret to the
+// text before it hide only the shapes whose pattern needs a word boundary:
+// the long, specific token prefixes and the scheme of a URL do not, and every
+// token is found behind a terminal color sequence. The rest is a stated limit
+// (docs/okf/limit-known-limits.md).
+func foundAfter(k secretKind, sep string) bool {
+	switch sep {
+	case "a", "7", "_":
+		return k.name == "github token" || k.name == "url user info"
+	case "\x1b[31m":
+		return k.name == "github token" || k.name == "aws key id" || k.name == "url user info"
+	}
+	return true
+}
 
 func hasCtl(s string) bool { return strings.ContainsAny(s, "\x00\x01\x1b\t\n") }
 func hasWS(s string) bool  { return strings.ContainsAny(s, " \t\n") }
@@ -65,15 +82,19 @@ func fragFor(r corpusRole, k secretKind, sep string, pad int) (string, bool) {
 			text = "https://user:hunter2urls@host.example"
 		case "host":
 			// the place supplies the scheme: the user info runs from there to
-			// the "@", and white space or a "?" in it ends the URL for the
-			// pattern whatever the probe does
-			if hasWS(sep) || sep == "?" {
+			// the "@". A comma, a space or a tab in front of it is covered (the
+			// user info must then have the form user:password); a newline or a
+			// "?" ends the URL for the pattern whatever the probe does
+			if strings.Contains(sep, "\n") || sep == "?" {
 				return "", false
 			}
 			text = "user:hunter2urls@host.example"
 		default:
 			return "", false
 		}
+	}
+	if !foundAfter(k, sep) {
+		return "", false
 	}
 	if (r.noCtl && hasCtl(sep)) || (r.noWS && (hasWS(sep) || hasWS(text))) || (r.noNL && strings.Contains(sep+text, "\n")) {
 		return "", false
@@ -367,6 +388,9 @@ func TestEveryConsumerCleansWhatItShows(t *testing.T) {
 			text = "https://user:hunter2urls@host.example"
 		}
 		for _, sep := range corpusSeparators {
+			if !foundAfter(k, sep) {
+				continue
+			}
 			raw := "x." + sep + text
 			ch := diff.Change{Kind: diff.SubjectNew, CheckID: "c.x", CheckKind: "cert_expiry", Severity: result.High, From: result.Fail, To: result.Fail, Subject: raw, Alert: true}
 			rep := diff.Report{Changes: []diff.Change{ch}}

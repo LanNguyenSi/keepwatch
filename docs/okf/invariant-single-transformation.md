@@ -55,7 +55,7 @@ copy (`internal/probes/sshd.go:147#"raw := strings.Join"`), since the AWS
 key id pattern is case sensitive.
 
 The single transformation is `redact.Redactor.Clean`: redact, then escape,
-then cut to `MaxFieldRunes` (`internal/redact/redact.go:224-229#"func (r *Redactor) Clean"`).
+then cut to `MaxFieldRunes` (`internal/redact/redact.go:241-246#"func (r *Redactor) Clean"`).
 Its order is itself an invariant, documented above the package
 (`internal/redact/redact.go:13#"The order matters"`), and the escaping
 step is specified in `docs/running.md` under "Output safety"; this bundle

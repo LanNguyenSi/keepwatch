@@ -99,6 +99,17 @@ type rule struct {
 // ends a value as a space does.
 const valueRe = `"(?:[^"\\]|(?s:\\.))*(?:"|\\?$)|'(?:[^'\\]|(?s:\\.))*(?:'|\\?$)|\[REDACTED\]|[^\s\x00"',;&][^\s\x00",;&]*`
 
+// tokenStart is what must stand in front of a token whose prefix is short or
+// common enough to occur inside a longer word or a blob of encoded text: the
+// start of the text, a character that is not part of a word, or the end of a
+// terminal control sequence ("\x1b[31m" leaves an "m" in front of the token, a
+// letter that a word boundary would count as part of a word). It is matched,
+// not asserted (RE2 has no lookbehind): the first group holds it, and the
+// replacement puts it back. The prefixes of GitHub, GitLab and Slack tokens
+// are long and specific, so those patterns take a token after any character:
+// "aghp_...", "7ghp_..." and "_ghp_..." are tokens too.
+const tokenStart = `(^|[^A-Za-z0-9_]|\x1b\[[0-?]*[ -/]*[@-~])`
+
 // builtin lists the built-in patterns, specific shapes first. All use RE2
 // (linear time), none can backtrack.
 var builtin = []rule{
@@ -106,8 +117,14 @@ var builtin = []rule{
 	{regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), "[REDACTED private key]"},
 	// scheme://user:password@host and scheme://token@host. The user info
 	// runs to the last @ before the first /, ? or # (a password can hold an
-	// @).
-	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s\x00/?#]+@`), "${1}" + Replacement + "@"},
+	// @). No word boundary in front of the scheme: a scheme glued to the
+	// text before it ("1https://", "_ssh://") is still the scheme of the URL.
+	// Host text that comes between the scheme and the user info and ends in
+	// a space or a tab, or in a comma and then a space or a tab
+	// ("tcp://host, user:password@host"), is covered when the user info has
+	// the form user:password; a token alone ("tcp://host, token@host") is
+	// not, because it cannot be told from an address in a list of hosts.
+	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)(?:[^\s\x00/?#]+@|[^\s\x00/?#]*[ \t][ \t]*[^\s\x00/?#]*:[^\s\x00/?#]*@)`), "${1}" + Replacement + "@"},
 	// Authorization: Bearer abc, Authorization=Basic abc, "authorization": "..."
 	{regexp.MustCompile(`(?i)\b(authorization["']?[\s\x00]*[:=][\s\x00]*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s\x00"',;]+)`), "${1}" + Replacement},
 	// Cookie and Set-Cookie: the rest of the line
@@ -135,23 +152,23 @@ var builtin = []rule{
 	// starting, so a real flag behind any other separator stays redacted.
 	{regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(-[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)["']?[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}${2}" + Replacement},
 	// AWS access key ids
-	{regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), Replacement},
+	{regexp.MustCompile(tokenStart + `(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), "${1}" + Replacement},
 	// GitHub tokens
-	{regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b`), Replacement},
+	{regexp.MustCompile(`(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b`), Replacement},
 	// GitLab personal access tokens
-	{regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`), Replacement},
+	{regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`), Replacement},
 	// API keys of the sk- family (OpenAI, Anthropic: sk-..., sk-proj-..., sk-ant-...)
-	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`), Replacement},
+	{regexp.MustCompile(tokenStart + `sk-[A-Za-z0-9_-]{20,}`), "${1}" + Replacement},
 	// ntfy access tokens
-	{regexp.MustCompile(`\btk_[A-Za-z0-9]{29,}\b`), Replacement},
+	{regexp.MustCompile(tokenStart + `tk_[A-Za-z0-9]{29,}\b`), "${1}" + Replacement},
 	// Slack tokens
-	{regexp.MustCompile(`\bxox[abeprs]-[A-Za-z0-9-]{10,}`), Replacement},
+	{regexp.MustCompile(`xox[abeprs]-[A-Za-z0-9-]{10,}`), Replacement},
 	// Google API keys
-	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`), Replacement},
+	{regexp.MustCompile(tokenStart + `AIza[0-9A-Za-z_-]{35}`), "${1}" + Replacement},
 	// Stripe keys
-	{regexp.MustCompile(`\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b`), Replacement},
+	{regexp.MustCompile(tokenStart + `[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b`), "${1}" + Replacement},
 	// JSON web tokens
-	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), Replacement},
+	{regexp.MustCompile(tokenStart + `eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), "${1}" + Replacement},
 }
 
 // Redactor removes secrets from text. The zero value is not usable; use New

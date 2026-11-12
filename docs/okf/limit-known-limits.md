@@ -62,7 +62,23 @@ adjacent ones stop short.
   extra patterns are RE2 only, bounded and checked at load time
   (`internal/redact/redact.go:55-59#"func ValidatePattern"`). The first line
   of defense stays the probes printing fingerprints and counts, never file
-  contents.
+  contents. The shapes it leaves out on purpose are pinned by
+  `TestShapesLeftOutOnPurpose` in `internal/redact/redact_test.go`, because
+  each would cost false positives in text that is no secret:
+  - a token with a short or common prefix (AWS key id, `sk-`, ntfy `tk_`,
+    Google, Stripe, JWT) glued to a letter, digit or underscore in front of it
+    (the start rule is `internal/redact/redact.go:111#"const tokenStart"`; GitHub,
+    GitLab and Slack tokens, and the scheme of a URL, are found after any
+    character, and every token is found behind a terminal control sequence);
+  - a token directly followed by a word character or an underscore, since the
+    pattern ends at a word boundary;
+  - URL user info behind host text and a separator
+    (`tcp://host, user:password@host`) only in the form `user:password`:
+    a token alone (`tcp://host, token@host`) cannot be told from a list of
+    addresses, and user info behind two separators, a newline or a NUL byte is
+    not looked for (the URL rule is
+    `internal/redact/redact.go:118#"scheme://user:password@host and scheme://token@host"`);
+  - a secret with no shape of its own, as before.
 - **A check-then-exec gap remains.** Trust in execx rests on the trusted
   directories being root-owned; Go has no `fexecve`, so anyone who could
   write into those directories still races the final exec

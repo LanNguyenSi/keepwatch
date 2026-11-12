@@ -17,6 +17,14 @@ report.
   token that straddled the cut kept a prefix that no pattern matched and
   reached the report, the notification or the stored state. The one change is
   now made where the text leaves the program, as for the other checks.
+- Redaction closes two gaps. A GitHub, GitLab or Slack token glued to the text
+  in front of it (`aghp_...`, a digit or an underscore before it) is found, and
+  so is any token behind a terminal color sequence. URL user info of the form
+  `user:password` is found when host text and a comma, a space or a tab stand
+  between the scheme and the user info (`tcp://host, user:password@host`), and
+  a URL scheme glued to a digit or an underscore is recognised. Token-only user
+  info behind host text and short or common token prefixes glued to a word stay
+  as before, to keep ordinary text from being redacted.
 
 ## [0.1.0] - 2026-11-11
 
