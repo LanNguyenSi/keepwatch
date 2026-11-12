@@ -84,7 +84,7 @@ func (s serviceProbe) Run(ctx context.Context, env *Env) Outcome {
 			return s.fail(state, "inactive (unit not found)")
 		}
 	}
-	return *errorOutcome("systemctl is-active %s: state %q does not fit exit status %d", s.unit, clean(state, 40), res.ExitCode)
+	return *errorOutcome("systemctl is-active %s: state %s does not fit exit status %d", s.unit, quoted(state), res.ExitCode)
 }
 
 func (s serviceProbe) fail(state, detail string) Outcome {

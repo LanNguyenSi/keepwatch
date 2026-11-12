@@ -260,7 +260,7 @@ func (l listenersProbe) processes(ctx context.Context, env *Env) (map[string][]s
 	if len(problems) == 0 {
 		return names, ""
 	}
-	return names, "process names may be missing, " + clean(strings.Join(problems, "; "), 200)
+	return names, "process names may be missing, " + strings.Join(problems, "; ")
 }
 
 // processDetail renders the detail of one listener.
@@ -291,10 +291,8 @@ func allowed(rules []ListenerRule, s socket) bool {
 	return false
 }
 
-const (
-	maxProcNames = 5
-	maxProcRunes = 32
-)
+// maxProcNames is how many process names one listener shows.
+const maxProcNames = 5
 
 var zonePattern = regexp.MustCompile(`^%[A-Za-z0-9._@-]{1,32}$`)
 
@@ -319,7 +317,7 @@ func parseSS(out, proto, wantState string) ([]socket, error) {
 		}
 		f := strings.Fields(line)
 		if len(f) != 5 || f[0] != wantState {
-			return nil, fmt.Errorf("line %d does not look like a %s listener: %q", i+1, proto, clean(line, 60))
+			return nil, fmt.Errorf("line %d does not look like a %s listener: %s", i+1, proto, quoted(line))
 		}
 		s, err := parseLocal(f[3])
 		if err != nil {
@@ -378,18 +376,18 @@ func parseProcesses(out, proto, wantState string, names map[string][]string) boo
 func parseLocal(col string) (socket, error) {
 	i := strings.LastIndexByte(col, ':')
 	if i < 0 {
-		return socket{}, fmt.Errorf("local address %q has no port", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has no port", quoted(col))
 	}
 	host, portStr := col[:i], col[i+1:]
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 || portStr != strconv.Itoa(port) {
-		return socket{}, fmt.Errorf("local address %q has an invalid port", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has an invalid port", quoted(col))
 	}
 	s := socket{port: port}
 	if j := strings.IndexByte(host, '%'); j >= 0 {
 		host, s.zone = host[:j], host[j:]
 		if !zonePattern.MatchString(s.zone) {
-			return socket{}, fmt.Errorf("local address %q has an invalid interface suffix", clean(col, 60))
+			return socket{}, fmt.Errorf("local address %s has an invalid interface suffix", quoted(col))
 		}
 	}
 	if host == "*" {
@@ -399,20 +397,20 @@ func parseLocal(col string) (socket, error) {
 	bracketed := strings.HasPrefix(host, "[")
 	if bracketed {
 		if !strings.HasSuffix(host, "]") {
-			return socket{}, fmt.Errorf("local address %q has unbalanced brackets", clean(col, 60))
+			return socket{}, fmt.Errorf("local address %s has unbalanced brackets", quoted(col))
 		}
 		host = host[1 : len(host)-1]
 	}
 	a, err := netip.ParseAddr(host)
 	// ss brackets IPv6 addresses and only those.
 	if err != nil || a.Zone() != "" || bracketed != a.Is6() {
-		return socket{}, fmt.Errorf("local address %q has an invalid host", clean(col, 60))
+		return socket{}, fmt.Errorf("local address %s has an invalid host", quoted(col))
 	}
 	s.addr = a
 	return s, nil
 }
 
-// procList renders process names as quoted, sanitised text.
+// procList renders process names as quoted text, raw inside the quotes.
 func procList(names []string) string {
 	if len(names) == 0 {
 		return "unknown"
@@ -420,7 +418,7 @@ func procList(names []string) string {
 	var shown []string
 	seen := map[string]bool{}
 	for _, n := range names {
-		q := strconv.Quote(clean(n, maxProcRunes))
+		q := quoted(n)
 		if seen[q] {
 			continue
 		}

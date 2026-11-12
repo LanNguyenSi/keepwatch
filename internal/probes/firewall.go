@@ -260,7 +260,7 @@ func (firewallProbe) Run(ctx context.Context, env *Env) Outcome {
 			d += "; ufw: " + ufwState
 		}
 		if len(v.notes) > 0 {
-			d += "; " + clean(strings.Join(v.notes, "; "), 400)
+			d += "; " + strings.Join(v.notes, "; ")
 		}
 		ev = append(ev, result.Evidence{Subject: famSubject[f], Detail: d})
 	}
@@ -295,7 +295,7 @@ func (v *view) suffix(ufw string, withFailures bool) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return " (" + clean(strings.Join(parts, "; "), 400) + ")"
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 // firewallUFW reads ufw's own view for the explanation. It returns a short
@@ -337,7 +337,7 @@ func parseUFW(out string) (active bool, incoming string, err error) {
 		return false, "", nil
 	case "Status: active":
 	default:
-		return false, "", fmt.Errorf("unexpected first line %q", clean(lines[0], 40))
+		return false, "", fmt.Errorf("unexpected first line %s", quoted(lines[0]))
 	}
 	for _, l := range lines[1:] {
 		rest, ok := strings.CutPrefix(l, "Default: ")
@@ -346,14 +346,14 @@ func parseUFW(out string) (active bool, incoming string, err error) {
 		}
 		parts := strings.Split(rest, ", ")
 		if len(parts) < 2 || !strings.HasSuffix(parts[0], " (incoming)") {
-			return false, "", fmt.Errorf("unexpected Default line %q", clean(l, 80))
+			return false, "", fmt.Errorf("unexpected Default line %s", quoted(l))
 		}
 		in := strings.TrimSuffix(parts[0], " (incoming)")
 		switch in {
 		case "allow", "deny", "reject":
 			return true, in, nil
 		}
-		return false, "", fmt.Errorf("unexpected incoming default %q", clean(in, 20))
+		return false, "", fmt.Errorf("unexpected incoming default %s", quoted(in))
 	}
 	return false, "", errors.New("active, but no Default line")
 }
@@ -367,7 +367,7 @@ func iptablesIsLegacy(prog, out string) (bool, error) {
 	line := strings.TrimRight(out, "\n")
 	m := iptablesVersionRe.FindStringSubmatch(line)
 	if m == nil || m[1] != prog {
-		return false, fmt.Errorf("not a version line: %q", clean(line, 60))
+		return false, fmt.Errorf("not a version line: %s", quoted(line))
 	}
 	return m[2] != "nf_tables", nil
 }
@@ -382,12 +382,12 @@ func parseIptablesInput(out string) (string, error) {
 		case strings.HasPrefix(line, "-P INPUT "):
 			p := strings.TrimPrefix(line, "-P INPUT ")
 			if (p != "ACCEPT" && p != "DROP") || policy != "" {
-				return "", fmt.Errorf("line %d: unexpected policy line %q", i+1, clean(line, 40))
+				return "", fmt.Errorf("line %d: unexpected policy line %s", i+1, quoted(line))
 			}
 			policy = p
 		case strings.HasPrefix(line, "-A INPUT "):
 		default:
-			return "", fmt.Errorf("line %d does not look like iptables -S output: %q", i+1, clean(line, 40))
+			return "", fmt.Errorf("line %d does not look like iptables -S output: %s", i+1, quoted(line))
 		}
 	}
 	if policy == "" {
@@ -428,7 +428,7 @@ func parseNft(out []byte) (nftView, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(out))
 	if err := dec.Decode(&doc); err != nil {
-		return nftView{}, fmt.Errorf("not valid JSON: %v", clean(err.Error(), 100))
+		return nftView{}, fmt.Errorf("not valid JSON: %v", err)
 	}
 	if dec.More() {
 		return nftView{}, errors.New("unexpected data after the JSON document")
@@ -486,14 +486,14 @@ func parseNft(out []byte) (nftView, error) {
 			continue // bridge, netdev, arp: not the host's incoming traffic
 		}
 		if c.Policy != "accept" && c.Policy != "drop" {
-			return nftView{}, fmt.Errorf("input chain %s/%s has policy %q", clean(c.Table, 30), clean(c.Name, 30), clean(c.Policy, 20))
+			return nftView{}, fmt.Errorf("input chain %s/%s has policy %s", c.Table, c.Name, quoted(c.Policy))
 		}
 		t, ok := tables[[2]string{c.Family, c.Table}]
 		if !ok {
-			return nftView{}, fmt.Errorf("chain %s/%s belongs to no listed table", clean(c.Table, 30), clean(c.Name, 30))
+			return nftView{}, fmt.Errorf("chain %s/%s belongs to no listed table", c.Table, c.Name)
 		}
 		if !nftTableActive(t) {
-			name := c.Family + " " + clean(c.Table, 30)
+			name := c.Family + " " + c.Table
 			if !skipped[name] {
 				skipped[name] = true
 				v.notes = append(v.notes, fmt.Sprintf("nftables table %s is dormant or has flags that are not known, not counted", name))
@@ -502,7 +502,7 @@ func parseNft(out []byte) (nftView, error) {
 		}
 		if c.Policy == "drop" {
 			for _, f := range fams {
-				v.drops[f] = append(v.drops[f], fmt.Sprintf("%s %s/%s", c.Family, clean(c.Table, 30), clean(c.Name, 30)))
+				v.drops[f] = append(v.drops[f], fmt.Sprintf("%s %s/%s", c.Family, c.Table, c.Name))
 			}
 		}
 	}

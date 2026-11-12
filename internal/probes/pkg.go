@@ -81,7 +81,7 @@ func (p packageProbe) parse(out string) Outcome {
 		status, version, ok := strings.Cut(line, "\t")
 		words := strings.Fields(status)
 		if !ok || len(words) != 3 || !packageStatusWords[words[2]] {
-			return *errorOutcome("dpkg-query %s: cannot parse record %q", p.pkg, clean(line, 80))
+			return *errorOutcome("dpkg-query %s: cannot parse record %s", p.pkg, quoted(line))
 		}
 		if words[2] == "installed" && words[1] == "ok" {
 			installed, installedVersion = true, version
@@ -89,9 +89,9 @@ func (p packageProbe) parse(out string) Outcome {
 		last = status
 	}
 	if installed {
-		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%s %s is installed", p.pkg, clean(installedVersion, 80))}
+		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%s %s is installed", p.pkg, installedVersion)}
 	}
-	return p.fail(clean(last, 80))
+	return p.fail(last)
 }
 
 func (p packageProbe) fail(detail string) Outcome {

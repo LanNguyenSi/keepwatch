@@ -61,7 +61,7 @@ func (j jailProbe) Run(ctx context.Context, env *Env) Outcome {
 		if first == "Status for the jail: "+j.jail {
 			return Outcome{Status: result.Pass, Summary: fmt.Sprintf("fail2ban jail %s is running", j.jail)}
 		}
-		return *errorOutcome("fail2ban-client -- status %s: unexpected output %q", j.jail, clean(first, 80))
+		return *errorOutcome("fail2ban-client -- status %s: unexpected output %s", j.jail, quoted(first))
 	case 255:
 		if first == "Sorry but the jail '"+j.jail+"' does not exist" {
 			return Outcome{

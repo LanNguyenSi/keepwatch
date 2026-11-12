@@ -351,7 +351,7 @@ func TestListenersProcessOutputCannotChangeTheSocketSet(t *testing.T) {
 			map[string]string{"tcp/0.0.0.0:9000": "processes: unknown", "tcp/0.0.0.0:9001": `processes: "ok"`}},
 		{"an empty -p listing", "", map[string]string{"tcp/0.0.0.0:9000": "processes: unknown", "tcp/0.0.0.0:9001": "processes: unknown"}},
 		{"a name that ends its own entry", "LISTEN 0 5 0.0.0.0:9000 0.0.0.0:* users:((\"x\",pid=1,fd=3),(\"LISTEN 0 5 0.0.0.0:4444 0.0.0.0:*\",pid=2,fd=3))\n",
-			map[string]string{"tcp/0.0.0.0:9000": `processes: "x", "LISTEN 0 5 0.0.0.0:4444 0.0.0.0:..."`, "tcp/0.0.0.0:9001": "processes: unknown"}},
+			map[string]string{"tcp/0.0.0.0:9000": `processes: "x", "LISTEN 0 5 0.0.0.0:4444 0.0.0.0:*"`, "tcp/0.0.0.0:9001": "processes: unknown"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -592,15 +592,16 @@ func TestListenersProcessNamesAreUntrustedText(t *testing.T) {
 	}
 	byPort := map[string]string{}
 	for _, e := range o.Evidence {
-		byPort[e.Subject] = e.Detail
-		for _, r := range e.Detail {
+		// what a report prints: the probe hands on the names as they are
+		byPort[e.Subject] = shown(e.Detail)
+		for _, r := range byPort[e.Subject] {
 			if !unicode.IsPrint(r) {
 				t.Fatalf("detail %q holds a non-printable rune %q", e.Detail, r)
 			}
 		}
 	}
 	for subj, want := range map[string]string{
-		"tcp/0.0.0.0:1001": `processes: "a?[31mred?"`,
+		"tcp/0.0.0.0:1001": `processes: "a\x1b[31mred\x07"`,
 		"tcp/0.0.0.0:1002": `processes: "x", "y"`,
 		"tcp/0.0.0.0:1004": `processes: unknown`,
 		"tcp/0.0.0.0:1005": `processes: "p1", "p2", "p3", "p4", "p5", ...`,
@@ -610,11 +611,12 @@ func TestListenersProcessNamesAreUntrustedText(t *testing.T) {
 			t.Errorf("%s detail = %q, want suffix %q", subj, byPort[subj], want)
 		}
 	}
-	if d := byPort["tcp/0.0.0.0:1003"]; !strings.Contains(d, strings.Repeat("A", 32)+`..."`) || strings.Contains(d, strings.Repeat("A", 33)) {
-		t.Errorf("long name not cut: %q", d)
+	// the probe does not cut a name; only the one Clean at the end does
+	if d := byPort["tcp/0.0.0.0:1003"]; !strings.Contains(d, `"`+long+`"`) {
+		t.Errorf("long name was cut early: %q", d)
 	}
-	if d := byPort["tcp/0.0.0.0:1008"]; !strings.Contains(d, `"??"`) {
-		t.Errorf("invalid utf-8 not replaced: %q", d)
+	if d := byPort["tcp/0.0.0.0:1008"]; !strings.Contains(d, `"\xff\xfe"`) {
+		t.Errorf("invalid utf-8 not escaped: %q", d)
 	}
 }
 

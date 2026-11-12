@@ -75,7 +75,7 @@ func fragFor(r corpusRole, k secretKind, sep string, pad int) (string, bool) {
 			return "", false
 		}
 	}
-	if (r.noCtl && hasCtl(sep)) || (r.noWS && (hasWS(sep) || hasWS(text))) {
+	if (r.noCtl && hasCtl(sep)) || (r.noWS && (hasWS(sep) || hasWS(text))) || (r.noNL && strings.Contains(sep+text, "\n")) {
 		return "", false
 	}
 	if r.maxPad > 0 && pad > r.maxPad {

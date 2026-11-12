@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
@@ -87,24 +85,10 @@ func firstLine(b []byte) string {
 	return s
 }
 
-// clean makes host-supplied text safe to show: control characters, invalid
-// UTF-8 and non-printable runes become "?", and the text is cut to max
-// runes. It never interprets the text.
-func clean(s string, max int) string {
-	var b strings.Builder
-	n := 0
-	for i := 0; i < len(s); {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		if n == max {
-			b.WriteString("...")
-			break
-		}
-		if r == utf8.RuneError || !unicode.IsPrint(r) {
-			r = '?'
-		}
-		b.WriteRune(r)
-		n++
-	}
-	return b.String()
-}
+// quoted puts s in double quotes and changes nothing inside. Host text stays
+// raw in a probe until the one redact.Redactor.Clean where it leaves the
+// program: a cut, an escape (strconv.Quote, %q) or a "?" for an unprintable
+// byte made here can split a secret or move the word boundary its pattern
+// needs, so no pattern would match any more. How much output a probe holds is
+// bounded where it is read (execx.Opts.MaxOutput), not here.
+func quoted(s string) string { return `"` + s + `"` }

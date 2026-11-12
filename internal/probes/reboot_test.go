@@ -63,7 +63,7 @@ func TestRebootRequiredFile(t *testing.T) {
 			t.Fatalf("detail = %q", got)
 		}
 	})
-	t.Run("package list is cut and sanitised", func(t *testing.T) {
+	t.Run("package list is capped by count and shown escaped", func(t *testing.T) {
 		var b strings.Builder
 		for i := 0; i < 30; i++ {
 			b.WriteString("pkg" + strings.Repeat("x", i%3) + "\n")
@@ -72,12 +72,12 @@ func TestRebootRequiredFile(t *testing.T) {
 		fsys := probestest.MemFS{rebootFile: "x", pkgsFile: b.String()}
 		o := exec(rebootProbe(t), current, fsys)
 		wantStatus(t, o, result.Fail)
-		if d := o.Evidence[0].Detail; !strings.HasSuffix(d, ", ...") || strings.ContainsRune(d, 0x1b) {
+		if d := shown(o.Evidence[0].Detail); !strings.HasSuffix(d, ", ...") || strings.ContainsRune(d, 0x1b) {
 			t.Fatalf("detail = %q", d)
 		}
 		fsys[pkgsFile] = "bad name\x1b[0m\n"
 		o = exec(rebootProbe(t), current, fsys)
-		if d := o.Evidence[0].Detail; strings.ContainsRune(d, 0x1b) || !strings.Contains(d, "bad name?[0m") {
+		if d := shown(o.Evidence[0].Detail); strings.ContainsRune(d, 0x1b) || !strings.Contains(d, `bad name\x1b[0m`) {
 			t.Fatalf("detail = %q", d)
 		}
 	})

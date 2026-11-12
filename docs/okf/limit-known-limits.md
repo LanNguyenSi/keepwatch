@@ -10,6 +10,9 @@ sources:
   - internal/install/trustedpath.go
   - internal/result/result.go
   - internal/redact/redact.go
+  - internal/execx/execx.go
+  - internal/probes/sshd.go
+  - internal/probes/listeners.go
   - internal/execx/real.go
   - internal/doctor/doctor.go
   - internal/history/history.go
@@ -42,12 +45,18 @@ adjacent ones stop short.
   that plan the scheduled root runs do walk them
   (`docs/running.md:154-155#"not examined by"`). A hostile ancestor makes the
   manual and the scheduled answer differ, on purpose.
-- **Most probes pre-clean their own text.** The single-transformation rule
-  names four kinds that hand raw host text to the report and the state; the
-  others already escape or shape their texts before `Clean` ever sees them
-  (`internal/result/result.go:63-65#"the other probes still clean some of"`).
-  The rule protects subjects, detail and summaries of those four kinds and
-  every future probe that follows the same hand-on-raw discipline.
+- **A probe's text is as long as the output it came from.** No probe cuts
+  host text, so a summary or detail can hold up to the stream limit of the
+  command it was taken from (1 MiB, or the larger limit a run asks for by
+  name: `internal/execx/execx.go:19#"DefaultMaxOutput"`,
+  `internal/probes/listeners.go:23#"trustedMaxOutput"`) until `Clean` cuts it
+  at `MaxFieldRunes`. That is memory held for one run, not output.
+- **Two parsers still tidy white space.** The sshd probe collapses the white
+  space of a value (`internal/probes/sshd.go:147#"raw := strings.Join"`) and the
+  listeners probe does the same for the process column of `ss -p`
+  (`internal/probes/listeners.go:365#"strings.Join(f[5:]"`): a run of white
+  space, including characters such as U+000B that the redactor does not count
+  as white space, becomes one space before the text is shown.
 - **Redaction is shape-matching.** It knows the listed shapes and "cannot
   know a secret that has none" (`internal/redact/redact.go:19-20#"it cannot know a secret"`);
   extra patterns are RE2 only, bounded and checked at load time

@@ -6,6 +6,10 @@ tags: [redaction, output-safety, state, invariants]
 timestamp: 2026-11-11T10:18:36Z
 sources:
   - internal/result/result.go
+  - internal/probes/run.go
+  - internal/probes/sshd.go
+  - internal/probes/listeners.go
+  - internal/execx/execx.go
   - internal/redact/redact.go
   - internal/render/view.go
   - internal/render/render.go
@@ -31,6 +35,25 @@ matches; escaping early removes the word boundary a pattern needs), and
 cleaning the stored comparison keys is worse still, because the diff would
 then compare display forms instead of what the check saw.
 
+Every probe obeys it, not only the four that the comment on `Evidence`
+names. No probe has a function that cuts, escapes or replaces characters of
+host text: the only helper left in `internal/probes/run.go` that touches such
+text is `quoted`, which wraps it in double quotes and changes nothing inside
+(`internal/probes/run.go:94#"func quoted"`). The error texts that quote a line
+of command output (`... does not look like a ... listener: "line"`) use it
+instead of `%q`, because `%q` escapes quotes and backslashes and so turns
+`password="x"` into `password=\"x\"`, where the value pattern no longer sees
+the quoted value. How much host text a probe holds is bounded where the output
+is read, not by a cut in the probe: `execx` keeps at most
+`DefaultMaxOutput` per stream (`internal/execx/execx.go:19#"DefaultMaxOutput"`),
+and the three runs that need more ask for it by name
+(`internal/probes/listeners.go:23#"trustedMaxOutput"`, the nft and the docker
+inspect limits). Every text in a summary or a detail is a piece of such an
+output, so it is at most that long when `Clean` cuts it at `MaxFieldRunes`.
+The sshd probe keeps the case of a value for display and compares a lower case
+copy (`internal/probes/sshd.go:147#"raw := strings.Join"`), since the AWS
+key id pattern is case sensitive.
+
 The single transformation is `redact.Redactor.Clean`: redact, then escape,
 then cut to `MaxFieldRunes` (`internal/redact/redact.go:224-229#"func (r *Redactor) Clean"`).
 Its order is itself an invariant, documented above the package
@@ -55,7 +78,11 @@ boundary:
   with extra `redact.patterns` stores exactly what it would show;
 - the history is built the same way
   (`internal/history/history.go:105#"func FromReport"`, called with
-  `red.Clean` at `internal/cli/notify.go:114#"history.FromReport"`).
+  `red.Clean` at `internal/cli/notify.go:114#"history.FromReport"`);
+- a result's `Summary` and `Detail` leave the program only through the report
+  view (`internal/render/view.go:211#"Summary: c(r.Summary)"`), which cleans
+  them; the notification, the weekly report, the state and the history carry
+  subjects, counts and statuses, never a summary or a detail.
 
 Two consequences live between files and belong to no single package:
 

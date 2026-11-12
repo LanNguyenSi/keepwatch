@@ -8,6 +8,16 @@ report.
 
 ## [Unreleased]
 
+### Security
+
+- Probes no longer cut, escape or replace characters of command output and
+  error text before it is redacted. The firewall, security updates, listeners,
+  reboot, package, sshd, fail2ban and service checks used to cut such text to a
+  few dozen characters (and replace control characters by `?`) first, so a
+  token that straddled the cut kept a prefix that no pattern matched and
+  reached the report, the notification or the stored state. The one change is
+  now made where the text leaves the program, as for the other checks.
+
 ## [0.1.0] - 2026-11-11
 
 The first release: stage 0, static posture checks of a Linux server with
