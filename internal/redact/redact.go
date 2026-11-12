@@ -108,7 +108,13 @@ const valueRe = `"(?:[^"\\]|(?s:\\.))*(?:"|\\?$)|'(?:[^'\\]|(?s:\\.))*(?:'|\\?$)
 // replacement puts it back. The prefixes of GitHub, GitLab and Slack tokens
 // are long and specific, so those patterns take a token after any character:
 // "aghp_...", "7ghp_..." and "_ghp_..." are tokens too.
-const tokenStart = `(^|[^A-Za-z0-9_]|\x1b\[[0-?]*[ -/]*[@-~])`
+const tokenStart = `(^|[^A-Za-z0-9_]|` + csi + `)`
+
+// csi is a CSI sequence of a terminal (a color change, a cursor move): ESC [,
+// parameter bytes, intermediate bytes and a final byte. Other kinds of escape
+// sequence (ESC ( B, ESC c, the 8-bit CSI, a CSI that never ends) are not
+// recognised.
+const csi = `\x1b\[[0-?]*[ -/]*[@-~]`
 
 // builtin lists the built-in patterns, specific shapes first. All use RE2
 // (linear time), none can backtrack.
@@ -119,18 +125,21 @@ var builtin = []rule{
 	// runs to the last @ before the first /, ? or # (a password can hold an
 	// @). No word boundary in front of the scheme: a scheme glued to the
 	// text before it ("1https://", "_ssh://") is still the scheme of the URL.
-	// Host text that comes between the scheme and the user info and ends in
-	// a space or a tab, or in a comma and then a space or a tab
-	// ("tcp://host, user:password@host"), is covered when the user info has
-	// the form user:password; a token alone ("tcp://host, token@host") is
-	// not, because it cannot be told from an address in a list of hosts.
-	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)(?:[^\s\x00/?#]+@|[^\s\x00/?#]*[ \t][ \t]*[^\s\x00/?#]*:[^\s\x00/?#]*@)`), "${1}" + Replacement + "@"},
+	// The first alternative takes host text that comes between the scheme and
+	// the user info and ends in a space or a tab, or in a comma and then a
+	// space or a tab ("tcp://host, user:password@host"), when the user info
+	// has the form user:password; it comes first, so that a second
+	// credential behind the first one ("tcp://u:p@h1, bob:pw@h2") is covered
+	// too. A token alone behind such text ("tcp://host, token@host") is not,
+	// because it cannot be told from an address in a list of hosts. The
+	// second alternative is the user info right behind the scheme.
+	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)(?:[^\s\x00/?#]*[ \t][ \t]*[^\s\x00/?#]*:[^\s\x00/?#]*@|[^\s\x00/?#]+@)`), "${1}" + Replacement + "@"},
 	// Authorization: Bearer abc, Authorization=Basic abc, "authorization": "..."
-	{regexp.MustCompile(`(?i)\b(authorization["']?[\s\x00]*[:=][\s\x00]*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s\x00"',;]+)`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)` + tokenStart + `(authorization["']?[\s\x00]*[:=][\s\x00]*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic|digest|token)\s+)?[^\s\x00"',;]+)`), "${1}${2}" + Replacement},
 	// Cookie and Set-Cookie: the rest of the line
-	{regexp.MustCompile(`(?i)\b((?:set-)?cookie2?["']?[ \t\x00]*[:=][ \t\x00]*)[^\r\n\x00]+`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)` + tokenStart + `((?:set-)?cookie2?["']?[ \t\x00]*[:=][ \t\x00]*)[^\r\n\x00]+`), "${1}${2}" + Replacement},
 	// a bare bearer token
-	{regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)` + tokenStart + `(bearer\s+)[A-Za-z0-9._~+/=-]{16,}`), "${1}${2}" + Replacement},
 	// name=value and name: value, also in JSON ("name": "value"), when the
 	// name ends in a secret word (the word must be followed directly by the
 	// separator): "token_file" and "passwordauthentication" do not qualify
@@ -139,7 +148,7 @@ var builtin = []rule{
 	// pass and pwd as a name of their own or as the last word of one
 	// (DB_PASS=..., MYSQL_PWD=..., pwd: ...), not as the end of a longer word
 	// ("bypass=1")
-	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9])(?:pass|pwd)["']?\s*[=:]\s*)(` + valueRe + `)`), "${1}" + Replacement},
+	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9]|` + csi + `)(?:pass|pwd)["']?\s*[=:]\s*)(` + valueRe + `)`), "${1}" + Replacement},
 	// env-style NAME_KEY=value
 	{regexp.MustCompile(`(?i)((?:^|[^a-z0-9])[a-z0-9]+[_-]key["']?\s*=\s*)(` + valueRe + `)`), "${1}" + Replacement},
 	// --password hunter2, -token abc (a value that does not start with "-");
@@ -150,7 +159,7 @@ var builtin = []rule{
 	// "without-password" the "-password" is no flag and the next word is no
 	// value. Only a letter, digit, "_" or "-" in front keeps a match from
 	// starting, so a real flag behind any other separator stays redacted.
-	{regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(-[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)["']?[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}${2}" + Replacement},
+	{regexp.MustCompile(`(?i)(^|[^a-z0-9_-]|` + csi + `)(-[a-z0-9-]*(?:password|passwd|passphrase|secret|token|api-?key)["']?[\s\x00]+)[^\s\x00-][^\s\x00]*`), "${1}${2}" + Replacement},
 	// AWS access key ids
 	{regexp.MustCompile(tokenStart + `(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b`), "${1}" + Replacement},
 	// GitHub tokens

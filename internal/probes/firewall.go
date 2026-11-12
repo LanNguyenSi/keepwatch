@@ -486,14 +486,14 @@ func parseNft(out []byte) (nftView, error) {
 			continue // bridge, netdev, arp: not the host's incoming traffic
 		}
 		if c.Policy != "accept" && c.Policy != "drop" {
-			return nftView{}, fmt.Errorf("input chain %s/%s has policy %s", c.Table, c.Name, quoted(c.Policy))
+			return nftView{}, fmt.Errorf("input chain %s/%s has policy %s", hostText(c.Table), hostText(c.Name), quoted(c.Policy))
 		}
 		t, ok := tables[[2]string{c.Family, c.Table}]
 		if !ok {
-			return nftView{}, fmt.Errorf("chain %s/%s belongs to no listed table", c.Table, c.Name)
+			return nftView{}, fmt.Errorf("chain %s/%s belongs to no listed table", hostText(c.Table), hostText(c.Name))
 		}
 		if !nftTableActive(t) {
-			name := c.Family + " " + c.Table
+			name := c.Family + " " + hostText(c.Table)
 			if !skipped[name] {
 				skipped[name] = true
 				v.notes = append(v.notes, fmt.Sprintf("nftables table %s is dormant or has flags that are not known, not counted", name))
@@ -502,7 +502,7 @@ func parseNft(out []byte) (nftView, error) {
 		}
 		if c.Policy == "drop" {
 			for _, f := range fams {
-				v.drops[f] = append(v.drops[f], fmt.Sprintf("%s %s/%s", c.Family, c.Table, c.Name))
+				v.drops[f] = append(v.drops[f], fmt.Sprintf("%s %s/%s", c.Family, hostText(c.Table), hostText(c.Name)))
 			}
 		}
 	}

@@ -61,8 +61,8 @@ func ParseSeverity(s string) (Severity, error) {
 // changed by a probe (not cleaned, not cut, not quoted): two items that differ
 // only in a control character, or only past the length a report shows, are two
 // items. Every probe hands the text of the host on as read, into Detail and
-// into the Summary of a Result too; none cleans, cuts, escapes or quotes it.
-// A probe holds no more of it than the command output it read.
+// into the Summary of a Result too; none cleans, escapes or replaces it, and
+// a piece is cut only far beyond what a report shows (see the probes package).
 // The one change is made where the
 // text leaves the program or is stored (report, notices, state, history), by
 // redact.Redactor.Clean: redact, then escape, then cut. A change made before

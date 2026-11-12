@@ -103,6 +103,14 @@ var positives = []struct {
 	{"url scheme after a digit", "1https://bob:s3cret@host.example/x", "s3cret", "1https://[REDACTED]@host.example/x"},
 	{"url scheme after an underscore", "_ssh://bob:s3cret@host.example", "s3cret", "_ssh://[REDACTED]@host.example"},
 
+	{"url second credential behind the first", "tcp://u:p@h1.example, bob:s3cret@h2.example", "s3cret", "tcp://[REDACTED]@h2.example"},
+	{"url after a word that looks like a mailto link", "https://example.com mailto:admin@example.com", "mailto:admin", "https://[REDACTED]@example.com"},
+	{"authorization after a color sequence", "\x1b[31mAuthorization: Bearer abcdef0123456789abcdef", "abcdef0123456789", "\x1b[31mAuthorization: [REDACTED]"},
+	{"cookie after a color sequence", "\x1b[0mCookie: sid=abcdef", "abcdef", "\x1b[0mCookie: [REDACTED]"},
+	{"bearer after a color sequence", "\x1b[1msent bearer abcdef0123456789abcdef.xyz", "abcdef0123456789", "bearer [REDACTED]"},
+	{"flag after a color sequence", "\x1b[32m--password hunter2", "hunter2", "--password [REDACTED]"},
+	{"pass after a color sequence", "\x1b[32mpass=hunter2", "hunter2", "pass=[REDACTED]"},
+	{"pwd after a color sequence", "\x1b[32mpwd=hunter2", "hunter2", "pwd=[REDACTED]"},
 	// Env-style names: the secret word is the last word of the name.
 	{"secret key", "SECRET_KEY=hunter2 next", "hunter2", "SECRET_KEY=[REDACTED] next"},
 	{"secret-key lower", "secret-key: hunter2", "hunter2", "secret-key: [REDACTED]"},
@@ -537,6 +545,13 @@ func TestShapesLeftOutOnPurpose(t *testing.T) {
 		// from an address in a list
 		"token user info after host text and a space": "tcp://host token@host.example",
 		"token user info after a comma and a space":   "tcp://host, token@host.example",
+		// escape sequences that are not a CSI sequence
+		"aws key id after ESC ( B":      "\x1b(B" + fakeAWS,
+		"aws key id after ESC c":        "\x1bc" + fakeAWS,
+		"aws key id after an 8-bit CSI": "\u009b31m" + fakeAWS,
+		"aws key id after an open CSI":  "\x1b[31" + fakeAWS,
+		"cookie after ESC ( B":          "\x1b(BCookie: sid=abcdef",
+		"pass after an 8-bit CSI":       "\u009b31mpass=hunter2",
 		// two separators in a row, a newline, a NUL
 		"user info after two hops":   "tcp://a b c:pw@host.example",
 		"user info after a newline":  "tcp://a\nbob:s3cret@host.example",

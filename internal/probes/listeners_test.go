@@ -318,8 +318,9 @@ func TestListenersNewlineInProcessName(t *testing.T) {
 			if !eq(subjects(o), want) {
 				t.Fatalf("subjects = %v, want %v", subjects(o), want)
 			}
+			wantSummary(t, o, "process names may be missing")
 			for _, e := range o.Evidence {
-				if !strings.Contains(e.Detail, "processes: unknown") || !strings.Contains(e.Detail, "may be missing") {
+				if !strings.Contains(e.Detail, "processes: unknown") {
 					t.Fatalf("detail = %q", e.Detail)
 				}
 			}

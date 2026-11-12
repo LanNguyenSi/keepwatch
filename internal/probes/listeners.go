@@ -86,8 +86,9 @@ const trustedMaxOutput = int64(64 << 20)
 // Each listener that is not allowed is one evidence item with subject
 // "<proto>/<address>:<port>" (IPv6 in brackets, the interface suffix kept
 // after the address, for example "udp/[fe80::1]%eth0:546") and the owning
-// process names in the detail, shown quoted and sanitised, never
-// interpreted.
+// process names in the detail, shown in quotes, raw (the report escapes
+// them), never interpreted. When the best-effort ss -p run fails, the summary
+// says so once.
 //
 // At most 100 evidence items are returned, sorted by subject: the first 99
 // and a marker item "(N more not shown)"; the summary says "and N more". The
@@ -208,10 +209,12 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	sort.Slice(bad, func(i, j int) bool { return bad[i].subject() < bad[j].subject() })
 
 	var ev []result.Evidence
+	note := ""
 	if len(bad) > 0 {
-		procs, note := l.processes(ctx, env)
+		var procs map[string][]string
+		procs, note = l.processes(ctx, env)
 		for _, s := range bad {
-			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()], note)})
+			ev = append(ev, result.Evidence{Subject: s.subject(), Detail: processDetail(procs[s.subject()])})
 		}
 	}
 	// A local user can open tens of thousands of sockets, so the evidence is
@@ -222,13 +225,14 @@ func (l listenersProbe) Run(ctx context.Context, env *Env) Outcome {
 	case len(failures) > 0:
 		o := partialError(failures, ev)
 		o.Evidence, o.Set = shown, set
+		o.Summary += noteSuffix(note)
 		return o
 	case len(ev) == 0:
 		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%d listening sockets, all allowed", len(socks))}
 	}
 	return Outcome{
 		Status:   result.Fail,
-		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden),
+		Summary:  fmt.Sprintf("%d of %d listening sockets are not in the allowlist", len(ev), len(socks)) + moreNote(hidden) + noteSuffix(note),
 		Evidence: shown,
 		Set:      set,
 	}
@@ -263,13 +267,20 @@ func (l listenersProbe) processes(ctx context.Context, env *Env) (map[string][]s
 	return names, "process names may be missing, " + strings.Join(problems, "; ")
 }
 
-// processDetail renders the detail of one listener.
-func processDetail(names []string, note string) string {
-	d := "listening, processes: " + procList(names)
-	if note != "" {
-		d += " (" + note + ")"
+// processDetail renders the detail of one listener. The note about a ss -p
+// run that went wrong is not repeated here: it can hold a line of the host's
+// output, and one copy per listener would multiply it by the number of
+// listeners. It stands once in the summary (see noteSuffix).
+func processDetail(names []string) string {
+	return "listening, processes: " + procList(names)
+}
+
+// noteSuffix is the note of processes as the end of a summary.
+func noteSuffix(note string) string {
+	if note == "" {
+		return ""
 	}
-	return d
+	return "; " + note
 }
 
 // allowed reports whether an allowlist entry covers the socket. The "*" that

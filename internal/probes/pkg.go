@@ -89,9 +89,9 @@ func (p packageProbe) parse(out string) Outcome {
 		last = status
 	}
 	if installed {
-		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%s %s is installed", p.pkg, installedVersion)}
+		return Outcome{Status: result.Pass, Summary: fmt.Sprintf("%s %s is installed", p.pkg, hostText(installedVersion))}
 	}
-	return p.fail(last)
+	return p.fail(hostText(last))
 }
 
 func (p packageProbe) fail(detail string) Outcome {

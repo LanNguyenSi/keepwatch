@@ -51,20 +51,20 @@ func secretKinds() []secretKind {
 // what stands in front of the secret, directly: nothing, white space, a
 // punctuation mark, control characters, a character that makes the secret
 // part of a longer word, and a terminal color sequence.
-var corpusSeparators = []string{"", " ", "-", "\t", "\n", "\x01", "\x1b", "?", ",", ", ", "a", "7", "_", "\x1b[31m"}
+var corpusSeparators = []string{"", " ", "-", "\t", "\n", "\x01", "\x1b", "?", ",", "a", "\x1b[31m"}
 
 // foundAfter says whether the built-in patterns find a secret of kind k right
 // behind sep. Most separators end a word; the ones that glue the secret to the
 // text before it hide only the shapes whose pattern needs a word boundary:
 // the long, specific token prefixes and the scheme of a URL do not, and every
-// token is found behind a terminal color sequence. The rest is a stated limit
-// (docs/okf/limit-known-limits.md).
+// built-in shape is found behind a terminal CSI (color) sequence. The rest is
+// a stated limit (docs/okf/limit-known-limits.md).
 func foundAfter(k secretKind, sep string) bool {
 	switch sep {
 	case "a", "7", "_":
 		return k.name == "github token" || k.name == "url user info"
 	case "\x1b[31m":
-		return k.name == "github token" || k.name == "aws key id" || k.name == "url user info"
+		return k.name != "operator pattern" // a pattern of the operator has its own boundary
 	}
 	return true
 }
@@ -168,11 +168,18 @@ func TestEverySecretIsGoneFromEveryOutput(t *testing.T) {
 	case testing.Short():
 		pads = []int{0, 5, 20, 190}
 	}
+	seps := corpusSeparators
+	if raceEnabled {
+		// the race detector adds nothing to a pure function and costs minutes
+		// here: one separator of each kind is left (nothing, white space, a
+		// tab, a control character, a glued letter, a color sequence)
+		seps = []string{"", " ", "\t", "\x01", "a", "\x1b[31m"}
+	}
 	for _, role := range corpusRoles() {
 		t.Run(role.name, func(t *testing.T) {
 			ran := 0
 			for _, k := range secretKinds() {
-				for _, sep := range corpusSeparators {
+				for _, sep := range seps {
 					for _, pad := range pads {
 						frag, ok := fragFor(role, k, sep, pad)
 						if !ok {

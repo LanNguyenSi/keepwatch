@@ -15,8 +15,11 @@ report.
   reboot, package, sshd, fail2ban and service checks used to cut such text to a
   few dozen characters (and replace control characters by `?`) first, so a
   token that straddled the cut kept a prefix that no pattern matched and
-  reached the report, the notification or the stored state. The one change is
-  now made where the text leaves the program, as for the other checks.
+  reached the report. The one change is now made where the text leaves the
+  program, as for the other checks. A probe still cuts a piece of host text at
+  32 KiB, far beyond what a report shows, so one very long line cannot be
+  held or copied many times; the note about a failed `ss -p` run in the
+  listeners check now stands once in the summary instead of in every item.
 - Redaction closes two gaps. A GitHub, GitLab or Slack token glued to the text
   in front of it (`aghp_...`, a digit or an underscore before it) is found, and
   so is any token behind a terminal color sequence. URL user info of the form
@@ -24,7 +27,18 @@ report.
   between the scheme and the user info (`tcp://host, user:password@host`), and
   a URL scheme glued to a digit or an underscore is recognised. Token-only user
   info behind host text and short or common token prefixes glued to a word stay
-  as before, to keep ordinary text from being redacted.
+  as before, to keep ordinary text from being redacted. Keyword rules
+  (`Authorization`, `Cookie`, `bearer`, `--password`, `pass=`, `pwd=`) now also
+  work directly behind a terminal color sequence, and a second `user:password`
+  behind the first one in a list of URLs is found too.
+
+### Changed
+
+- Report texts of the firewall, security updates, listeners, reboot, package,
+  sshd, fail2ban and service checks show host text as it is: control
+  characters appear escaped (`\x1b`) instead of as `?`, texts are no longer
+  cut at 20 to 400 characters, quotes inside a quoted line are no longer
+  escaped, and sshd values keep the case the host printed.
 
 ## [0.1.0] - 2026-11-11
 

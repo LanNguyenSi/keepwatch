@@ -45,16 +45,17 @@ adjacent ones stop short.
   that plan the scheduled root runs do walk them
   (`docs/running.md:154-155#"not examined by"`). A hostile ancestor makes the
   manual and the scheduled answer differ, on purpose.
-- **A probe's text is as long as the output it came from.** No probe cuts
-  host text, so a summary or detail can hold up to the stream limit of the
-  command it was taken from (1 MiB, or the larger limit a run asks for by
-  name: `internal/execx/execx.go:19#"DefaultMaxOutput"`,
-  `internal/probes/listeners.go:23#"trustedMaxOutput"`) until `Clean` cuts it
-  at `MaxFieldRunes`. That is memory held for one run, not output.
+- **A probe holds host text up to a cut far beyond the report's.** A piece of
+  host text in a summary or a detail is cut at `maxHostText` (32 KiB,
+  `internal/probes/run.go:100#"const maxHostText"`), and the output it came from at
+  the stream limit of its command (`internal/execx/execx.go:19#"DefaultMaxOutput"`,
+  or the larger limit a run asks for by name:
+  `internal/probes/listeners.go:23#"trustedMaxOutput"`), until `Clean` cuts a
+  field at `MaxFieldRunes`. That is memory held for one run, not output.
 - **Two parsers still tidy white space.** The sshd probe collapses the white
   space of a value (`internal/probes/sshd.go:147#"raw := strings.Join"`) and the
   listeners probe does the same for the process column of `ss -p`
-  (`internal/probes/listeners.go:365#"strings.Join(f[5:]"`): a run of white
+  (`internal/probes/listeners.go:376#"strings.Join(f[5:]"`): a run of white
   space, including characters such as U+000B that the redactor does not count
   as white space, becomes one space before the text is shown.
 - **Redaction is shape-matching.** It knows the listed shapes and "cannot
@@ -69,15 +70,19 @@ adjacent ones stop short.
     Google, Stripe, JWT) glued to a letter, digit or underscore in front of it
     (the start rule is `internal/redact/redact.go:111#"const tokenStart"`; GitHub,
     GitLab and Slack tokens, and the scheme of a URL, are found after any
-    character, and every token is found behind a terminal control sequence);
+    character, and every built-in shape is found behind a CSI (color) sequence;
+    other escape sequences are not recognised: `ESC ( B`, `ESC c`, the 8-bit CSI
+    `U+009B` and a CSI that never ends hide the shapes as a letter would);
   - a token directly followed by a word character or an underscore, since the
     pattern ends at a word boundary;
   - URL user info behind host text and a separator
     (`tcp://host, user:password@host`) only in the form `user:password`:
     a token alone (`tcp://host, token@host`) cannot be told from a list of
     addresses, and user info behind two separators, a newline or a NUL byte is
-    not looked for (the URL rule is
-    `internal/redact/redact.go:118#"scheme://user:password@host and scheme://token@host"`);
+    not looked for; the `user:password` form can also redact ordinary text such
+    as `https://example.com mailto:admin@example.com`, which is accepted and
+    pinned in the tests (the URL rule is
+    `internal/redact/redact.go:124#"scheme://user:password@host and scheme://token@host"`);
   - a secret with no shape of its own, as before.
 - **A check-then-exec gap remains.** Trust in execx rests on the trusted
   directories being root-owned; Go has no `fexecve`, so anyone who could

@@ -35,27 +35,37 @@ matches; escaping early removes the word boundary a pattern needs), and
 cleaning the stored comparison keys is worse still, because the diff would
 then compare display forms instead of what the check saw.
 
-Every probe obeys it, not only the four that the comment on `Evidence`
-names. No probe has a function that cuts, escapes or replaces characters of
-host text: the only helper left in `internal/probes/run.go` that touches such
-text is `quoted`, which wraps it in double quotes and changes nothing inside
-(`internal/probes/run.go:94#"func quoted"`). The error texts that quote a line
+Every probe obeys it. No probe escapes or replaces characters of host text,
+and none cuts it short: the helpers in `internal/probes/run.go` that touch
+such text are `quoted`, which wraps it in double quotes and changes nothing
+inside (the quotes are no delimiter a reader can rely on), and `hostText`,
+which cuts a piece at `maxHostText` (32 KiB, on a character boundary, ending
+in `...`) and is used by `quoted` and at the other places that put a piece of
+host text into a summary or a detail (`internal/probes/run.go:103#"func hostText"`).
+`firstLine` cuts a command's output at its first newline to quote it, which is
+a choice of which text to show, not a change to it. The error texts that quote a line
 of command output (`... does not look like a ... listener: "line"`) use it
 instead of `%q`, because `%q` escapes quotes and backslashes and so turns
 `password="x"` into `password=\"x\"`, where the value pattern no longer sees
-the quoted value. How much host text a probe holds is bounded where the output
-is read, not by a cut in the probe: `execx` keeps at most
-`DefaultMaxOutput` per stream (`internal/execx/execx.go:19#"DefaultMaxOutput"`),
-and the three runs that need more ask for it by name
-(`internal/probes/listeners.go:23#"trustedMaxOutput"`, the nft and the docker
-inspect limits). Every text in a summary or a detail is a piece of such an
-output, so it is at most that long when `Clean` cuts it at `MaxFieldRunes`.
+the quoted value. How much host text a probe holds is bounded in two places.
+`execx` keeps at most `DefaultMaxOutput` per stream
+(`internal/execx/execx.go:19#"DefaultMaxOutput"`), and the three runs that need
+more ask for it by name (`internal/probes/listeners.go:23#"trustedMaxOutput"`,
+the nft and the docker inspect limits). A text in a summary or a detail may
+also come from a file or be joined or copied from several pieces of output, so
+each piece is cut at `maxHostText`, far above `MaxFieldRunes` plus the length
+of a secret: a secret that starts inside what a report shows is whole when
+`Clean` redacts it, and a match with no length of its own (a private key
+block, a quote that is never closed) ends where the text does, which is where
+the cut is. A note that would otherwise be copied into every item of an
+outcome stands once in the summary (the failed `ss -p` run of the listeners
+probe).
 The sshd probe keeps the case of a value for display and compares a lower case
 copy (`internal/probes/sshd.go:147#"raw := strings.Join"`), since the AWS
 key id pattern is case sensitive.
 
 The single transformation is `redact.Redactor.Clean`: redact, then escape,
-then cut to `MaxFieldRunes` (`internal/redact/redact.go:241-246#"func (r *Redactor) Clean"`).
+then cut to `MaxFieldRunes` (`internal/redact/redact.go:250-255#"func (r *Redactor) Clean"`).
 Its order is itself an invariant, documented above the package
 (`internal/redact/redact.go:13#"The order matters"`), and the escaping
 step is specified in `docs/running.md` under "Output safety"; this bundle

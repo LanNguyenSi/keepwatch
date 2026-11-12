@@ -145,7 +145,7 @@ func parseSSHDConfig(out string) (map[string][]sshdValue, error) {
 			return nil, fmt.Errorf("line %d is not a keyword line: %s", i+1, quoted(line))
 		}
 		raw := strings.Join(strings.Fields(rest), " ")
-		values[kw] = append(values[kw], sshdValue{norm: strings.ToLower(raw), raw: raw})
+		values[kw] = append(values[kw], sshdValue{norm: strings.ToLower(raw), raw: hostText(raw)})
 	}
 	if len(values) == 0 {
 		return nil, fmt.Errorf("empty output")
