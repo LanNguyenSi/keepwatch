@@ -69,6 +69,16 @@ report.
   and can filter records by kind, incident and time. It does not notice a log
   that was cut off at its end, and anyone who can write the file can rewrite
   all of it consistently; both limits are documented.
+- Rules for the daemon that turn journal events into signals: an ssh brute
+  force rule (failed and invalid-user logins, plus refused pre-auth
+  connections, per source address or IPv6 /64), a restart loop rule (systemd
+  automatic restarts per unit) and an OOM kill rule (kernel and systemd lines,
+  by unit where the unit is known, otherwise by command name). They count only
+  lines whose sender journald vouches for (sshd as root in the ssh unit, PID
+  1, the kernel), so a local user cannot inject lines, and a name a user can
+  choose inside a genuine line (a cgroup name, a command name, an ssh user
+  name) does not decide which unit or address a signal names. They keep a
+  capped amount of state per rule.
 
 ### Security
 
