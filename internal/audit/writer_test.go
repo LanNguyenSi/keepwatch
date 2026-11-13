@@ -385,13 +385,21 @@ func TestOpenRefusesChangedFile(t *testing.T) {
 	if _, err := (&Writer{f: gone, size: w.Size(), max: DefaultMaxSize}).resume(); err == nil || errors.Is(err, securefile.ErrChanged) {
 		t.Fatalf("closed file: got %v", err)
 	}
-	// A file that shrank between the check and the read.
-	x := &Writer{f: w.f, size: w.Size(), max: DefaultMaxSize}
-	if err := os.Truncate(logPath(p), w.Size()-3); err != nil {
-		t.Fatal(err)
+	// A file that shrank before the check, and one that shrank between the
+	// check and the read.
+	size := w.Size()
+	ran := false
+	x := &Writer{f: w.f, size: size, max: DefaultMaxSize, afterStat: func() {
+		ran = true
+		if err := os.Truncate(logPath(p), size-3); err != nil {
+			t.Error(err)
+		}
+	}}
+	if _, err := x.resume(); !errors.Is(err, securefile.ErrChanged) || !ran {
+		t.Fatalf("shrunk after the check (hook ran: %v): got %v", ran, err)
 	}
-	if _, err := x.resume(); !errors.Is(err, securefile.ErrChanged) {
-		t.Fatalf("shrunk: got %v", err)
+	if _, err := (&Writer{f: w.f, size: size, max: DefaultMaxSize}).resume(); !errors.Is(err, securefile.ErrChanged) {
+		t.Fatalf("shrunk before the check: got %v", err)
 	}
 }
 

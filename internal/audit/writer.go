@@ -103,6 +103,10 @@ type Writer struct {
 	failed   error
 	closed   bool
 	terminal bool
+
+	// afterStat runs between the size check and the read of resume, in
+	// tests.
+	afterStat func()
 }
 
 // Open opens (creating it if needed) the audit log in dir through
@@ -208,6 +212,9 @@ func (w *Writer) resume() (*torn, error) {
 		return nil, err
 	} else if fi.Size() != w.size {
 		return nil, fmt.Errorf("%s was %d bytes when opened and %d bytes when read: %w", FileName, w.size, fi.Size(), securefile.ErrChanged)
+	}
+	if w.afterStat != nil {
+		w.afterStat()
 	}
 	// The window may start in the middle of a line. That first line is then
 	// cut and so not a record, which is all that is needed of it.
