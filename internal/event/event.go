@@ -10,7 +10,11 @@
 //
 // Trust: journald sets some fields itself (names starting with an
 // underscore) and takes others from the sender, which any local user can
-// forge. Rules must base trust decisions only on the journald-set fields.
+// forge. Rules must base trust decisions only on journald-set fields, and
+// among those only UID, SystemdUnit, PID (as PID 1) and Transport carry
+// identity: Comm is set by journald but its value is the name the process
+// chose for itself. An absent UID is -1, never 0, so a missing field can
+// never read as root.
 //
 // Posture-sourced Subject and Summary are stored display text; the daemon
 // cleans them again before they are shown or stored.
@@ -68,11 +72,13 @@ type Event struct {
 	// (trusted).
 	Transport string
 	// Message is MESSAGE. Set by the sender (untrusted, forgeable by any
-	// local user), including kernel text relayed through a transport.
+	// local user). With Transport kernel it comes from the kernel ring
+	// buffer, which only root can write to.
 	Message string
 	// Comm is _COMM, the command name of the logging process. Set by
-	// journald (trusted). It is not the OOM victim: a rule parses the
-	// victim name from Message.
+	// journald from the name the process chose for itself (prctl, or the
+	// name of a copied binary), so never base a trust decision on it. It
+	// is not the OOM victim: a rule parses the victim name from Message.
 	Comm string
 	// UnitResult is the systemd UNIT_RESULT field, for example
 	// "exit-code" or "oom-kill". Set by the sender (untrusted, forgeable
