@@ -134,12 +134,14 @@ type StreamResult struct {
 	// DroppedLines counts stdout lines longer than StreamOpts.MaxLine that
 	// were not delivered.
 	DroppedLines int
-	// IOIncomplete is set when, after the program exited, no further stdout
-	// line arrived for a grace period while the output pipes were still open
-	// (a leftover child held them) and they had to be cut: lines or stderr
-	// may be missing. Time spent inside onLine does not count towards the
-	// grace period. A successful exit also returns ErrIOTimeout, as Run
-	// does.
+	// IOIncomplete is set when the program exited but the output pipes were
+	// still open (a leftover child held them) and had to be cut: lines or
+	// stderr may be missing. The cut happens when the wall time since the
+	// exit, minus the time spent inside onLine since then, reaches the grace
+	// period Run uses, or when more than a pipe's worth of stdout (about
+	// 1 MiB) arrived after the exit. A backlog the program itself left in
+	// the pipe is delivered in full, however slow onLine is. A successful
+	// exit also returns ErrIOTimeout, as Run does.
 	IOIncomplete bool
 	Duration     time.Duration
 }

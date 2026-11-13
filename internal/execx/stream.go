@@ -12,8 +12,21 @@ import (
 
 var _ Streamer = (*Real)(nil)
 
+// postExitMaxBytes bounds what Stream accepts from stdout after the program
+// exited. A real backlog cannot exceed the pipe buffer (64 KiB on linux and
+// darwin) plus the reader's own buffers and at most one pending line, so a
+// stream that goes past this much is fed by a leftover process, not by the
+// program, and is ended with IOIncomplete. Dropped lines count by their full
+// length. One MaxLine is added to the cap, so a single legitimate long line
+// in the backlog never trips it.
+const postExitMaxBytes = 1 << 20
+
 // killProcessGroup is killGroup; a variable so a test can count the calls.
 var killProcessGroup = killGroup
+
+// streamCmdHook, when set by a test, sees the command after it was set up and
+// before it starts.
+var streamCmdHook func(*exec.Cmd)
 
 // withDefaults fills the zero values. Timeout and IdleTimeout stay as given:
 // zero (or negative) means no limit.
@@ -41,9 +54,10 @@ func (o StreamOpts) withDefaults() StreamOpts {
 // anything starts), gives the child its own pipes and the same minimal
 // environment, and on unix runs it in its own process group, which is killed
 // when Stream returns on any path, so everything left in that group does not
-// outlive the call. A grandchild that started a new session is outside the
-// group and is not killed. No goroutine started by Stream outlives it, also
-// when onLine panics and the caller recovers.
+// outlive the call (it is signalled once, by the cleanup; cancelling only
+// kills the direct child). A grandchild that started a new session is outside
+// the group and is not killed. No goroutine started by Stream outlives it,
+// also when onLine panics and the caller recovers.
 //
 // Lines are split at '\n'; a final line without a newline is delivered too.
 // A line longer than StreamOpts.MaxLine is dropped and counted, see
@@ -51,9 +65,12 @@ func (o StreamOpts) withDefaults() StreamOpts {
 // StreamOpts.MaxStderr.
 //
 // After the program exited, Stream keeps reading stdout until it ends, but
-// gives up when no line arrives for the same grace period Run uses and a
-// leftover child holds the pipe open (StreamResult.IOIncomplete). The grace
-// period restarts after every line, so a slow onLine never causes it.
+// gives up, with IOIncomplete, when a leftover child still holds the pipe and
+// either the wall time since the exit minus the time spent inside onLine
+// since then reaches the grace period Run uses, or more than postExitMaxBytes
+// bytes were read since the exit. A backlog the program left in the pipe is
+// delivered in full even to a slow onLine; a leftover process that keeps
+// writing cannot keep the stream alive.
 func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLine func([]byte) error) (StreamResult, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return StreamResult{}, ErrEmptyArgv
@@ -88,6 +105,12 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 	}
 	cmd.Stdout, cmd.Stderr = outW, errW
 	configureKill(cmd)
+	// Cancelling kills the direct child only. The process group is signalled
+	// by cleanup alone, once.
+	cmd.Cancel = func() error { return cmd.Process.Kill() }
+	if streamCmdHook != nil {
+		streamCmdHook(cmd)
+	}
 
 	start := time.Now()
 	startErr := cmd.Start()
@@ -125,9 +148,11 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 
 	// cleanup ends the child and everything left in its process group and
 	// joins every goroutine and descriptor Stream owns: the reader, the
-	// waiter and the stderr copy. It is the only place the stream path
-	// kills, and it runs once, so the group is signalled once and never
-	// again after the child was reaped, when its pid could have been reused.
+	// waiter and the stderr copy. It is the only place that signals the
+	// process group, and it runs once, so the group is signalled once per
+	// stream (cancel only kills the direct child, see cmd.Cancel). On the
+	// self-exit path that one signal comes after the child was reaped, as in
+	// Run; on every abort path the child is still unreaped when it is sent.
 	// It runs after the loop and, if onLine panics, from the deferred call.
 	cleanup := func() {
 		if cleaned {
@@ -167,6 +192,13 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 		}
 	}()
 
+	// Post-exit bookkeeping: when the exit was seen, the time spent inside
+	// onLine since then, and the bytes read since then.
+	var (
+		exitAt    time.Time
+		cbSince   time.Duration
+		postBytes int64
+	)
 	linesC := rd.lines
 	wc := (<-chan error)(waitC)
 loop:
@@ -178,25 +210,45 @@ loop:
 				linesC = nil
 				continue
 			}
+			if exited {
+				postBytes += int64(m.size)
+				if postBytes > postExitMaxBytes+int64(opts.MaxLine) {
+					incomplete = true
+					break loop
+				}
+			}
 			if onLine != nil && !m.dropped {
-				if err := onLine(m.line); err != nil {
+				began := time.Now()
+				err := onLine(m.line)
+				if exited {
+					cbSince += time.Since(began)
+				}
+				if err != nil {
 					abortErr = err
 					break loop
 				}
 			}
-			// The idle and grace timers measure waiting for the reader, not
-			// time inside onLine: they restart once the line was handled.
+			// The idle timer measures waiting for the reader, not time
+			// inside onLine: it restarts once the line was handled.
 			if idle != nil {
 				resetTimer(idle, opts.IdleTimeout)
 			}
+			// The post-exit budget is wall time since the exit minus the
+			// time inside onLine; it is not restarted by lines.
 			if grace != nil {
-				resetTimer(grace, waitDelay)
+				left := waitDelay - (time.Since(exitAt) - cbSince)
+				if left <= 0 {
+					incomplete = true
+					break loop
+				}
+				resetTimer(grace, left)
 			}
 		case waitErr = <-wc:
 			exited = true
 			wc = nil
-			// From here a leftover child is bounded by the grace period.
+			// From here a leftover child is bounded by the post-exit budget.
 			idleC = nil
+			exitAt = time.Now()
 			grace = time.NewTimer(waitDelay)
 			graceC = grace.C
 		case <-graceC:
@@ -261,6 +313,9 @@ func resetTimer(t *time.Timer, d time.Duration) {
 type lineMsg struct {
 	line    []byte
 	dropped bool
+	// size is the number of bytes the line took from the pipe, its newline
+	// included, whether or not the line was dropped.
+	size int
 }
 
 // lineReader splits one pipe into lines on its own goroutine.
@@ -283,8 +338,10 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 		br := bufio.NewReaderSize(r, 4096)
 		var acc []byte
 		over := false
+		size := 0
 		for {
 			chunk, err := br.ReadSlice('\n')
+			size += len(chunk)
 			eol := err == nil
 			data := chunk
 			if eol {
@@ -302,7 +359,7 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 				continue
 			}
 			if eol || over || len(acc) > 0 {
-				m := lineMsg{dropped: over}
+				m := lineMsg{dropped: over, size: size}
 				if over {
 					lr.dropped++
 				} else {
@@ -315,7 +372,7 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 				case <-stop:
 					return
 				}
-				acc, over = acc[:0], false
+				acc, over, size = acc[:0], false, 0
 			}
 			if !eol {
 				return

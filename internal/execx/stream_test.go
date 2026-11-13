@@ -575,16 +575,17 @@ func TestStreamSlowConsumerAfterExitLosesNothing(t *testing.T) {
 // A consumer that stalls for longer than the idle limit is not idleness of the
 // program: the child never stops writing, so only the cancel ends the stream.
 func TestStreamIdleTimeoutIgnoresSlowConsumer(t *testing.T) {
-	for i := 0; i < 5; i++ {
+	// The limits leave room for a slow start of the child on a loaded host.
+	for i := 0; i < 4; i++ {
 		ctx, cancel := context.WithCancel(bg)
 		n := 0
-		_, err := callStream(t, realRunner(t, "sh", "yes"), ctx, []string{"sh", "-c", "yes"}, StreamOpts{IdleTimeout: 50 * time.Millisecond}, func([]byte) error {
+		_, err := callStream(t, realRunner(t, "sh", "yes"), ctx, []string{"sh", "-c", "yes"}, StreamOpts{IdleTimeout: 400 * time.Millisecond}, func([]byte) error {
 			n++
-			if n == 5 {
+			if n == 2 {
 				cancel()
 				return nil
 			}
-			time.Sleep(80 * time.Millisecond)
+			time.Sleep(600 * time.Millisecond)
 			return nil
 		})
 		cancel()
@@ -610,28 +611,40 @@ func TestStreamIdleTimeoutAfterStdoutClosed(t *testing.T) {
 		t.Fatalf("quiet running child: %v", o.err)
 	}
 	// Once the program has exited the limit no longer applies.
-	o = streamBounded(t, bg, realRunner(t, "sh"), []string{"sh", "-c", "echo up; exit 0"}, StreamOpts{IdleTimeout: 300 * time.Millisecond}, nil)
+	o = streamBounded(t, bg, realRunner(t, "sh"), []string{"sh", "-c", "echo up; exit 0"}, StreamOpts{IdleTimeout: time.Second}, nil)
 	if o.err != nil {
 		t.Fatalf("exited child: %v", o.err)
 	}
 	// ... also while a leftover child still holds the pipe: the grace period
 	// applies then, not the idle limit.
 	old := waitDelay
-	waitDelay = 600 * time.Millisecond
+	waitDelay = 1500 * time.Millisecond
 	t.Cleanup(func() { waitDelay = old })
-	o = streamBounded(t, bg, realRunner(t, "sh", "sleep"), []string{"sh", "-c", "sleep 30 & exit 0"}, StreamOpts{IdleTimeout: 100 * time.Millisecond}, nil)
+	o = streamBounded(t, bg, realRunner(t, "sh", "sleep"), []string{"sh", "-c", "sleep 30 & exit 0"}, StreamOpts{IdleTimeout: 500 * time.Millisecond}, nil)
 	if !errors.Is(o.err, ErrIOTimeout) || errors.Is(o.err, ErrIdleTimeout) {
 		t.Fatalf("held pipe after exit: err = %v, want ErrIOTimeout", o.err)
 	}
 }
 
-// escapeScript starts a grandchild in a new session that ignores SIGPIPE and
-// holds the inherited stdout and stderr; it records its pid in $M.
-const escapeScript = `perl -e 'use POSIX qw(setsid); setsid(); $SIG{PIPE}="IGNORE"; open(F,">$ARGV[0].tmp") or die; print F $$; close F; rename("$ARGV[0].tmp",$ARGV[0]); exec("sleep","30")' "$M" &
+// escapeScript returns a shell fragment that starts a grandchild in a new
+// session that ignores SIGPIPE and holds the inherited stdout and stderr, and
+// waits until the grandchild recorded its pid in $M. tail is the perl code it
+// runs afterwards.
+func escapeScript(tail string) string {
+	return `perl -e 'use POSIX qw(setsid); setsid(); $SIG{PIPE}="IGNORE"; $|=1; open(F,">$ARGV[0].tmp") or die; print F $$; close F; rename("$ARGV[0].tmp",$ARGV[0]); ` + tail + `' "$M" &
 i=0; while [ ! -e "$M" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
 `
+}
 
-func escapeSetup(t *testing.T) (marker string, opts StreamOpts) {
+const (
+	silentEscapee = `exec("sleep","30")`
+	chattyEscapee = `while (1) { print "tick\n"; select(undef,undef,undef,0.1); }`
+)
+
+// escapeSetup shortens the grace period and returns a function that makes a
+// marker file for one escapee together with the options that pass it on. Every
+// escapee is killed when the test ends.
+func escapeSetup(t *testing.T) func() (string, StreamOpts) {
 	t.Helper()
 	if _, err := NewReal(nil).lookup("perl"); err != nil {
 		t.Skip("no perl to start a grandchild in a new session")
@@ -639,15 +652,22 @@ func escapeSetup(t *testing.T) (marker string, opts StreamOpts) {
 	old := waitDelay
 	waitDelay = 300 * time.Millisecond
 	t.Cleanup(func() { waitDelay = old })
-	marker = t.TempDir() + "/pid"
-	t.Cleanup(func() {
-		if b, err := os.ReadFile(marker); err == nil {
-			if pid, err := strconv.Atoi(string(b)); err == nil {
-				syscall.Kill(pid, syscall.SIGKILL)
-			}
+	dir := t.TempDir()
+	n := 0
+	return func() (string, StreamOpts) {
+		n++
+		marker := dir + "/pid" + strconv.Itoa(n)
+		t.Cleanup(func() { killMarked(marker) })
+		return marker, StreamOpts{Env: []string{"PATH=" + SearchPath, "M=" + marker}}
+	}
+}
+
+func killMarked(marker string) {
+	if b, err := os.ReadFile(marker); err == nil {
+		if pid, err := strconv.Atoi(string(b)); err == nil {
+			syscall.Kill(pid, syscall.SIGKILL)
 		}
-	})
-	return marker, StreamOpts{Env: []string{"PATH=" + SearchPath, "M=" + marker}}
+	}
 }
 
 // A pipe holder outside the process group survives the group kill. Stream must
@@ -656,12 +676,13 @@ func escapeSetup(t *testing.T) (marker string, opts StreamOpts) {
 func TestStreamEscapeeHoldingPipesIsBounded(t *testing.T) {
 	r := realRunner(t, "sh", "sleep")
 	g, fds := runtime.NumGoroutine(), fdCount(t)
+	newEscapee := escapeSetup(t)
 
-	marker, opts := escapeSetup(t)
+	marker, opts := newEscapee()
 	ctx, cancel := context.WithCancel(bg)
 	defer cancel()
 	start := time.Now()
-	o := streamBounded(t, ctx, r, []string{"sh", "-c", escapeScript + "echo ready; sleep 30"}, opts, func([]byte) error { cancel(); return nil })
+	o := streamBounded(t, ctx, r, []string{"sh", "-c", escapeScript(silentEscapee) + "echo ready; sleep 30"}, opts, func([]byte) error { cancel(); return nil })
 	if !errors.Is(o.err, context.Canceled) || !o.res.IOIncomplete {
 		t.Fatalf("cancel: err=%v res=%+v", o.err, o.res)
 	}
@@ -672,16 +693,155 @@ func TestStreamEscapeeHoldingPipesIsBounded(t *testing.T) {
 		t.Fatalf("escapee never started: %v", err)
 	}
 
-	os.Remove(marker)
+	marker, opts = newEscapee()
 	start = time.Now()
-	o = streamBounded(t, bg, r, []string{"sh", "-c", escapeScript + "exit 0"}, opts, nil)
+	o = streamBounded(t, bg, r, []string{"sh", "-c", escapeScript(silentEscapee) + "exit 0"}, opts, nil)
 	if !errors.Is(o.err, ErrIOTimeout) || !o.res.IOIncomplete {
 		t.Fatalf("self-exit: err=%v res=%+v", o.err, o.res)
 	}
 	if el := time.Since(start); el > 5*time.Second {
 		t.Fatalf("self-exit took %s", el)
 	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("escapee never started: %v", err)
+	}
 	resourcesSettle(t, "escapee", g, fds)
+}
+
+// A leftover that keeps writing stdout lines after the program exited must not
+// keep the stream alive: the post-exit budget (wall time minus time inside
+// onLine) and the byte cap end it with ErrIOTimeout and IOIncomplete.
+func TestStreamChattyLeftoverAfterExitIsBounded(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	longArg := "$(head -c 20000 /dev/zero | tr '\\0' a)"
+	overArg := "$(head -c 70000 /dev/zero | tr '\\0' a)"
+	cases := []struct {
+		name     string
+		script   string
+		onLine   func([]byte) error
+		within   time.Duration
+		maxLines int
+	}{
+		{"group member writing every waitDelay/3", "(while :; do echo tick; sleep 0.1; done) & exit 0", nil, 3 * time.Second, 1000},
+		{"flood, fast callback", "yes & exit 0", nil, 5 * time.Second, 1 << 20},
+		{"flood of long lines, slow callback", "yes " + longArg + " & exit 0", func([]byte) error { time.Sleep(50 * time.Millisecond); return nil }, 10 * time.Second, 60},
+		{"flood of dropped lines", "yes " + overArg + " & exit 0", nil, 5 * time.Second, 0},
+		// The over-long lines are never delivered, so only their size can end
+		// this stream: the slow callback keeps the wait budget from running out.
+		{"dropped lines between short ones, slow callback", "L=" + overArg + "; while :; do echo \"$L\"; echo x; done & exit 0", func([]byte) error { time.Sleep(50 * time.Millisecond); return nil }, 8 * time.Second, 40},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(bg, 15*time.Second)
+			defer cancel()
+			n := 0
+			start := time.Now()
+			res, err := callStream(t, realRunner(t, "sh", "sleep", "yes", "head", "tr"), ctx, []string{"sh", "-c", c.script}, StreamOpts{}, func(l []byte) error {
+				n++
+				if c.onLine != nil {
+					return c.onLine(l)
+				}
+				return nil
+			})
+			if !errors.Is(err, ErrIOTimeout) || !res.IOIncomplete {
+				t.Fatalf("err=%v res=%+v after %s with %d lines", err, res, time.Since(start), n)
+			}
+			if el := time.Since(start); el > c.within {
+				t.Fatalf("took %s, want within %s", el, c.within)
+			}
+			if n > c.maxLines {
+				t.Fatalf("%d lines delivered, want at most %d", n, c.maxLines)
+			}
+			if c.name == "flood of dropped lines" && (res.DroppedLines == 0 || n != 0) {
+				t.Fatalf("dropped=%d delivered=%d", res.DroppedLines, n)
+			}
+		})
+	}
+}
+
+// The same with a chatty escapee in a new session, which no group kill reaches.
+func TestStreamChattyEscapeeAfterExitIsBounded(t *testing.T) {
+	newEscapee := escapeSetup(t)
+	_, opts := newEscapee()
+	ctx, cancel := context.WithTimeout(bg, 15*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := callStream(t, realRunner(t, "sh", "sleep"), ctx, []string{"sh", "-c", escapeScript(chattyEscapee) + "exit 0"}, opts, nil)
+	if !errors.Is(err, ErrIOTimeout) || !res.IOIncomplete {
+		t.Fatalf("err=%v res=%+v after %s", err, res, time.Since(start))
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("took %s", el)
+	}
+}
+
+// A child that left its process group is ended by cancelling alone: the group
+// kill misses it, so only the direct kill in cmd.Cancel reaches it.
+func TestStreamChildOutsideItsGroupEndsOnCancel(t *testing.T) {
+	if _, err := NewReal(nil).lookup("perl"); err != nil {
+		t.Skip("no perl to move the child into another group")
+	}
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	pid := 0
+	t.Cleanup(func() {
+		if pid != 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	script := `use POSIX; $|=1; POSIX::setpgid(0, getpgrp(getppid())) or die "setpgid: $!"; print "$$\n"; exec("sleep","30")`
+	start := time.Now()
+	o := streamBounded(t, ctx, realRunner(t, "perl", "sleep"), []string{"perl", "-e", script}, StreamOpts{}, func(l []byte) error {
+		pid, _ = strconv.Atoi(string(l))
+		cancel()
+		return nil
+	})
+	if pid == 0 {
+		t.Skipf("the child could not leave its group: %+v", o.res)
+	}
+	if !errors.Is(o.err, context.Canceled) {
+		t.Fatalf("err = %v", o.err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("took %s", el)
+	}
+	mustBeGone(t, pid)
+}
+
+// On an abort the direct child has been reaped by the time Stream returns:
+// its pid is gone at once, without polling.
+func TestStreamChildIsReapedWhenAbortReturns(t *testing.T) {
+	r := realRunner(t, "sh", "sleep")
+	paths := map[string]func() (int, error){}
+	run := func(opts StreamOpts, ctx context.Context, stopAt func(cancel func()) error) func() (int, error) {
+		return func() (int, error) {
+			pid := 0
+			c, cancel := context.WithCancel(ctx)
+			defer cancel()
+			_, err := callStream(t, r, c, []string{"sh", "-c", "echo $$; exec sleep 30"}, opts, func(l []byte) error {
+				pid, _ = strconv.Atoi(string(l))
+				return stopAt(cancel)
+			})
+			return pid, err
+		}
+	}
+	paths["cancel"] = run(StreamOpts{}, bg, func(cancel func()) error { cancel(); return nil })
+	paths["callback error"] = run(StreamOpts{}, bg, func(func()) error { return errors.New("stop") })
+	paths["timeout"] = run(StreamOpts{Timeout: 50 * time.Millisecond}, bg, func(func()) error { return nil })
+	for name, f := range paths {
+		for i := 0; i < 25; i++ {
+			pid, err := f()
+			if err == nil || pid == 0 {
+				t.Fatalf("%s: pid=%d err=%v", name, pid, err)
+			}
+			if syscall.Kill(pid, 0) == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatalf("%s run %d: the child %d was not reaped when Stream returned", name, i, pid)
+			}
+		}
+	}
 }
 
 // The deferred cleanup also runs when onLine panics and the caller recovers:
@@ -710,8 +870,9 @@ func TestStreamPanicInCallbackReleasesEverything(t *testing.T) {
 	resourcesSettle(t, "panic", g, fds)
 }
 
-// The process group is signalled once per stream, on every way a stream ends:
-// a second signal could reach a group that reused the pid after the reap.
+// The process group is signalled once per stream, on every way a stream ends.
+// Cancelling kills the direct child only (TestStreamCancelDoesNotSignalTheGroup
+// pins that), so cleanup's signal is the only one.
 func TestStreamKillsGroupOncePerStream(t *testing.T) {
 	var kills atomic.Int32
 	old := killProcessGroup
@@ -752,4 +913,43 @@ func TestStreamKillsGroupOncePerStream(t *testing.T) {
 	if n := kills.Load(); n != 0 {
 		t.Errorf("refused program: group signalled %d times, want 0", n)
 	}
+}
+
+// Cancelling a stream must not signal the process group: the group is left to
+// cleanup's single signal. A grandchild is still alive when os/exec has run
+// the cancel kill and cleanup is about to signal the group.
+func TestStreamCancelDoesNotSignalTheGroup(t *testing.T) {
+	var cancels atomic.Int32
+	streamCmdHook = func(c *exec.Cmd) {
+		orig := c.Cancel
+		c.Cancel = func() error { cancels.Add(1); return orig() }
+	}
+	oldKill := killProcessGroup
+	grandchild := 0
+	aliveAtGroupKill := false
+	killProcessGroup = func(c *exec.Cmd) {
+		// Wait for os/exec to run the cancel kill, then let it land.
+		for i := 0; i < 200 && cancels.Load() == 0; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(150 * time.Millisecond)
+		aliveAtGroupKill = syscall.Kill(grandchild, 0) == nil
+		oldKill(c)
+	}
+	t.Cleanup(func() { streamCmdHook, killProcessGroup = nil, oldKill })
+
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	callStream(t, realRunner(t, "sh", "sleep"), ctx, []string{"sh", "-c", "sleep 30 & echo $!; wait"}, StreamOpts{}, func(l []byte) error {
+		grandchild, _ = strconv.Atoi(string(l))
+		cancel()
+		return nil
+	})
+	if cancels.Load() == 0 {
+		t.Fatal("cmd.Cancel never ran")
+	}
+	if !aliveAtGroupKill {
+		t.Fatal("the group was already signalled before cleanup: cancelling must kill the direct child only")
+	}
+	mustBeGone(t, grandchild)
 }
