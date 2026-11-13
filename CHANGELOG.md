@@ -79,6 +79,13 @@ report.
   choose inside a genuine line (a cgroup name, a command name, an ssh user
   name) does not decide which unit or address a signal names. They keep a
   capped amount of state per rule.
+- Streaming execution for long-running commands such as `journalctl --follow`:
+  stdout is delivered line by line to a callback with a per-line cap, an idle
+  and a total timeout, and cancellation; after the program exits, what it left
+  in a pipe of the default size is still delivered in full, while output that
+  a leftover process keeps writing is cut after a grace period or a pipe's
+  worth of bytes, and a stream cut short is reported as incomplete instead of
+  silently losing lines.
 
 ### Security
 
