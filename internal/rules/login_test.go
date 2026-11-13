@@ -784,14 +784,60 @@ func TestLoginAmbiguousCertificateIDSplits(t *testing.T) {
 			if regexp.MustCompile(`\d+ possible`).MatchString(s[0].Summary) {
 				t.Errorf("%s: the summary must not carry a count: %q", tc.name, s[0].Summary)
 			}
-			if at.Before(t0.Add(loginPeriod)) && b.LearningDone() {
-				t.Fatalf("%s: an ambiguous line inside the window must not touch the baseline latch", tc.name)
+			if s[0].Subject != msg || !strings.HasSuffix(s[0].Summary, ": "+msg) {
+				t.Errorf("%s: the ambiguous signal must carry the raw line as subject and at the end of the summary: %+v", tc.name, s[0])
+			}
+			if !s[0].Time.Equal(at) {
+				t.Errorf("%s: signal time %v, want the evaluated instant %v", tc.name, s[0].Time, at)
+			}
+			if inside := at.Before(t0.Add(loginPeriod)); inside == b.LearningDone() {
+				t.Fatalf("%s: learning_done is %v at %v: an ambiguous line inside the window must not set the latch, one at or past its end must", tc.name, b.LearningDone(), at)
 			}
 			b.mu.Lock()
 			n := len(b.users)
 			b.mu.Unlock()
 			if n != 0 {
 				t.Fatalf("%s: an ambiguous line must change nothing: %d users", tc.name, n)
+			}
+		}
+	}
+}
+
+// The ambiguous signal carries the clamped time: after a small clock step
+// back it is stamped with the latest instant seen, like every other signal.
+func TestLoginAmbiguousSignalTimeClamped(t *testing.T) {
+	amb := "Accepted publickey for alice from 127.0.0.1 port 47988 ssh2: ED25519-CERT SHA256:aaaabbbb ID x from 10.0.0.1 port 1 ssh2: y"
+	r, _ := loginRule(t, t0, loginPeriod)
+	late := t0.Add(loginPeriod + time.Hour)
+	if s := r.Evaluate(sshEv(acceptedPub("alice", "127.0.0.1", "ssh-ed25519", "SHA256:aaaabbbb")), late); len(s) != 1 {
+		t.Fatalf("clean line: %+v", s)
+	}
+	s := r.Evaluate(sshEv(amb), late.Add(-time.Minute))
+	if len(s) != 1 || !s[0].Time.Equal(late) {
+		t.Fatalf("ambiguous line after a small step back: %+v, want time %v", s, late)
+	}
+}
+
+// A user name with two overlapping " from " occurrences (" from from "):
+// the first is no split, the second, sharing its blank, is one, and the
+// line's real tail is another. The scan must step by one byte to see the
+// second one, otherwise the line is read as a unique split and learned.
+func TestLoginAmbiguousOverlappingFrom(t *testing.T) {
+	for _, msg := range []string{
+		"Accepted password for a from from 1.1.1.1 port 1 ssh2: x from 9.9.9.9 port 5 ssh2",
+		"Accepted publickey for a from from 1.1.1.1 port 1 ssh2: x from 9.9.9.9 port 5 ssh2: ED25519 SHA256:abc",
+	} {
+		for _, at := range []time.Time{t0.Add(time.Second), t0.Add(loginPeriod + time.Hour)} {
+			r, b := loginRule(t, t0, loginPeriod)
+			s := r.Evaluate(sshEv(msg), at)
+			if len(s) != 1 || s[0].Severity != result.High || !s[0].Notify || !strings.Contains(s[0].Summary, "ambiguous") {
+				t.Fatalf("overlapping from-from candidate not reported as ambiguous: %q -> %+v", msg, s)
+			}
+			b.mu.Lock()
+			n := len(b.users)
+			b.mu.Unlock()
+			if n != 0 {
+				t.Fatalf("overlapping from-from candidate learned %d users: %q", n, msg)
 			}
 		}
 	}
