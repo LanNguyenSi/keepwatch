@@ -24,6 +24,9 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- Notification worker for the watch daemon: a bounded queue with its own
+  goroutine, a per-incident and a global rate limit, reported drops, and an
+  incident notice that is cleaned before it is cut.
 
 ### Security
 
@@ -46,12 +49,6 @@ report.
   (`Authorization`, `Cookie`, `bearer`, `--password`, `pass=`, `pwd=`) now also
   work directly behind a terminal color sequence, and a second `user:password`
   behind the first one in a list of URLs is found too.
-
-### Added
-
-- Notification worker for the watch daemon: a bounded queue with its own
-  goroutine, a per-incident and a global rate limit, reported drops, and an
-  incident notice that is cleaned before it is cut.
 
 ### Changed
 
