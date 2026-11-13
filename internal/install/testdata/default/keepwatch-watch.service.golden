@@ -1,0 +1,51 @@
+# keepwatch-managed-unit: written by "keepwatch install" and removed by "keepwatch uninstall"; do not edit, changes are overwritten.
+[Unit]
+Description=keepwatch watcher
+Wants=network-online.target
+After=network-online.target
+# Restart=on-failure with RestartSec=10s never reaches the default start limit
+# (5 starts in 10 s), so a start that always fails would loop for ever. Five
+# failed starts within 300 s leave the unit failed instead.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/keepwatch watch --config /etc/keepwatch/keepwatch.yaml
+# A crash starts it again after a pause; a clean exit or "systemctl stop" ends
+# it. There is no SuccessExitStatus: any exit status but 0 is a failure.
+Restart=on-failure
+RestartSec=10s
+# The watcher runs as root but needs no capability: it reads what the file
+# modes give the owner and changes nothing outside state_dir. Empty drops all.
+CapabilityBoundingSet=
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/keepwatch
+# read-only, not yes: the authorized_keys check reads /home and /root.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+# AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+MemoryMax=256M
+MemorySwapMax=0
+Environment=GOMEMLIMIT=64MiB
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target
