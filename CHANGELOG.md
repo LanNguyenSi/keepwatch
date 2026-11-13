@@ -27,11 +27,13 @@ report.
 - An incident store for the watch daemon: signals are grouped by
   fingerprint into incidents with a short stable id, and a repeated signal
   updates the count and last-seen time, a closed incident reopens (and counts
-  the reopening), and only a new or reopened incident asks for a
-  notification. Incidents live in `incidents.json` in the state directory
-  (versioned, written atomically, at most 500; the oldest closed one is
-  evicted first and open or acked ones never are). A file that is corrupt or
-  of another version is reported and left as it is.
+  the reopening), and a new or reopened incident asks for a notification
+  that stays pending until it is marked as sent. Incidents live in
+  `incidents.json` in the state directory (versioned, written atomically, at
+  most 500). Open or acked incidents idle for 7 days are closed, and when
+  the store is full the least severe incident is evicted for a more severe
+  signal, so a flood of low-severity incidents cannot blind the daemon. A
+  file that is corrupt or of another version is reported and left as it is.
 
 ### Security
 

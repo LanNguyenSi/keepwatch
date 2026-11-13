@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
@@ -16,24 +17,36 @@ import (
 // FileName is the name of the incident file inside the state directory.
 const FileName = "incidents.json"
 
-// SchemaVersion is the version of the file format.
-const SchemaVersion = 1
+// SchemaVersion is the version of the file format. Version 2 added the
+// retired id list and gave NotifiedAt a meaning for pending notifications;
+// a version 1 file is refused with ErrSchema (the file is left as it is), as
+// is any other version.
+const SchemaVersion = 2
 
 // Limits.
 const (
-	// MaxIncidents is how many incidents are kept. When a new fingerprint
-	// arrives at the cap, the closed incident with the oldest LastSeen is
-	// evicted to make room. Open and acked incidents are never evicted: when
-	// only those are left, Apply returns ErrFull and stores nothing.
+	// MaxIncidents is how many incidents are kept. At the cap a new
+	// fingerprint makes room by eviction, see Apply.
 	MaxIncidents = 500
 	// MaxTitleRunes and MaxSummaryRunes cut the display text of an incident
 	// so that the file stays within MaxFileSize.
 	MaxTitleRunes   = 200
 	MaxSummaryRunes = 1000
+	// MaxRuleIDRunes cuts the rule id.
+	MaxRuleIDRunes = 64
+	// MaxIDLen bounds an incident id in a file (a fingerprint is 64 long,
+	// a collision suffix adds a few characters).
+	MaxIDLen = 80
+	// MaxRetiredIDs is how many ids of evicted incidents are remembered so
+	// that they are not handed out again; the oldest are dropped first.
+	MaxRetiredIDs = 2000
 	// MaxFileSize bounds the file that is read and written. MaxIncidents
 	// incidents of maximal size, with every character written as a six byte
-	// JSON escape, stay below it.
+	// JSON escape, plus MaxRetiredIDs retired ids, stay below it.
 	MaxFileSize = 8 << 20
+	// DefaultIdleClose is how long an open or acked incident may go without
+	// a signal before it is closed automatically.
+	DefaultIdleClose = 7 * 24 * time.Hour
 )
 
 // Errors returned by the store. Use errors.Is.
@@ -44,10 +57,11 @@ var (
 	// from the current state (see CanTransition).
 	ErrInvalidTransition = errors.New("invalid incident transition")
 	// ErrFull is returned by Apply when a new incident would exceed
-	// MaxIncidents and no closed incident can be evicted.
-	ErrFull = errors.New("incident store is full of open incidents")
+	// MaxIncidents and every kept incident outranks the signal. The Result
+	// returned with it has Outcome Refused; nothing was stored.
+	ErrFull = errors.New("incident store is full of more severe incidents")
 	// ErrInvalidSignal is returned by Apply for a signal without a usable
-	// fingerprint.
+	// fingerprint or with a severity that is not a known one.
 	ErrInvalidSignal = errors.New("invalid signal")
 	// ErrCorrupt is returned by Open for a file that is not valid incident
 	// data. The file is left as it is.
@@ -88,6 +102,9 @@ const (
 	Updated
 	// Reopened: a closed incident was opened again.
 	Reopened
+	// Refused: the store was full of incidents at least as severe as the
+	// signal's, so nothing was stored (returned together with ErrFull).
+	Refused
 )
 
 func (o Outcome) String() string {
@@ -98,21 +115,53 @@ func (o Outcome) String() string {
 		return "updated"
 	case Reopened:
 		return "reopened"
+	case Refused:
+		return "refused"
 	}
 	return "unknown"
 }
 
+// Removed describes an incident that was evicted to make room.
+type Removed struct {
+	ID          string
+	Fingerprint event.Fingerprint
+	// State is the state the incident had when it was evicted.
+	State State
+}
+
 // Result is what Apply returns.
 type Result struct {
-	Outcome  Outcome
+	Outcome Outcome
+	// Incident is the incident after the change. With Outcome Refused it is
+	// the incident that would have been opened, without an ID.
 	Incident Incident
 	// Notify is true when the caller should notify: the incident was Opened
-	// or Reopened and the signal asked for it. An Updated incident never
-	// notifies.
+	// or Reopened and the signal asked for it.
 	Notify bool
-	// Evicted lists the ids of closed incidents dropped to make room.
-	Evicted []string
+	// Pending is true when the signal updated an open incident that wants a
+	// notification and has none recorded since it was last opened or
+	// reopened (NotifiedAt is zero): an earlier result was lost, or the
+	// notification was never marked. The caller treats Notify || Pending as
+	// "notify now" and calls MarkNotified when it has taken the notification
+	// over. Pending is never set for Opened or Reopened (see Notify), for an
+	// acked incident, or for an incident that does not want notification.
+	Pending bool
+	// Evicted lists the incidents dropped to make room, with their state, so
+	// that the caller can audit each one.
+	Evicted []Removed
+	// AutoClosed lists the open or acked incidents that were closed because
+	// they had been idle longer than the idle-close period (their State is
+	// closed), so that the caller can audit each one.
+	AutoClosed []Incident
 }
+
+// Option configures Open.
+type Option func(*Store)
+
+// WithIdleClose sets how long an open or acked incident may go without a
+// signal before Apply or Sweep closes it. The default is DefaultIdleClose;
+// zero or less switches idle closing off.
+func WithIdleClose(d time.Duration) Option { return func(s *Store) { s.idleClose = d } }
 
 // Store keeps the incidents of the daemon in FileName in the state
 // directory.
@@ -126,14 +175,17 @@ type Result struct {
 // passed in a Display. The store never calls red.Clean itself and never sees
 // raw signal text: the signal's own Subject and Summary are not read.
 type Store struct {
-	dir  *securefile.Dir
-	list []Incident
+	dir       *securefile.Dir
+	list      []Incident
+	retired   []string
+	idleClose time.Duration
 }
 
 // wire types: the file format, independent of the in-memory model.
 type fileDoc struct {
 	SchemaVersion int        `json:"schema_version"`
 	Incidents     []wireItem `json:"incidents"`
+	RetiredIDs    []string   `json:"retired_ids"`
 }
 
 type wireItem struct {
@@ -174,15 +226,21 @@ func fromWire(w wireItem) Incident {
 
 // Open loads the store from dir. A missing file is an empty store. A file
 // that is unreadable, too large, not valid JSON, of another schema_version or
-// inconsistent (duplicate ids or fingerprints, unknown state, more than
-// MaxIncidents) is an error and is never replaced: the caller decides what to
+// inconsistent is an error and is never replaced: the caller decides what to
 // do with it. An unknown schema_version returns an error wrapping ErrSchema,
-// invalid content one wrapping ErrCorrupt.
-func Open(dir *securefile.Dir) (*Store, error) {
+// invalid content one wrapping ErrCorrupt. Invalid content is: an unknown
+// state or severity, a negative count, an empty, over-long or repeated id, a
+// fingerprint that is not lowercase hex of at most 64 characters, a repeated
+// fingerprint, text beyond its bound, a retired id that is repeated or in
+// use, or more than MaxIncidents incidents or MaxRetiredIDs retired ids.
+func Open(dir *securefile.Dir, opts ...Option) (*Store, error) {
 	if dir == nil {
 		return nil, errors.New("incident store: no state directory")
 	}
-	s := &Store{dir: dir}
+	s := &Store{dir: dir, idleClose: DefaultIdleClose}
+	for _, o := range opts {
+		o(s)
+	}
 	b, err := dir.ReadCapped(FileName, MaxFileSize)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -190,15 +248,17 @@ func Open(dir *securefile.Dir) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %w", FileName, err)
 	}
-	list, err := decode(b)
+	list, retired, err := decode(b)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", FileName, err)
 	}
-	s.list = list
+	s.list, s.retired = list, retired
 	return s, nil
 }
 
-func decode(b []byte) ([]Incident, error) {
+func tooLong(s string, n int) bool { return utf8.RuneCountInString(s) > n }
+
+func decode(b []byte) ([]Incident, []string, error) {
 	// Look at the version first, so a later format is reported as such even
 	// when its other fields do not fit this one.
 	// json.Unmarshal also refuses data after the document.
@@ -206,22 +266,25 @@ func decode(b []byte) ([]Incident, error) {
 		SchemaVersion *int `json:"schema_version"`
 	}
 	if err := json.Unmarshal(b, &head); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}
 	if head.SchemaVersion == nil {
-		return nil, fmt.Errorf("%w: schema_version is missing", ErrCorrupt)
+		return nil, nil, fmt.Errorf("%w: schema_version is missing", ErrCorrupt)
 	}
 	if *head.SchemaVersion != SchemaVersion {
-		return nil, fmt.Errorf("%w: file has %d, this keepwatch reads %d", ErrSchema, *head.SchemaVersion, SchemaVersion)
+		return nil, nil, fmt.Errorf("%w: file has %d, this keepwatch reads %d", ErrSchema, *head.SchemaVersion, SchemaVersion)
 	}
 	var doc fileDoc
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}
 	if len(doc.Incidents) > MaxIncidents {
-		return nil, fmt.Errorf("%w: %d incidents, the limit is %d", ErrCorrupt, len(doc.Incidents), MaxIncidents)
+		return nil, nil, fmt.Errorf("%w: %d incidents, the limit is %d", ErrCorrupt, len(doc.Incidents), MaxIncidents)
+	}
+	if len(doc.RetiredIDs) > MaxRetiredIDs {
+		return nil, nil, fmt.Errorf("%w: %d retired ids, the limit is %d", ErrCorrupt, len(doc.RetiredIDs), MaxRetiredIDs)
 	}
 	ids := map[string]bool{}
 	fps := map[string]bool{}
@@ -230,22 +293,44 @@ func decode(b []byte) ([]Incident, error) {
 		switch State(w.State) {
 		case StateOpen, StateAcked, StateClosed:
 		default:
-			return nil, fmt.Errorf("%w: incident %d has state %q", ErrCorrupt, i, w.State)
+			return nil, nil, fmt.Errorf("%w: incident %d has state %q", ErrCorrupt, i, w.State)
 		}
-		if w.ID == "" || w.Fingerprint == "" {
-			return nil, fmt.Errorf("%w: incident %d has no id or fingerprint", ErrCorrupt, i)
+		if rank(result.Severity(w.Severity)) < 0 {
+			return nil, nil, fmt.Errorf("%w: incident %d has severity %q", ErrCorrupt, i, w.Severity)
+		}
+		if w.ID == "" || len(w.ID) > MaxIDLen {
+			return nil, nil, fmt.Errorf("%w: incident %d has an empty or over-long id", ErrCorrupt, i)
+		}
+		if !validFingerprint(event.Fingerprint(w.Fingerprint)) {
+			return nil, nil, fmt.Errorf("%w: incident %d has an invalid fingerprint", ErrCorrupt, i)
+		}
+		if w.Count < 0 || w.ReopenCount < 0 {
+			return nil, nil, fmt.Errorf("%w: incident %d has a negative count", ErrCorrupt, i)
+		}
+		if tooLong(w.Title, MaxTitleRunes) || tooLong(w.Summary, MaxSummaryRunes) || tooLong(w.RuleID, MaxRuleIDRunes) {
+			return nil, nil, fmt.Errorf("%w: incident %d has text beyond its bound", ErrCorrupt, i)
 		}
 		if ids[w.ID] || fps[w.Fingerprint] {
-			return nil, fmt.Errorf("%w: incident %d repeats an id or fingerprint", ErrCorrupt, i)
+			return nil, nil, fmt.Errorf("%w: incident %d repeats an id or fingerprint", ErrCorrupt, i)
 		}
 		ids[w.ID], fps[w.Fingerprint] = true, true
 		out = append(out, fromWire(w))
 	}
-	return out, nil
+	seen := map[string]bool{}
+	for i, id := range doc.RetiredIDs {
+		if id == "" || len(id) > MaxIDLen {
+			return nil, nil, fmt.Errorf("%w: retired id %d is empty or over-long", ErrCorrupt, i)
+		}
+		if seen[id] || ids[id] {
+			return nil, nil, fmt.Errorf("%w: retired id %d is repeated or in use", ErrCorrupt, i)
+		}
+		seen[id] = true
+	}
+	return out, append([]string(nil), doc.RetiredIDs...), nil
 }
 
-func (s *Store) save(list []Incident) error {
-	doc := fileDoc{SchemaVersion: SchemaVersion, Incidents: make([]wireItem, 0, len(list))}
+func (s *Store) save(list []Incident, retired []string) error {
+	doc := fileDoc{SchemaVersion: SchemaVersion, Incidents: make([]wireItem, 0, len(list)), RetiredIDs: append([]string{}, retired...)}
 	for _, in := range list {
 		doc.Incidents = append(doc.Incidents, toWire(in))
 	}
@@ -289,16 +374,23 @@ func validFingerprint(f event.Fingerprint) bool {
 const idPrefix = 8
 
 // newID derives the id from the fingerprint: its first idPrefix characters,
-// extended one character at a time until no kept incident has that id. The
-// same fingerprint thus gets the same id in an empty store, and two
-// fingerprints never share an id. Distinct fingerprints differ somewhere, so
-// the loop ends at the latest at the full fingerprint. A file can carry an
-// id of its own choosing that equals the full fingerprint of another
-// incident; then a numeric suffix (-2, -3, ...) keeps the id unique.
-func newID(f event.Fingerprint, list []Incident) string {
+// extended one character at a time until neither a kept incident nor a
+// retired id has that id. The same fingerprint thus gets the same id in an
+// empty store, and two fingerprints never share an id, and an id of an
+// evicted incident is not handed out again while it is remembered (see
+// MaxRetiredIDs). Distinct fingerprints differ somewhere, so the loop ends
+// at the latest at the full fingerprint. A file can carry an id of its own
+// choosing that equals the full fingerprint of another incident; then a
+// numeric suffix (-2, -3, ...) keeps the id unique.
+func newID(f event.Fingerprint, list []Incident, retired []string) string {
 	taken := func(id string) bool {
 		for _, in := range list {
 			if in.ID == id {
+				return true
+			}
+		}
+		for _, r := range retired {
+			if r == id {
 				return true
 			}
 		}
@@ -339,25 +431,107 @@ func rank(s result.Severity) int {
 	return -1
 }
 
+// victimBefore reports whether a should be evicted before b: closed
+// incidents first (oldest LastSeen first), then open or acked ones with the
+// lowest severity, those that do not want notification before those that do,
+// then the oldest LastSeen.
+func victimBefore(a, b Incident) bool {
+	ac, bc := a.State == StateClosed, b.State == StateClosed
+	if ac != bc {
+		return ac
+	}
+	if !ac {
+		if ra, rb := rank(a.Severity), rank(b.Severity); ra != rb {
+			return ra < rb
+		}
+		if a.Notify != b.Notify {
+			return !a.Notify
+		}
+	}
+	return a.LastSeen.Before(b.LastSeen)
+}
+
+// sweepList closes the open and acked incidents of list that have been idle
+// longer than idle at now, in place, and returns them. A non-positive idle
+// closes nothing, and neither does a zero now (it is before every LastSeen).
+func sweepList(list []Incident, now time.Time, idle time.Duration) []Incident {
+	if idle <= 0 {
+		return nil
+	}
+	var closed []Incident
+	for i := range list {
+		if list[i].State != StateClosed && now.Sub(list[i].LastSeen) > idle {
+			list[i].State = StateClosed
+			closed = append(closed, list[i])
+		}
+	}
+	return closed
+}
+
+func addRetired(retired []string, id string) []string {
+	retired = append(retired, id)
+	if len(retired) > MaxRetiredIDs {
+		retired = retired[len(retired)-MaxRetiredIDs:]
+	}
+	return retired
+}
+
+// Sweep closes the open and acked incidents that have been idle longer than
+// the idle-close period at now (see WithIdleClose) and returns them, closed,
+// so that the caller can audit them. Apply does the same with the signal's
+// time; Sweep is for the daemon's idle moments.
+func (s *Store) Sweep(now time.Time) ([]Incident, error) {
+	list := append([]Incident(nil), s.list...)
+	closed := sweepList(list, now, s.idleClose)
+	if len(closed) == 0 {
+		return nil, nil
+	}
+	if err := s.save(list, s.retired); err != nil {
+		return nil, err
+	}
+	s.list = list
+	return closed, nil
+}
+
 // Apply records one signal. display holds the cleaned text (see Store).
 //
-//   - unknown fingerprint: a new incident is opened (Opened), after evicting
-//     the oldest closed incident when MaxIncidents is reached; if none can be
-//     evicted, ErrFull is returned and nothing changes.
-//   - open or acked incident: Count and LastSeen are updated (Updated), the
-//     state stays, Title, Summary and a higher Severity are taken over.
-//   - closed incident: it is reopened (Reopened) and ReopenCount grows.
+// First, open and acked incidents idle longer than the idle-close period at
+// the signal's time are closed (Result.AutoClosed). Then:
 //
-// Result.Notify is true for Opened and Reopened when signal.Notify is set.
-// The incident's Notify flag takes the signal's value when it is opened or
+//   - unknown fingerprint: a new incident is opened (Opened). At
+//     MaxIncidents one incident is evicted first (Result.Evicted, its id is
+//     retired): a closed one, the one with the oldest LastSeen; if none is
+//     closed, the open or acked one with the lowest severity, one that does
+//     not want notification before one that does, then the oldest LastSeen. A
+//     signal never evicts an incident more severe than itself: if the
+//     candidate is, nothing is stored and Apply returns ErrFull with a Result
+//     of Outcome Refused.
+//   - open or acked incident: Count and LastSeen are updated (Updated), the
+//     state stays, Title and Summary are replaced and the severity only
+//     escalates.
+//   - closed incident: it is reopened (Reopened), ReopenCount grows, NotifiedAt
+//     is cleared and the severity is the reopening signal's.
+//
+// Result.Notify is true for Opened and Reopened when signal.Notify is set;
+// Result.Pending covers a notification that was not marked (see Pending). The
+// incident's Notify flag takes the signal's value when it is opened or
 // reopened and is left alone on an update. LastSeen never moves backwards.
+// A severity that is not one of result.Severities is ErrInvalidSignal.
 func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 	if !validFingerprint(sig.Fingerprint) {
 		return Result{}, fmt.Errorf("%w: fingerprint %q", ErrInvalidSignal, sig.Fingerprint)
 	}
+	if rank(sig.Severity) < 0 {
+		return Result{}, fmt.Errorf("%w: severity %q", ErrInvalidSignal, sig.Severity)
+	}
 	title := cut(display.Title, MaxTitleRunes)
 	summary := cut(display.Summary, MaxSummaryRunes)
+	ruleID := cut(sig.RuleID, MaxRuleIDRunes)
 	list := append([]Incident(nil), s.list...)
+	retired := append([]string(nil), s.retired...)
+
+	var res Result
+	res.AutoClosed = sweepList(list, sig.Time, s.idleClose)
 
 	idx := -1
 	for i, in := range list {
@@ -366,28 +540,29 @@ func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 			break
 		}
 	}
-	var res Result
 	if idx < 0 {
-		if len(list) >= MaxIncidents {
-			ev := -1
-			for i, in := range list {
-				if in.State == StateClosed && (ev < 0 || in.LastSeen.Before(list[ev].LastSeen)) {
-					ev = i
-				}
-			}
-			if ev < 0 {
-				return Result{}, fmt.Errorf("%w (%d)", ErrFull, MaxIncidents)
-			}
-			res.Evicted = append(res.Evicted, list[ev].ID)
-			list = append(list[:ev], list[ev+1:]...)
-		}
-		in := Incident{
-			ID: newID(sig.Fingerprint, list), Fingerprint: sig.Fingerprint, RuleID: sig.RuleID,
+		fresh := Incident{
+			Fingerprint: sig.Fingerprint, RuleID: ruleID,
 			Severity: sig.Severity, State: StateOpen, Title: title, Summary: summary,
 			Count: 1, FirstSeen: sig.Time, LastSeen: sig.Time, Notify: sig.Notify,
 		}
-		list = append(list, in)
-		res.Outcome, res.Incident, res.Notify = Opened, in, sig.Notify
+		if len(list) >= MaxIncidents {
+			ev := 0
+			for i := range list {
+				if victimBefore(list[i], list[ev]) {
+					ev = i
+				}
+			}
+			if v := list[ev]; v.State != StateClosed && rank(v.Severity) > rank(sig.Severity) {
+				return Result{Outcome: Refused, Incident: fresh}, fmt.Errorf("%w (%d)", ErrFull, MaxIncidents)
+			}
+			res.Evicted = append(res.Evicted, Removed{ID: list[ev].ID, Fingerprint: list[ev].Fingerprint, State: list[ev].State})
+			retired = addRetired(retired, list[ev].ID)
+			list = append(list[:ev], list[ev+1:]...)
+		}
+		fresh.ID = newID(sig.Fingerprint, list, retired)
+		list = append(list, fresh)
+		res.Outcome, res.Incident, res.Notify = Opened, fresh, sig.Notify
 	} else {
 		in := list[idx]
 		in.Count++
@@ -395,25 +570,50 @@ func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 			in.LastSeen = sig.Time
 		}
 		in.Title, in.Summary = title, summary
-		if rank(sig.Severity) > rank(in.Severity) {
-			in.Severity = sig.Severity
-		}
 		if CanReopen(in.State) {
 			in.State = StateOpen
 			in.ReopenCount++
 			in.Notify = sig.Notify
+			in.Severity = sig.Severity
+			in.NotifiedAt = time.Time{}
 			res.Outcome, res.Notify = Reopened, sig.Notify
 		} else {
+			if rank(sig.Severity) > rank(in.Severity) {
+				in.Severity = sig.Severity
+			}
 			res.Outcome = Updated
+			res.Pending = in.State == StateOpen && in.Notify && in.NotifiedAt.IsZero()
 		}
 		list[idx] = in
 		res.Incident = in
 	}
-	if err := s.save(list); err != nil {
+	if err := s.save(list, retired); err != nil {
 		return Result{}, err
 	}
-	s.list = list
+	s.list, s.retired = list, retired
 	return res, nil
+}
+
+// MarkNotified records that the notification of the incident was taken over
+// at the given time (NotifiedAt), so that later updates are no longer
+// Pending. It is written like a transition.
+func (s *Store) MarkNotified(id string, at time.Time) (Incident, error) {
+	if at.IsZero() {
+		return Incident{}, fmt.Errorf("%w: zero notification time", ErrInvalidSignal)
+	}
+	for i, in := range s.list {
+		if in.ID != id {
+			continue
+		}
+		list := append([]Incident(nil), s.list...)
+		list[i].NotifiedAt = at
+		if err := s.save(list, s.retired); err != nil {
+			return Incident{}, err
+		}
+		s.list = list
+		return list[i], nil
+	}
+	return Incident{}, fmt.Errorf("%w: %q", ErrUnknownIncident, id)
 }
 
 // Ack moves an open incident to acked.
@@ -432,7 +632,7 @@ func (s *Store) transition(id string, to State) (Incident, error) {
 		}
 		list := append([]Incident(nil), s.list...)
 		list[i].State = to
-		if err := s.save(list); err != nil {
+		if err := s.save(list, s.retired); err != nil {
 			return Incident{}, err
 		}
 		s.list = list
