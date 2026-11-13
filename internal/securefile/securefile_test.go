@@ -586,6 +586,13 @@ func TestFIFOAndDirectoryEntries(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(p, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	opened := false
+	d.hooks.beforeOpen = func() { opened = true }
+	defer func() {
+		if opened {
+			t.Error("an existing non-regular entry was opened, not refused at the first look")
+		}
+	}()
 	for _, n := range []string{"fifo", "sub"} {
 		err := withTimeout(t, "OpenAppend "+n, func() error {
 			f, _, err := d.OpenAppend(n, 100)
@@ -633,8 +640,8 @@ func TestFIFOSwappedBeforeOpen(t *testing.T) {
 				}
 				return err
 			})
-			if err == nil {
-				t.Fatal("want an error")
+			if !errors.Is(err, ErrUntrusted) {
+				t.Fatalf("got %v, want ErrUntrusted", err)
 			}
 		})
 	}
@@ -847,4 +854,144 @@ func TestTempPrefixExported(t *testing.T) {
 	if TempPrefix != tempPrefix || !strings.HasPrefix(TempPrefix, ".") {
 		t.Fatalf("TempPrefix %q", TempPrefix)
 	}
+}
+
+// A file someone else created after the first look is never removed by the
+// cleanup of a failed check, even though this call asked to create it.
+func TestForeignCreatedFileIsKept(t *testing.T) {
+	d, p := newDir(t)
+	fp := filepath.Join(p, "audit")
+	n := 0
+	d.hooks.beforeOpen = func() {
+		if n++; n == 1 {
+			if err := os.WriteFile(fp, []byte("theirs"), 0o666); err != nil {
+				t.Error(err)
+			}
+			if err := os.Chmod(fp, 0o666); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	f, _, err := d.OpenAppend("audit", 100)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+	if b, rerr := os.ReadFile(fp); rerr != nil || string(b) != "theirs" {
+		t.Fatalf("their file was removed or changed: %q, %v", b, rerr)
+	}
+}
+
+// A dangling link planted after the first look does not make the create go
+// through it.
+func TestDanglingLinkNotCreatedThrough(t *testing.T) {
+	d, p := newDir(t)
+	d.hooks.beforeOpen = func() {
+		_ = os.Symlink("victim", filepath.Join(p, "audit"))
+	}
+	f, _, err := d.OpenAppend("audit", 100)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(p, "victim")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatalf("link target was created: %v", serr)
+	}
+}
+
+// A file created by this call and replaced before the cleanup keeps the
+// replacement.
+func TestCreatedFileReplacedBeforeCleanupIsKept(t *testing.T) {
+	d, p := newDir(t)
+	d.ownerOf = foreign
+	d.hooks.afterOpen = func() { replaceFile(t, p, "audit", "replacement") }
+	f, _, err := d.OpenAppend("audit", 100)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+	if b, rerr := os.ReadFile(filepath.Join(p, "audit")); rerr != nil || string(b) != "replacement" {
+		t.Fatalf("replacement removed: %q, %v", b, rerr)
+	}
+}
+
+// A link to itself planted after the first look is a trust failure.
+func TestSelfLinkPlantedBeforeOpen(t *testing.T) {
+	for _, op := range []string{"read", "append"} {
+		t.Run(op, func(t *testing.T) {
+			d, p := newDir(t)
+			if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+				t.Fatal(err)
+			}
+			d.hooks.beforeOpen = func() {
+				_ = os.Remove(filepath.Join(p, "a"))
+				_ = os.Symlink("a", filepath.Join(p, "a"))
+			}
+			var err error
+			if op == "read" {
+				_, err = d.ReadCapped("a", 10)
+			} else {
+				var f *os.File
+				f, _, err = d.OpenAppend("a", 10)
+				if f != nil {
+					f.Close()
+				}
+			}
+			if !errors.Is(err, ErrUntrusted) {
+				t.Fatalf("got %v, want ErrUntrusted", err)
+			}
+		})
+	}
+}
+
+func TestOpenAppendRetriedAfterReplaceOrRemoval(t *testing.T) {
+	t.Run("replace", func(t *testing.T) {
+		d, p := newDir(t)
+		if err := os.WriteFile(filepath.Join(p, "audit"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		d.hooks.afterOpen = func() {
+			if n++; n == 1 {
+				replaceFile(t, p, "audit", "newer!")
+			}
+		}
+		f, size, err := d.OpenAppend("audit", 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if size != 6 || n != 2 {
+			t.Fatalf("size %d after %d attempts, want 6 after 2", size, n)
+		}
+	})
+	t.Run("removal", func(t *testing.T) {
+		d, p := newDir(t)
+		if err := os.WriteFile(filepath.Join(p, "audit"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		d.hooks.afterOpen = func() {
+			if n++; n == 1 {
+				_ = os.Remove(filepath.Join(p, "audit"))
+			}
+		}
+		f, size, err := d.OpenAppend("audit", 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if size != 0 || n != 2 {
+			t.Fatalf("size %d after %d attempts, want 0 after 2", size, n)
+		}
+		if _, serr := os.Stat(filepath.Join(p, "audit")); serr != nil {
+			t.Fatal(serr)
+		}
+	})
 }

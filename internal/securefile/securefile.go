@@ -133,7 +133,7 @@ type Dir struct {
 // Close releases the directory.
 func (d *Dir) Close() error { return d.root.Close() }
 
-// Path returns the path the directory was opened with.
+// Path returns the cleaned path the directory was opened with.
 func (d *Dir) Path() string { return d.path }
 
 func checkDirInfo(path string, fi fs.FileInfo, ownerOf OwnerOf) error {
@@ -162,7 +162,10 @@ func checkDirInfo(path string, fi fs.FileInfo, ownerOf OwnerOf) error {
 //
 // The check is made on the path (Lstat, so a symlink is seen) and the opened
 // directory must be the very directory that was checked, so a swap between
-// the two is caught. Ancestors of path are not examined (known limit).
+// the two is caught. Ancestors of path are not examined (known limit), and
+// neither is a swap of path itself for a FIFO between the look and the open
+// of the directory (it needs write access to the parent, the same
+// precondition as for the ancestors).
 func OpenDir(path string, create bool, ownerOf OwnerOf) (*Dir, error) {
 	return openDir(path, create, ownerOf, defaultHooks())
 }
@@ -313,7 +316,8 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 // look after the open catches a link planted in between. A file that was
 // replaced by a rename between the open and the second look (a concurrent
 // WriteAtomic) is not tampering: the sequence is repeated a few times, and
-// ErrChanged is returned if it never settles.
+// ErrChanged is returned if it never settles. A file that appears between the
+// look and an exclusive create is retried as an existing file.
 //
 // O_NONBLOCK keeps an open of a FIFO swapped in after the first look from
 // blocking; the regular-file check then rejects it (a write open fails).
@@ -330,9 +334,20 @@ func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, 
 		}
 		absent := lerr != nil
 		d.hooks.beforeOpen()
-		f, err = d.root.OpenFile(name, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, perm)
+		oflag := flag | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+		if absent && flag&os.O_CREATE != 0 {
+			// Exclusive: a file (or a link, even a dangling one) that appeared
+			// after the look is never opened or created through, and a file
+			// this call did not create is never removed again.
+			oflag |= os.O_EXCL
+		}
+		f, err = d.root.OpenFile(name, oflag, perm)
 		switch {
 		case err == nil:
+		case absent && errors.Is(err, fs.ErrExist):
+			continue
+		case errors.Is(err, syscall.ENXIO), errors.Is(err, syscall.EISDIR):
+			return nil, nil, false, fmt.Errorf("%s is not a regular file (%v): %w", d.filePath(name), err, ErrUntrusted)
 		case errors.Is(err, syscall.ELOOP), strings.Contains(err.Error(), "path escapes from parent"):
 			return nil, nil, false, fmt.Errorf("%s is a link that is not followed (%v): %w", d.filePath(name), err, ErrUntrusted)
 		default:
@@ -372,7 +387,8 @@ func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, 
 // refused before reading, and the read itself stops at maxSize+1 bytes so a
 // file that grows meanwhile cannot make it unbounded. A file replaced by a
 // concurrent WriteAtomic is read as one complete version, either the old or
-// the new one.
+// the new one. ErrChanged may be returned when the file keeps being replaced;
+// the caller retries.
 func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 	if err := validName(name); err != nil {
 		return nil, err
@@ -408,9 +424,12 @@ func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 // the directory is flushed after a successful create. The caller closes the
 // file.
 //
-// Residual: with O_CREATE, a dangling in-directory symlink planted after the
-// first look makes the open create its target before the second look refuses
-// the link; that stray file stays inside the trusted directory.
+// The create is exclusive, so a link (even a dangling one) planted after the
+// first look makes the open fail instead of creating its target, and a file
+// that someone else created is never removed by the cleanup. ErrChanged may be
+// returned when the file keeps being replaced; the caller retries. The
+// returned file is in non-blocking mode, which does not affect a regular file.
+// If the directory flush after a create fails, the new file stays in place.
 func (d *Dir) OpenAppend(name string, maxSize int64) (*os.File, int64, error) {
 	if err := validName(name); err != nil {
 		return nil, 0, err
