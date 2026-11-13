@@ -110,7 +110,7 @@ func TestOOMGroupEpisodeEnds(t *testing.T) {
 	// Lines of other transports do not end it: the journal interleaves them.
 	other := sshEv(failed("203.0.113.9"))
 	forged := kernEv("x invoked oom-killer")
-	forged.Transport, forged.UID = "syslog", 1000
+	forged.Transport, forged.UID, forged.Comm = "syslog", 1000, "kernel"
 	wantSubjects(t, "other transports do not end the episode", subjects(t, with(
 		sysdEv("hoggroup.service: A process of this unit has been killed by the OOM killer."), other, forged, killedEv("sleep", 102))...), "hoggroup.service")
 	// A second group kill opens its own episode after the first has ended.
@@ -181,7 +181,7 @@ func TestOOMGroupLineShapes(t *testing.T) {
 	}
 	// The same text from another transport, from a posture event or without a clock value opens nothing.
 	user := kernEv(ok)
-	user.Transport, user.UID, user.PID = "syslog", 1000, 4000
+	user.Transport, user.UID, user.PID, user.Comm = "syslog", 1000, 4000, "kernel"
 	if opens(user, t0) {
 		t.Error("a user's line opened an episode")
 	}
@@ -266,9 +266,7 @@ func TestOOMForeignKillAfterUserKills(t *testing.T) {
 		if i == 3 {
 			// PID 1 and the user manager report in between.
 			eval(sysdEv("user@1000.service: A process of this unit has been killed by the OOM killer."), at)
-			um := sysdEv("run-r00.service: A process of this unit has been killed by the OOM killer.")
-			um.UID, um.PID, um.SystemdUnit = 1000, 347, "user@1000.service"
-			eval(um, at)
+			eval(userManagerEv("run-r00.service: A process of this unit has been killed by the OOM killer."), at)
 		}
 	}
 	for i, pid := range []int{352190, 352187, 352189, 352191} {
@@ -339,6 +337,11 @@ func TestOOMGroupKillOfAUserCoversOnlyThatUser(t *testing.T) {
 		"/user.slice",
 		"/machine.slice/user-1000.slice/x",
 		"/system.slice/x.service/user.slice/user-1000.slice/y",
+		// The slice name ends at a slash or at the end of the path: a
+		// sibling whose name only starts like the user's slice is not it.
+		"/user.slice/user-1000.slicex",
+		"/user.slice/user-1000.slice.d/app.service",
+		"/user.slice/user-1000.slice-old/session-3.scope",
 		"/docker/" + containerID + "/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1.service",
 	} {
 		wantSubjects(t, memcg, subjects(t, groupLine(memcg), killedUID("nginx", 101, 0), killedUID("nginx", 102, 33)))

@@ -12,14 +12,18 @@ import (
 
 var t0 = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
+// The genuine events. Identifier and Comm hold what sshd and PID 1 really
+// carry, so that a forged event of the tests below differs from a genuine one
+// only in the fields journald sets from the sender's credentials.
 func sshEv(msg string) event.Event {
-	return event.Event{Kind: event.KindJournal, UID: 0, SystemdUnit: "ssh.service", Identifier: "sshd", PID: 900, Message: msg}
+	return event.Event{Kind: event.KindJournal, UID: 0, SystemdUnit: "ssh.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: msg}
 }
 
 func sysdEv(msg string) event.Event {
-	return event.Event{Kind: event.KindJournal, UID: 0, SystemdUnit: "init.scope", Identifier: "systemd", PID: 1, Message: msg}
+	return event.Event{Kind: event.KindJournal, UID: 0, SystemdUnit: "init.scope", Identifier: "systemd", Comm: "systemd", PID: 1, Message: msg}
 }
 
+// A kernel line has no sender process, so no Comm.
 func kernEv(msg string) event.Event {
 	return event.Event{Kind: event.KindJournal, UID: -1, Transport: "kernel", Identifier: "kernel", Message: msg}
 }
@@ -278,15 +282,18 @@ func TestSSHRejectsOtherShapes(t *testing.T) {
 
 func TestSSHForgedLinesYieldNothing(t *testing.T) {
 	line := failed("203.0.113.9")
+	// Identifier and Comm are what sshd carries: a process may name itself
+	// sshd, so neither stands for the unit or for uid 0.
 	cases := map[string]event.Event{
-		"logger -t sshd from uid 1000": {Kind: event.KindJournal, UID: 1000, SystemdUnit: "session-3.scope", Identifier: "sshd", PID: 4000, Message: line},
-		"uid 1000 in ssh.service":      {Kind: event.KindJournal, UID: 1000, SystemdUnit: "ssh.service", Identifier: "sshd", Message: line},
-		"root but other unit":          {Kind: event.KindJournal, UID: 0, SystemdUnit: "cron.service", Identifier: "sshd", Message: line},
-		"no unit":                      {Kind: event.KindJournal, UID: 0, Identifier: "sshd", Message: line},
-		"UNIT field only":              {Kind: event.KindJournal, UID: 0, Unit: "ssh.service", Identifier: "sshd", Message: line},
-		"uid absent (-1)":              {Kind: event.KindJournal, UID: -1, SystemdUnit: "ssh.service", Identifier: "sshd", Message: line},
-		"zero value uid with no unit":  {Kind: event.KindJournal, Identifier: "sshd", Message: line},
-		"posture kind":                 {Kind: event.KindPosture, UID: 0, SystemdUnit: "ssh.service", Message: line},
+		"logger -t sshd from uid 1000":   {Kind: event.KindJournal, UID: 1000, SystemdUnit: "session-3.scope", Identifier: "sshd", Comm: "sshd", PID: 4000, Message: line},
+		"uid 1000 in ssh.service":        {Kind: event.KindJournal, UID: 1000, SystemdUnit: "ssh.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"root but other unit":            {Kind: event.KindJournal, UID: 0, SystemdUnit: "cron.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"no unit":                        {Kind: event.KindJournal, UID: 0, Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"UNIT field only":                {Kind: event.KindJournal, UID: 0, Unit: "ssh.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"uid absent (-1)":                {Kind: event.KindJournal, UID: -1, SystemdUnit: "ssh.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"zero value uid with no unit":    {Kind: event.KindJournal, Identifier: "sshd", Comm: "sshd", Message: line},
+		"posture kind":                   {Kind: event.KindPosture, UID: 0, SystemdUnit: "ssh.service", Identifier: "sshd", Comm: "sshd", PID: 900, Message: line},
+		"comm sshd, uid 1000, other pid": {Kind: event.KindJournal, UID: 1000, SystemdUnit: "ssh.service", Comm: "sshd", PID: 4000, Message: line},
 	}
 	for name, ev := range cases {
 		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
@@ -368,13 +375,17 @@ func TestRestartLoopSlowAndCap(t *testing.T) {
 
 func TestRestartLoopForged(t *testing.T) {
 	msg := "app.service: Scheduled restart job, restart counter is at 1."
+	// Identifier and Comm are what PID 1 carries; a user manager is the same
+	// program and carries them too.
 	cases := map[string]event.Event{
-		"user process, UNIT set":   {Kind: event.KindJournal, UID: 1000, PID: 4000, Identifier: "systemd", Unit: "app.service", Message: msg},
-		"uid 1000 claiming pid 1":  {Kind: event.KindJournal, UID: 1000, PID: 1, Identifier: "systemd", Message: msg},
-		"root but not pid 1":       {Kind: event.KindJournal, UID: 0, PID: 812, Identifier: "systemd", SystemdUnit: "evil.service", Message: msg},
-		"user manager (pid 1234)":  {Kind: event.KindJournal, UID: 0, PID: 1234, Identifier: "systemd", Message: msg},
-		"pid 1 with absent uid":    {Kind: event.KindJournal, UID: -1, PID: 1, Message: msg},
-		"identifier systemd alone": {Kind: event.KindJournal, UID: 0, PID: 0, Identifier: "systemd", Message: msg},
+		"user process, UNIT set":             {Kind: event.KindJournal, UID: 1000, PID: 4000, Identifier: "systemd", Comm: "systemd", Unit: "app.service", Message: msg},
+		"uid 1000 claiming pid 1":            {Kind: event.KindJournal, UID: 1000, PID: 1, Identifier: "systemd", Comm: "systemd", Message: msg},
+		"root but not pid 1":                 {Kind: event.KindJournal, UID: 0, PID: 812, Identifier: "systemd", Comm: "systemd", SystemdUnit: "evil.service", Message: msg},
+		"user manager (pid 1234)":            {Kind: event.KindJournal, UID: 0, PID: 1234, Identifier: "systemd", Comm: "systemd", Message: msg},
+		"pid 1 with absent uid":              {Kind: event.KindJournal, UID: -1, PID: 1, Identifier: "systemd", Comm: "systemd", SystemdUnit: "init.scope", Message: msg},
+		"identifier systemd alone":           {Kind: event.KindJournal, UID: 0, PID: 0, Identifier: "systemd", Message: msg},
+		"comm systemd alone":                 {Kind: event.KindJournal, UID: 0, PID: 0, Comm: "systemd", Message: msg},
+		"user manager of uid 1000 (pid 347)": {Kind: event.KindJournal, UID: 1000, PID: 347, Identifier: "systemd", Comm: "systemd", SystemdUnit: "user@1000.service", Message: msg},
 	}
 	for name, ev := range cases {
 		r, _ := NewRestartLoop(Params{Threshold: 1, Window: time.Minute})
@@ -471,12 +482,18 @@ func TestOOMKeyCap(t *testing.T) {
 }
 
 func TestOOMForged(t *testing.T) {
+	const unitLine = "db.service: A process of this unit has been killed by the OOM killer."
+	// Identifier and Comm name the sender a genuine line has (the kernel,
+	// PID 1); only the journald-set transport, uid and pid differ.
 	cases := map[string]event.Event{
-		"kernel text from a user process": {Kind: event.KindJournal, UID: 1000, Identifier: "kernel", Transport: "syslog", Comm: "kernel", Message: oomKernelLine},
-		"journal transport":               {Kind: event.KindJournal, UID: 0, Identifier: "kernel", Transport: "journal", Message: oomKilledLine},
-		"empty transport":                 {Kind: event.KindJournal, UID: 0, Identifier: "kernel", Message: oomKilledLine},
-		"systemd text from uid 1000":      {Kind: event.KindJournal, UID: 1000, PID: 4000, Identifier: "systemd", Unit: "db.service", Message: "db.service: A process of this unit has been killed by the OOM killer."},
-		"systemd text, root not pid 1":    {Kind: event.KindJournal, UID: 0, PID: 99, Identifier: "systemd", Message: "db.service: A process of this unit has been killed by the OOM killer."},
+		"kernel text from a user process":   {Kind: event.KindJournal, UID: 1000, Identifier: "kernel", Transport: "syslog", Comm: "kernel", Message: oomKernelLine},
+		"journal transport":                 {Kind: event.KindJournal, UID: 0, Identifier: "kernel", Transport: "journal", Comm: "kernel", Message: oomKilledLine},
+		"empty transport":                   {Kind: event.KindJournal, UID: 0, Identifier: "kernel", Comm: "kernel", Message: oomKilledLine},
+		"kernel text, no uid, no transport": {Kind: event.KindJournal, UID: -1, Identifier: "kernel", Comm: "kernel", Message: oomKilledLine},
+		"systemd text from uid 1000":        {Kind: event.KindJournal, UID: 1000, PID: 4000, Identifier: "systemd", Comm: "systemd", Unit: "db.service", Message: unitLine},
+		"systemd text, root not pid 1":      {Kind: event.KindJournal, UID: 0, PID: 99, Identifier: "systemd", Comm: "systemd", Message: unitLine},
+		"systemd text, uid 1000 as pid 1":   {Kind: event.KindJournal, UID: 1000, PID: 1, Identifier: "systemd", Comm: "systemd", SystemdUnit: "init.scope", Message: unitLine},
+		"user manager of uid 1000":          {Kind: event.KindJournal, UID: 1000, PID: 347, Identifier: "systemd", Comm: "systemd", SystemdUnit: "user@1000.service", Message: unitLine},
 	}
 	for name, ev := range cases {
 		r, _ := NewOOMKill(OOMParams{Window: time.Hour})

@@ -20,10 +20,11 @@ import (
 // ",task_memcg=" or ",task=". oomKillRE therefore fixes only the kernel's own
 // parts and takes the command name after the last ",task="; the text before
 // it is read by oomCgroupsRE and unitOfKill, which accept a cgroup path only
-// when it cannot have been steered by such a name.
+// when it cannot have been steered by such a name: a name with a comma or a
+// line break gives no unit.
 var (
 	oomKillRE    = regexp.MustCompile(`(?s)\Aoom-kill:constraint=[A-Z_]+,nodemask=(?:\(null\)|[0-9,-]*),cpuset=(.*),task=(.*),pid=([0-9]+),uid=[0-9]+\z`)
-	oomCgroupsRE = regexp.MustCompile(`\A[^,]*,mems_allowed=[0-9,-]*,(?:global_oom|oom_memcg=([^,]*)),task_memcg=([^,]*)\z`)
+	oomCgroupsRE = regexp.MustCompile(`\A[^,\n]*,mems_allowed=[0-9,-]*,(?:global_oom|oom_memcg=([^,\n]*)),task_memcg=([^,\n]*)\z`)
 	oomKilledRE  = regexp.MustCompile(`(?s)\A(?:Memory cgroup out of memory|Out of memory): Killed process ([0-9]+) \((.*)\) total-vm:`)
 	oomGroupRE   = regexp.MustCompile(`\ATasks in (/.*) are going to be killed due to memory\.oom\.group set\z`)
 	oomUnitRE    = regexp.MustCompile(`\A(` + unitPattern + `): (?:A process of this unit has been killed by the OOM killer\.|Failed with result 'oom-kill'\.)\z`)
@@ -36,8 +37,10 @@ var killedUIDRE = regexp.MustCompile(`\A[0-9]+kB, anon-rss:[0-9]+kB, file-rss:[0
 
 // userSliceRE matches a user's slice and every cgroup below it. PID 1 creates
 // the slice for the uid in its name; the user's sessions and service manager,
-// and every cgroup that user may create, lie below it.
-var userSliceRE = regexp.MustCompile(`\A/user\.slice/user-([0-9]+)\.slice`)
+// and every cgroup that user may create, lie below it. The slice name ends at
+// a slash or at the end of the path, so a sibling whose name only starts like
+// a user's slice is not one.
+var userSliceRE = regexp.MustCompile(`\A/user\.slice/user-([0-9]+)\.slice(?:/|\z)`)
 
 // taskMemcgMark starts the victim's cgroup path in the kernel's kill summary.
 const taskMemcgMark = ",task_memcg="
@@ -77,7 +80,10 @@ const taskMemcgMark = ",task_memcg="
 // (/user.slice/user-<uid>.slice/), the episode therefore covers only Killed
 // lines that name this uid: the group kills of a user never cover the kill
 // of somebody else's process. A line with another uid, or without a uid (an
-// older kernel), is judged on its own key.
+// older kernel), is judged on its own key. The limit is the uid, not the
+// cgroup: a process of the same uid outside that user's slice (in a system
+// unit or a container that runs as this uid), killed directly after the
+// group's lines and without a kill summary of its own, is still covered.
 //
 // Limits: the rule must see every kernel line in journal order, or an
 // episode ends late. For a group outside the user slices (a system unit, a
@@ -150,7 +156,8 @@ func inCgroup(path, root string) bool {
 //   - ",task_memcg=" occurs exactly once in the whole summary, so the one
 //     occurrence is the kernel's own and the path after it is the victim's;
 //   - the cpuset name and both cgroup paths are free of commas, so no field
-//     ends early or swallows the next one;
+//     ends early or swallows the next one, and free of line breaks (the
+//     name of a unit holds none);
 //   - for a kill scoped to a cgroup, the victim's path is that cgroup or lies
 //     below it, as it does in every summary the kernel writes;
 //   - the victim's path is rooted in slices (see serviceOfCgroup).

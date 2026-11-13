@@ -31,6 +31,15 @@ func killedLine(comm string, pid int) string {
 	return fmt.Sprintf("Memory cgroup out of memory: Killed process %d (%s) total-vm:26940kB, anon-rss:24448kB, file-rss:1280kB, shmem-rss:0kB, UID:1000 pgtables:96kB oom_score_adj:0", pid, comm)
 }
 
+// userManagerEv is a line of the service manager of uid 1000. It is the same
+// program as PID 1 and carries the same identifier and command name; only
+// the uid and the pid journald records tell the two apart.
+func userManagerEv(msg string) event.Event {
+	ev := sysdEv(msg)
+	ev.UID, ev.PID, ev.SystemdUnit = 1000, 347, "user@1000.service"
+	return ev
+}
+
 var (
 	unitFP = func(unit string) event.Fingerprint { return event.FingerprintOf(IDOOMKill, "unit", unit) }
 	commFP = func(comm string) event.Fingerprint { return event.FingerprintOf(IDOOMKill, "comm", comm) }
@@ -67,10 +76,12 @@ func TestSweepOOMCapturedCommaCgroup(t *testing.T) {
 			if s := r.Evaluate(kernEv(killedLine("tail", 352057)), t0); len(s) != 0 {
 				t.Fatalf("Killed line of the same victim: %+v", s)
 			}
-			um := sysdEv("-.slice: A process of this unit has been killed by the OOM killer.")
-			um.UID, um.PID, um.SystemdUnit = 1000, 347, "user@1000.service"
-			if s := r.Evaluate(um, t0); len(s) != 0 {
+			if s := r.Evaluate(userManagerEv("-.slice: A process of this unit has been killed by the OOM killer."), t0); len(s) != 0 {
 				t.Fatalf("user manager line: %+v", s)
+			}
+			// The user manager also names units of its own; a name it shares with a system unit is not that unit.
+			if s := r.Evaluate(userManagerEv("postgresql.service: A process of this unit has been killed by the OOM killer."), t0); len(s) != 0 {
+				t.Fatalf("user manager line for a unit of its own: %+v", s)
 			}
 			// PID 1 names the unit the kill really happened in.
 			if s := r.Evaluate(sysdEv("user@1000.service: A process of this unit has been killed by the OOM killer."), t0); len(s) != 1 || s[0].Fingerprint != unitFP("user@1000.service") {
@@ -88,9 +99,9 @@ func TestSweepOOMCapturedCommaCgroup(t *testing.T) {
 	}
 }
 
-// TestSweepOOMKillSummaryFields puts commas and field names into each name
-// of the kill summary. want is the subject; a unit is expected only where
-// wantUnit is set.
+// TestSweepOOMKillSummaryFields puts commas, line breaks and field names into
+// each name of the kill summary. want is the subject; a unit is expected only
+// where wantUnit is set.
 func TestSweepOOMKillSummaryFields(t *testing.T) {
 	const (
 		svc  = "/system.slice/app.service"
@@ -133,6 +144,18 @@ func TestSweepOOMKillSummaryFields(t *testing.T) {
 		{"limited cgroup is only a name prefix", oomSummary("/", "oom_memcg=/system.slice/db", "/system.slice/db.service", "tail", 77, 0), "tail", false, true},
 		{"unit name below a user manager", oomSummary("/", "oom_memcg="+user+"/app.slice/postgresql.service", user+"/app.slice/postgresql.service", "tail", 77, 1000), "user@1000.service", true, true},
 		{"unit name below a container", oomSummary(containerID, "oom_memcg=/docker/"+containerID+"/system.slice/postgresql.service", "/docker/"+containerID+"/system.slice/postgresql.service", "tail", 77, 0), "tail", false, true},
+
+		// A line break in a name is treated like a comma: no unit. The
+		// other fields of each case are those of a control above.
+		{"cpuset name with a line break", oomSummary("a\nb", "oom_memcg="+svc, svc, "tail", 77, 0), "tail", false, true},
+		{"cpuset name with a line break, global kill", oomSummary("a\nb", "global_oom", svc, "tail", 77, 0), "tail", false, true},
+		{"line break in oom_memcg, consistent task_memcg below a user manager", oomSummary("/", "oom_memcg="+user+"/a\nb", user+"/a\nb", "tail", 77, 1000), "tail", false, true},
+		{"line break in oom_memcg, victim below it", oomSummary("/", "oom_memcg="+user+"/a\nb", user+"/a\nb/c", "tail", 77, 1000), "tail", false, true},
+		{"line break in task_memcg only", oomSummary("/", "oom_memcg="+svc, svc+"/a\nb", "tail", 77, 0), "tail", false, true},
+		{"line break in task_memcg only, global kill", oomSummary("/", "global_oom", svc+"/a\nb", "tail", 77, 0), "tail", false, true},
+		{"line break in task_memcg below a user manager", oomSummary("/", "oom_memcg="+user, user+"/a\nb", "tail", 77, 1000), "tail", false, true},
+		{"line break at the end of task_memcg", oomSummary("/", "oom_memcg="+svc, svc+"\n", "tail", 77, 0), "tail", false, true},
+		{"line break in a slice name above a unit name", oomSummary("/", "global_oom", "/a\nb.slice/postgresql.service", "tail", 77, 0), "tail", false, true},
 
 		// Fields the kernel writes itself, read strictly before a unit is derived.
 		{"mems_allowed is not a node list", strings.Replace(oomSummary("/", "global_oom", svc, "tail", 77, 0), "mems_allowed=0", "mems_allowed=x", 1), "tail", false, true},

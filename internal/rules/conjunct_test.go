@@ -49,6 +49,93 @@ func TestCappedStructuresStayConsistent(t *testing.T) {
 			t.Fatalf("seen set after %d: list %d, map %d", i, s.order.Len(), len(s.keys))
 		}
 	}
+	t.Run("after a clock reset", clockResetDropsTheEvictionOrder)
+}
+
+// A clock reset drops the eviction order together with the keys. Afterwards
+// the structures are filled to the cap again, with a key from before the
+// reset among the new ones: the next key evicts the oldest key added since
+// the reset, not the re-added one, and the list holds no entry of before.
+func clockResetDropsTheEvictionOrder(t *testing.T) {
+	const w = time.Minute
+	late := t0.Add(time.Hour)
+
+	c := newWindowCounter(Params{Threshold: 2, Window: w, MaxKeys: 3})
+	c.hit("A", late)
+	c.hit("B", late)
+	c.hit("X", t0) // a step back of an hour: reset, X is the first key after it
+	if c.order.Len() != 1 || len(c.keys) != 1 {
+		t.Errorf("window counter after the reset: list %d, map %d, want 1 and 1", c.order.Len(), len(c.keys))
+	}
+	c.hit("A", t0)
+	c.hit("C", t0) // at the cap: X, A, C
+	if c.order.Len() != len(c.keys) || len(c.keys) != 3 {
+		t.Errorf("window counter at the cap: list %d, map %d, want 3 and 3", c.order.Len(), len(c.keys))
+	}
+	c.hit("D", t0) // evicts X, the least recently seen key since the reset
+	if _, ok := c.keys["X"]; ok {
+		t.Error("window counter: X was not evicted")
+	}
+	for _, k := range []string{"A", "C", "D"} {
+		if _, ok := c.keys[k]; !ok {
+			t.Errorf("window counter: %s was evicted, want X", k)
+		}
+	}
+	if c.order.Len() != len(c.keys) || len(c.keys) != 3 {
+		t.Errorf("window counter after the eviction: list %d, map %d, want 3 and 3", c.order.Len(), len(c.keys))
+	}
+	if front := c.order.Front().Value.(*keyState).key; front != "A" {
+		t.Errorf("window counter: next key to evict is %s, want A", front)
+	}
+	// A kept its hit since the reset (and none of before): the next one crosses the threshold.
+	if _, fired := c.hit("A", t0); !fired {
+		t.Error("window counter: the re-added key lost its hit")
+	}
+
+	s := newSeenSet(w, 3)
+	s.add(late, "A", "B")
+	s.add(t0, "X") // reset
+	if s.order.Len() != 1 || len(s.keys) != 1 {
+		t.Errorf("seen set after the reset: list %d, map %d, want 1 and 1", s.order.Len(), len(s.keys))
+	}
+	if _, fresh := s.add(t0, "A"); !fresh {
+		t.Error("seen set: a key of before the reset was still remembered")
+	}
+	s.add(t0, "C") // at the cap: X, A, C
+	if s.order.Len() != len(s.keys) || len(s.keys) != 3 {
+		t.Errorf("seen set at the cap: list %d, map %d, want 3 and 3", s.order.Len(), len(s.keys))
+	}
+	s.add(t0, "D") // evicts X, the oldest key since the reset
+	if _, ok := s.keys["X"]; ok {
+		t.Error("seen set: X was not evicted")
+	}
+	for _, k := range []string{"A", "C", "D"} {
+		if _, ok := s.keys[k]; !ok {
+			t.Errorf("seen set: %s was evicted, want X", k)
+		}
+	}
+	if s.order.Len() != len(s.keys) || len(s.keys) != 3 {
+		t.Errorf("seen set after the eviction: list %d, map %d, want 3 and 3", s.order.Len(), len(s.keys))
+	}
+	if front := s.order.Front().Value.(*seenEntry).key; front != "A" {
+		t.Errorf("seen set: next key to evict is %s, want A", front)
+	}
+	if _, fresh := s.add(t0, "A"); fresh {
+		t.Error("seen set: the re-added key was forgotten")
+	}
+
+	// The same through a rule: after a reset at the cap, the address that
+	// was counted before the reset and again after it keeps its count.
+	r := mustBrute(t, Params{Threshold: 2, Window: w, MaxKeys: 3})
+	r.Evaluate(sshEv(failed("192.0.2.1")), late)
+	r.Evaluate(sshEv(failed("192.0.2.2")), late)
+	n := 0
+	for _, ip := range []string{"192.0.2.9", "192.0.2.1", "192.0.2.3", "192.0.2.4", "192.0.2.1"} {
+		n += len(r.Evaluate(sshEv(failed(ip)), t0))
+	}
+	if n != 1 {
+		t.Errorf("ssh rule after a reset at the cap: %d signals, want 1 (two lines of 192.0.2.1 since the reset)", n)
+	}
 }
 
 func TestWindowCounterTouchedKeyIsKept(t *testing.T) {
