@@ -4,6 +4,11 @@
 
 ## 2026-11-13
 
+- Re-verified `invariant-config-trust-walk.md` after `internal/config` gained
+  the strictly validated `watch:` section and `docs/configuration.md` its
+  reference. The section has no path keys, so the trust walk is unchanged;
+  the cited lines in `config.go` (`openCheckedDir(mainDir`, `descend(dirRoot`)
+  still match.
 - Re-verified `invariant-placement.md` and `invariant-doctor-effective-unit.md`
   after `internal/install/units.go` split the shared hardening text into the
   sandbox part and per-unit process and resource lines and gained the watch
