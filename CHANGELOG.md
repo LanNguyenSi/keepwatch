@@ -33,6 +33,27 @@ report.
   reports that the lock is held instead of running twice; the lock file is
   kept after release, and the lock is unsupported rather than silently absent
   on platforms without `flock`.
+- An incident store for the watch daemon: signals are grouped by fingerprint
+  into incidents with a short stable id, and a repeated signal updates the
+  count and last-seen time, a closed incident reopens (and counts the
+  reopening), and a new or reopened incident asks for a notification that
+  stays pending until it is marked as sent. Incidents live in `incidents.json`
+  in the state directory (versioned, written atomically, at most 500). Open or
+  acked incidents idle for 7 days are closed, and when the store is full the
+  least severe incident is evicted for a signal that is at least as severe
+  (closed incidents go first), so a flood of low-severity incidents cannot
+  blind the daemon. A file that is corrupt or of another version is reported
+  and left as it is.
+- A request spool for the watch daemon: acknowledging or closing an incident
+  is asked for by dropping a small file into `requests/` in the state
+  directory, which the daemon reads with owner, mode, size and schema checks
+  (a file that fails one is reported with its reason instead of being
+  applied) and consumes. At most 100 request files are looked at per pass,
+  other entries of the directory are reported apart (at most 20, never
+  opened) so they cannot hold requests back, and at most 10000 directory
+  entries are examined per pass, with a flag when there are more (while it is
+  set, order is kept among the examined entries only). Leftover temporary files
+  are swept by age, and those dated ahead of the clock are swept at once.
 
 ### Security
 
