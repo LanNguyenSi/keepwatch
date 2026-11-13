@@ -10,6 +10,11 @@
 // it would let a second acquirer lock a different file and both would
 // believe they were the watch.
 //
+// The lock is held only while the Lock stays reachable: an *os.File closes
+// its descriptor when it is garbage collected, which drops the flock, so
+// keep the Lock reachable until Release (a deferred l.Release() in main
+// keeps it reachable until the end).
+//
 // Only watch takes this lock; check and the timer stay unlocked (a known
 // limit). On platforms other than linux and darwin, Acquire fails with an
 // error for which errors.Is(err, ErrUnsupported) holds.

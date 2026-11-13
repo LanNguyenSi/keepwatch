@@ -16,7 +16,10 @@ import (
 // lock is a lock, not a log.
 const maxLockSize = 4096
 
-// Lock is a held lock on the lock file of one state directory.
+// Lock is a held lock on the lock file of one state directory. The lock is
+// held only while the Lock stays reachable: an *os.File closes its
+// descriptor when it is garbage collected, which drops the flock, so keep
+// the Lock reachable until Release (a deferred l.Release() does).
 type Lock struct {
 	path string
 	dir  *securefile.Dir
@@ -33,6 +36,20 @@ func (l *Lock) Path() string { return l.path }
 // mode 0600 when created, a trusted owner) and locked with a non-blocking
 // exclusive flock. Another watch holds it when the returned error satisfies
 // errors.Is(err, ErrLocked). A new Lock must be released with Release, once.
+// Keep the returned Lock reachable until Release: an *os.File closes its
+// descriptor when it is garbage collected, which drops the flock.
+//
+// Any error other than one for which errors.Is(err, ErrLocked) holds means
+// the lock state is unknown. A securefile.ErrChanged (the name was replaced
+// while it was being opened) is retryable. A securefile.ErrTooLarge means
+// watch.lock is not keepwatch's own lock file: Acquire wraps it with that
+// hint, and no retry succeeds until that file is dealt with.
+//
+// A known limit: renaming or removing watch.lock while a watch holds it
+// lets a second watch start, because the next Acquire then creates a fresh
+// file and flocks that; state_dir is trusted (root-owned or owned by the
+// running user, mode 0700), so doing that takes the rights of whoever could
+// stop the watch anyway.
 func Acquire(dir string) (*Lock, error) {
 	d, err := securefile.OpenDir(dir, false, nil)
 	if err != nil {
@@ -41,6 +58,9 @@ func Acquire(dir string) (*Lock, error) {
 	f, _, err := d.OpenAppend(lockFileName, maxLockSize)
 	if err != nil {
 		d.Close()
+		if errors.Is(err, securefile.ErrTooLarge) {
+			return nil, fmt.Errorf("%w: watch.lock is not keepwatch's own lock file", err)
+		}
 		return nil, err
 	}
 	l := &Lock{path: filepath.Join(d.Path(), lockFileName), dir: d, f: f}

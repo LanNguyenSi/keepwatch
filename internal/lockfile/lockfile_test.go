@@ -4,6 +4,7 @@ package lockfile
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,8 +27,27 @@ const childDirEnv = "KEEPWATCH_LOCKFILE_TEST_DIR"
 
 func lockPath(dir string) string { return filepath.Join(dir, lockFileName) }
 
+// stateDir returns a fresh state directory whose mode is exactly 0700.
+// t.TempDir applies the process umask, so under a permissive umask such as
+// 002 its directory is group-writable and securefile refuses the directory
+// itself, which would fail the other tests and make the refusal tests pass
+// for the wrong reason. Mkdir plus an explicit Chmod is umask-independent
+// (Chmod is not masked), and the child of the re-exec test inherits the
+// directory built here.
+func stateDir(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestAcquireBlocksSecondAcquireUntilRelease(t *testing.T) {
-	dir := t.TempDir()
+	dir := stateDir(t)
 	l1, err := Acquire(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +80,7 @@ func TestAcquireBlocksSecondAcquireUntilRelease(t *testing.T) {
 }
 
 func TestReleaseKeepsTheLockFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := stateDir(t)
 	l, err := Acquire(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +105,7 @@ func TestReleaseKeepsTheLockFile(t *testing.T) {
 }
 
 func TestReleaseClosesTheFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := stateDir(t)
 	l, err := Acquire(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -98,8 +119,44 @@ func TestReleaseClosesTheFile(t *testing.T) {
 	}
 }
 
+func TestNoDescriptorLeak(t *testing.T) {
+	dir := stateDir(t)
+	// A leaked *os.File is closed by its finalizer, which would hide the
+	// leak from the count: keep the GC off while measuring.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	before := openFDCount(t)
+	for range 50 {
+		l, err := Acquire(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Acquire(dir); !errors.Is(err, ErrLocked) {
+			l.Release()
+			t.Fatalf("second Acquire: got %v, want ErrLocked", err)
+		}
+		if err := l.Release(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := openFDCount(t); after > before+2 {
+		t.Fatalf("descriptors leaked: %d open before 50 acquire/refused/release cycles, %d after", before, after)
+	}
+}
+
+// openFDCount counts the entries of /dev/fd, the process's own open file
+// descriptors (on linux a symlink to /proc/self/fd). The counting open
+// appears in both samples and cancels out.
+func openFDCount(t *testing.T) int {
+	t.Helper()
+	des, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(des)
+}
+
 func TestAcquireRefusesSymlinkedLockFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := stateDir(t)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("do not open"), 0o600); err != nil {
 		t.Fatal(err)
@@ -110,6 +167,8 @@ func TestAcquireRefusesSymlinkedLockFile(t *testing.T) {
 	}
 	if _, err := Acquire(dir); !errors.Is(err, securefile.ErrUntrusted) {
 		t.Fatalf("got %v, want ErrUntrusted", err)
+	} else if !strings.Contains(err.Error(), lockPath(dir)) {
+		t.Fatalf("error %q does not name the lock file %s: the directory may have been refused instead", err, lockPath(dir))
 	}
 	fi, err := os.Lstat(link)
 	if err != nil {
@@ -128,7 +187,7 @@ func TestAcquireRefusesSymlinkedLockFile(t *testing.T) {
 }
 
 func TestAcquireRefusesGroupWritableLockFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := stateDir(t)
 	p := lockPath(dir)
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -138,11 +197,25 @@ func TestAcquireRefusesGroupWritableLockFile(t *testing.T) {
 	}
 	if _, err := Acquire(dir); !errors.Is(err, securefile.ErrUntrusted) {
 		t.Fatalf("got %v, want ErrUntrusted", err)
+	} else if !strings.Contains(err.Error(), lockPath(dir)) {
+		t.Fatalf("error %q does not name the lock file %s: the directory may have been refused instead", err, lockPath(dir))
+	}
+}
+
+func TestAcquireRefusesOversizedLockFile(t *testing.T) {
+	dir := stateDir(t)
+	if err := os.WriteFile(lockPath(dir), make([]byte, maxLockSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Acquire(dir); !errors.Is(err, securefile.ErrTooLarge) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	} else if !strings.Contains(err.Error(), "not keepwatch's own lock file") {
+		t.Fatalf("error %q does not say the lock file is not keepwatch's own", err)
 	}
 }
 
 func TestAcquireMissingStateDir(t *testing.T) {
-	if _, err := Acquire(filepath.Join(t.TempDir(), "state")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := Acquire(filepath.Join(stateDir(t), "missing")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("got %v, want ErrNotExist", err)
 	}
 }
@@ -175,7 +248,7 @@ func TestCrossProcessExclusion(t *testing.T) {
 		childHold(dir)
 		return
 	}
-	dir := t.TempDir()
+	dir := stateDir(t)
 	cmd := exec.Command(os.Args[0], "-test.run", "^TestCrossProcessExclusion$")
 	cmd.Env = append(os.Environ(), childDirEnv+"="+dir)
 	stdin, err := cmd.StdinPipe()
@@ -186,6 +259,8 @@ func TestCrossProcessExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	lines := make(chan string, 8)
 	go func() {
 		s := bufio.NewScanner(stdout)
@@ -197,6 +272,22 @@ func TestCrossProcessExclusion(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+	t.Cleanup(func() {
+		stop()
+		if t.Failed() && stderr.Len() > 0 {
+			t.Logf("child stderr:\n%s", stderr.String())
+		}
+	})
 	await := func(want string) {
 		t.Helper()
 		select {
@@ -223,8 +314,9 @@ func TestCrossProcessExclusion(t *testing.T) {
 	}
 	await("released")
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("child: %v", err)
+		t.Fatalf("child: %v\nstderr:\n%s", err, stderr.String())
 	}
+	stopped = true
 	l, err := Acquire(dir)
 	if err != nil {
 		t.Fatalf("Acquire after the child exited: %v", err)
