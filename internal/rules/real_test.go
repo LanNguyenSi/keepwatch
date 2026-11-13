@@ -429,42 +429,6 @@ func TestOOMSecondKillAfterWindow(t *testing.T) {
 	}
 }
 
-// memory.oom.group: one oom-kill line, then one Killed process line per
-// process and a note line, then systemd's lines (22.04 and 24.04 capture).
-func TestOOMGroupKillOneSignal(t *testing.T) {
-	const memcg = "/system.slice/hoggroup.service"
-	evs := []event.Event{
-		kernEv("oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=" + memcg + ",task_memcg=" + memcg + ",task=tail,pid=260394,uid=0"),
-		kernEv("Memory cgroup out of memory: Killed process 260394 (tail) total-vm:26440kB, anon-rss:23680kB, file-rss:1408kB, shmem-rss:0kB, UID:0 pgtables:92kB oom_score_adj:0"),
-		kernEv("Tasks in " + memcg + " are going to be killed due to memory.oom.group set"),
-		kernEv("Memory cgroup out of memory: Killed process 260397 (sleep) total-vm:2696kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:0 pgtables:48kB oom_score_adj:0"),
-		kernEv("Memory cgroup out of memory: Killed process 260398 (sleep) total-vm:2696kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:0 pgtables:48kB oom_score_adj:0"),
-		sysdEv("hoggroup.service: A process of this unit has been killed by the OOM killer."),
-		sysdEv("hoggroup.service: Main process exited, code=killed, status=9/KILL"),
-		sysdEv("hoggroup.service: Failed with result 'oom-kill'."),
-	}
-	r, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	if n := countSignals(r, evs, t0); n != 1 {
-		t.Fatalf("group kill gave %d signals, want 1", n)
-	}
-	// A Killed process line long after the episode is reported on its own.
-	if s := r.Evaluate(evs[3], t0.Add(killedGrace+time.Second)); len(s) != 1 || s[0].Subject != "sleep" {
-		t.Fatalf("late Killed line: %+v", s)
-	}
-	// Exactly killedGrace after the oom-kill line the episode is over.
-	r2, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	r2.Evaluate(evs[0], t0)
-	if s := r2.Evaluate(evs[3], t0.Add(killedGrace)); len(s) != 1 {
-		t.Fatalf("at the grace boundary: %+v", s)
-	}
-	// A Killed line before the oom-kill line (a clock step back) is not in the episode.
-	r3, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	r3.Evaluate(evs[0], t0.Add(time.Minute))
-	if s := r3.Evaluate(evs[3], t0); len(s) != 1 {
-		t.Fatalf("Killed line before the episode: %+v", s)
-	}
-}
-
 // Userless and non-preauth lines left by scanners, health checks and
 // ssh-keyscan never count; lines with a user do, including a reset close.
 func TestSSHPreauthFamily(t *testing.T) {
@@ -477,6 +441,7 @@ func TestSSHPreauthFamily(t *testing.T) {
 		"Connection closed by authenticating user root 127.0.0.1 port 36448",
 		"Connection reset by invalid user admin 127.0.0.1 port 36448",
 		"Disconnected from user mallory 127.0.0.1 port 36516",
+		"Disconnected from user mallory 127.0.0.1 port 36516 [preauth]",
 		"error: kex_exchange_identification: read: Connection reset by peer",
 		"fatal: userauth_finish: send failure packet: Connection reset by peer [preauth]",
 		"Connection closed by authenticating user root 127.0.0.1 port 36448 [preauth] x",

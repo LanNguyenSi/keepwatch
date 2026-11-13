@@ -265,6 +265,8 @@ func TestSSHRejectsOtherShapes(t *testing.T) {
 		"Invalid user x from 1.2.3.4",
 		"Connection closed by invalid user x 1.2.3.4 port 22",
 		"Failed password for root from 999.1.1.1 port 22 ssh2",
+		"Failed publickey for root from 1.2.3.4 port 22 ssh2",
+		"Failed gssapi-with-mic for root from 1.2.3.4 port 22 ssh2",
 	}
 	for _, m := range msgs {
 		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
@@ -404,7 +406,7 @@ func TestOOMKernelAndSystemdLines(t *testing.T) {
 	if s := r.Evaluate(kernEv(oomKilledLine), t0.Add(time.Second)); len(s) != 0 {
 		t.Fatal("same victim reported twice")
 	}
-	// A different victim pid, after the kill episode, is reported.
+	// A different victim pid is reported.
 	other := strings.Replace(oomKilledLine, "1234", "999", 1)
 	if s := r.Evaluate(kernEv(other), t0.Add(10*time.Second)); len(s) != 1 || s[0].Fingerprint != event.FingerprintOf(IDOOMKill, "comm", "app") {
 		t.Fatalf("other victim: %+v", s)
@@ -435,8 +437,10 @@ func TestOOMHostileCommAndShapes(t *testing.T) {
 	r, _ := NewOOMKill(OOMParams{Window: time.Hour})
 	hostile := "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/user.slice,task=x,pid=1,uid=0,task_memcg=/system.slice/fake.service,task=y,pid=77,uid=0"
 	s := r.Evaluate(kernEv(hostile), t0)
-	if len(s) != 1 || s[0].Fingerprint != event.FingerprintOf(IDOOMKill, "comm", "x,pid=1,uid=0,task_memcg=/system.slice/fake.service,task=y") {
-		t.Fatalf("hostile comm parsed unexpectedly: %+v", s)
+	// Two task_memcg fields: no unit is derived, and the command name is the
+	// text after the last ",task=".
+	if len(s) != 1 || s[0].Subject != "y" || s[0].Fingerprint != event.FingerprintOf(IDOOMKill, "comm", "y") {
+		t.Fatalf("hostile summary parsed unexpectedly: %+v", s)
 	}
 	for _, m := range []string{"", "Out of memory: something else", "prefix oom-kill:constraint=CONSTRAINT_NONE", "Out of memory: Killed process abc (x) total-vm:1", "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/a,task=x,pid=1,uid=0 trailing"} {
 		rr, _ := NewOOMKill(OOMParams{Window: time.Hour})
@@ -526,5 +530,45 @@ func TestClockBackwardsClampsSmallStepsOnly(t *testing.T) {
 	r3.Evaluate(sshEv(failed("192.0.2.4")), t0.Add(time.Hour))
 	if s := r3.Evaluate(sshEv(failed("192.0.2.3")), t0.Add(time.Hour+time.Second)); len(s) != 0 {
 		t.Fatal("expired hit must not count")
+	}
+}
+
+// A burst that lasts longer than the window is still one burst and gives one
+// signal: the counter keeps the newest timestamps, so the count never drains
+// below the threshold while the lines keep coming.
+func TestWindowCounterLongBurstFiresOnce(t *testing.T) {
+	// One line per second for three minutes.
+	r := mustBrute(t, Params{Threshold: 3, Window: time.Minute})
+	n := 0
+	for i := 0; i < 180; i++ {
+		n += len(r.Evaluate(sshEv(failed("203.0.113.9")), t0.Add(time.Duration(i)*time.Second)))
+	}
+	if n != 1 {
+		t.Fatalf("one line per second for three minutes: %d signals, want 1", n)
+	}
+	// The same, but the first three lines arrive in the same instant: when
+	// they leave the window together, the lines since then still count.
+	r2 := mustBrute(t, Params{Threshold: 3, Window: time.Minute})
+	n = 0
+	for i := 0; i < 3; i++ {
+		n += len(r2.Evaluate(sshEv(failed("203.0.113.9")), t0))
+	}
+	for i := 1; i < 180; i++ {
+		n += len(r2.Evaluate(sshEv(failed("203.0.113.9")), t0.Add(time.Duration(i)*time.Second)))
+	}
+	if n != 1 {
+		t.Fatalf("three lines at once, then one per second for three minutes: %d signals, want 1", n)
+	}
+	// The restart rule shares the counter.
+	rl, _ := NewRestartLoop(Params{Threshold: 3, Window: time.Minute})
+	n = 0
+	for i := 0; i < 3; i++ {
+		n += len(rl.Evaluate(sysdEv("app.service: Scheduled restart job, restart counter is at 1."), t0))
+	}
+	for i := 1; i < 180; i++ {
+		n += len(rl.Evaluate(sysdEv(fmt.Sprintf("app.service: Scheduled restart job, restart counter is at %d.", i+1)), t0.Add(time.Duration(i)*time.Second)))
+	}
+	if n != 1 {
+		t.Fatalf("restart loop longer than the window: %d signals, want 1", n)
 	}
 }

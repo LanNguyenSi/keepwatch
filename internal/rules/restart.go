@@ -10,7 +10,7 @@ import (
 
 const unitPattern = `[A-Za-z0-9:_.\\@-]+\.(?:service|socket|timer|mount|path)`
 
-var scheduledRE = regexp.MustCompile(`(?s)\A(` + unitPattern + `): Scheduled restart job, restart counter is at [0-9]+\.\z`)
+var scheduledRE = regexp.MustCompile(`\A(` + unitPattern + `): Scheduled restart job, restart counter is at [0-9]+\.\z`)
 
 // RestartLoop fires when systemd schedules Threshold automatic restarts of
 // one unit within Window. Only the "<unit>: Scheduled restart job, restart

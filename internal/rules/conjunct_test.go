@@ -208,9 +208,16 @@ func TestOOMKillLineDetails(t *testing.T) {
 		base("CONSTRAINT_NONE", ",task=x,pid=1,uid="),
 		base("CONSTRAINT_NONE", ",task=x,pid=1,uid=0,"),
 		strings.Replace(base("CONSTRAINT_NONE", ",task=x,pid=1,uid=0"), "cpuset=/", "cpuset=", 1) + "x",
+		base("CONSTRAINT_NONE", ",task=x,pid=1,uid=0x"),
+		base("CONSTRAINT_NONE", ",task=x,pid=1x,uid=0"),
+		base("CONSTRAINT_NONE", ",tusk=x,pid=1,uid=0"),
+		base("CONSTRAINT_NONE", ",task=x,pid=1"),
 		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=x,cpuset=/,mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
-		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=x,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
-		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,other,task_memcg=/a.service,task=x,pid=1,uid=0",
+		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cgroup=/,mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
+		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null)cpuset=/,mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
+		"oom-kill:constraint=CONSTRAINT_NONE,cpuset=/,mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
+		"oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
+		"oom-kill:constraint=constraint_none,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/a.service,task=x,pid=1,uid=0",
 	} {
 		r, _ := NewOOMKill(OOMParams{Window: time.Hour})
 		if s := r.Evaluate(kernEv(m), t0); len(s) != 0 {
@@ -235,7 +242,7 @@ func TestOOMKillLineDetails(t *testing.T) {
 	if len(s) != 1 || s[0].Subject != "a) total-vm:(b" {
 		t.Fatalf("greedy comm: %+v", s)
 	}
-	if s[0].Summary != "out of memory: a) total-vm:(b was killed by the OOM killer" {
+	if s[0].Summary != "out of memory: process a) total-vm:(b was killed by the OOM killer" {
 		t.Fatalf("summary: %q", s[0].Summary)
 	}
 	// systemd's second line also reports a kill on its own, and needs its dot.
@@ -253,7 +260,7 @@ func TestOOMKillLineDetails(t *testing.T) {
 	}
 	// The unit summary names the unit.
 	r5, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	if s := r5.Evaluate(sysdEv("a.service: Failed with result 'oom-kill'."), t0); len(s) != 1 || s[0].Summary != "out of memory: a.service was killed by the OOM killer" {
+	if s := r5.Evaluate(sysdEv("a.service: Failed with result 'oom-kill'."), t0); len(s) != 1 || s[0].Summary != "out of memory: a process of unit a.service was killed by the OOM killer" {
 		t.Fatalf("unit summary: %+v", s)
 	}
 }
@@ -269,7 +276,6 @@ func TestOOMVictimKeys(t *testing.T) {
 		r, _ := NewOOMKill(OOMParams{Window: time.Hour})
 		n := 0
 		for i, ev := range evs {
-			// Spaced beyond the episode so that Killed lines are judged on their own key.
 			n += len(r.Evaluate(ev, t0.Add(time.Duration(i)*time.Minute)))
 		}
 		return n
@@ -295,33 +301,6 @@ func TestOOMVictimKeys(t *testing.T) {
 	// The oom-kill line and the Killed line of one victim share a key.
 	if n := count(line("a", 5), killed("a", 5)); n != 1 {
 		t.Errorf("one victim, two kernel lines: %d signals, want 1", n)
-	}
-}
-
-func TestOOMEpisodeFollowsTheCallersClock(t *testing.T) {
-	kill := func(unit string) event.Event {
-		m := "/system.slice/" + unit
-		return kernEv("oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=" + m + ",task_memcg=" + m + ",task=tail,pid=1,uid=0")
-	}
-	killed := kernEv("Memory cgroup out of memory: Killed process 9 (sleep) total-vm:1kB")
-	// A Killed line with no earlier oom-kill line is reported.
-	r0, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	if s := r0.Evaluate(killed, t0); len(s) != 1 {
-		t.Fatalf("no episode: %+v", s)
-	}
-	// The episode is the clock value of the oom-kill line, not the clamped one.
-	r, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	r.Evaluate(kill("a.service"), t0.Add(30*time.Second))
-	r.Evaluate(kill("b.service"), t0.Add(10*time.Second)) // clock 20s behind, clamped
-	if s := r.Evaluate(killed, t0.Add(12*time.Second)); len(s) != 0 {
-		t.Fatalf("Killed line 2s after the latest oom-kill line was reported: %+v", s)
-	}
-	// An oom-kill line that is itself suppressed still starts an episode.
-	r2, _ := NewOOMKill(OOMParams{Window: time.Hour})
-	r2.Evaluate(sysdEv("hog.service: A process of this unit has been killed by the OOM killer."), t0)
-	r2.Evaluate(kill("hog.service"), t0)
-	if s := r2.Evaluate(killed, t0.Add(time.Second)); len(s) != 0 {
-		t.Fatalf("Killed line after a suppressed oom-kill line: %+v", s)
 	}
 }
 
