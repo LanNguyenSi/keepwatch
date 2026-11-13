@@ -24,6 +24,12 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- A single-instance lock for the state directory: an exclusive non-blocking
+  `flock` on `watch.lock`, opened under the secure file rules (no symlink,
+  mode `0600`, trusted owner), so a second lock attempt on the same directory
+  reports that the lock is held instead of running twice; the lock file is
+  kept after release, and the lock is unsupported rather than silently
+  absent on platforms without `flock`.
 
 ### Security
 
