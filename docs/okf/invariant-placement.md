@@ -82,8 +82,8 @@ symlink in the path first. Two tests hold it honest from opposite sides:
 watch service, which shares the sandbox lines and is not installed yet) in
 both directions (an option that hides paths needs an
 entry, an entry needs an option that is actually set)
-(`internal/install/units_test.go:522#"func TestSandboxPathsFollowTheHardening"`,
-`internal/install/units.go:420#"serviceHardening = "`), and
+(`internal/install/units_test.go:550#"func TestSandboxPathsFollowTheHardening"`,
+`internal/install/units.go:422#"serviceHardening = "`), and
 `TestSandboxPathsFollowTheMeasuredSandbox` binds it to what a real sandbox
 was measured to hide in `test/systemd/`, also both directions
 (`internal/install/measured_test.go:114#"func TestSandboxPathsFollowTheMeasuredSandbox"`).

@@ -3,6 +3,11 @@
 Description=keepwatch watcher
 Wants=network-online.target
 After=network-online.target
+# Restart=on-failure with RestartSec=10s never reaches the default start limit
+# (5 starts in 10 s), so a start that always fails would loop for ever. Five
+# failed starts within 300 s leave the unit failed instead.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -38,6 +43,7 @@ SystemCallArchitectures=native
 # AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 MemoryMax=256M
+MemorySwapMax=0
 Environment=GOMEMLIMIT=64MiB
 CPUQuota=25%
 

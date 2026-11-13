@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,7 +105,8 @@ func TestRenderWatch(t *testing.T) {
 	for _, want := range []string{
 		"Type=simple", "Restart=on-failure", "RestartSec=" + watchRestartSec,
 		"CapabilityBoundingSet=", "NoNewPrivileges=yes", "ReadWritePaths=/var/lib/keepwatch",
-		"MemoryMax=" + watchMemoryMax, "Environment=GOMEMLIMIT=" + watchGoMemLimit, "CPUQuota=" + watchCPUQuota,
+		"MemoryMax=" + watchMemoryMax, "MemorySwapMax=0", "Environment=GOMEMLIMIT=" + watchGoMemLimit, "CPUQuota=" + watchCPUQuota,
+		"StartLimitIntervalSec=300", "StartLimitBurst=5",
 		"WantedBy=multi-user.target", "ExecStart=/usr/local/bin/keepwatch watch --config /etc/keepwatch/keepwatch.yaml",
 	} {
 		if !d[want] {
@@ -121,6 +123,27 @@ func TestRenderWatch(t *testing.T) {
 		if !d[l] {
 			t.Errorf("the watch unit lacks the sandbox line %q", l)
 		}
+	}
+	// The start limit can be reached: with a restart every RestartSec, the
+	// burst of starts fits in the interval, so five failed starts end in the
+	// failed state. (With the default 10 s interval it could not.)
+	restart, err1 := strconv.Atoi(strings.TrimSuffix(watchRestartSec, "s"))
+	burst, err2 := strconv.Atoi(watchStartBurst)
+	interval, err3 := strconv.Atoi(watchStartLimitS)
+	if err1 != nil || err2 != nil || err3 != nil {
+		t.Fatalf("RestartSec %q, burst %q, interval %q are not numbers", watchRestartSec, watchStartBurst, watchStartLimitS)
+	}
+	if restart*burst > interval {
+		t.Errorf("RestartSec=%s, burst %s in %s s: the start limit is not reached by restarts", watchRestartSec, watchStartBurst, watchStartLimitS)
+	}
+	// The sizing relates to the target: GOMEMLIMIT is below the 100 MiB the
+	// idle service is to stay under, and MemoryMax is above it.
+	const target = 100 << 20
+	if limit := mib(t, watchGoMemLimit); limit >= target {
+		t.Errorf("GOMEMLIMIT %s is not below 100 MiB", watchGoMemLimit)
+	}
+	if max := mib(t, watchMemoryMax); max <= target {
+		t.Errorf("MemoryMax %s is not above 100 MiB", watchMemoryMax)
 	}
 	// The empty capability set is empty: a value after the equals sign would
 	// grant capabilities.
@@ -400,9 +423,11 @@ type optionClass struct {
 	why   string
 }
 
-// hardeningClasses classifies every option of serviceHardening. A new option,
-// or a new value of one that is listed with its value, fails
-// TestSandboxPathsFollowTheHardening until it is judged here.
+// hardeningClasses classifies every option of the hardening of both kinds of
+// unit: serviceHardening (check and report) and the watch unit's
+// watchStartLimit and watchHardening. A new option, or a new value of one that
+// is listed with its value, fails TestSandboxPathsFollowTheHardening until it
+// is judged here.
 var hardeningClasses = map[string]optionClass{
 	"PrivateTmp":           {"yes", true, "an own, empty /tmp and /var/tmp"},
 	"PrivateDevices":       {"yes", true, "an own /dev with only the pseudo devices"},
@@ -435,6 +460,9 @@ var hardeningClasses = map[string]optionClass{
 	// The watch service.
 	"Restart":               {"on-failure", false, "when systemd starts the service again, no path"},
 	"RestartSec":            {"", false, "a time limit"},
+	"StartLimitIntervalSec": {"", false, "a time limit; with StartLimitBurst it lets a start that always fails end in the failed state, which RestartSec=10s and the default limit never would"},
+	"StartLimitBurst":       {"", false, "a count of starts, no path"},
+	"MemorySwapMax":         {"0", false, "a resource limit: no swap, so MemoryMax is a real ceiling; no path"},
 	"CapabilityBoundingSet": {"", false, "the capabilities of the service, no path; it hides nothing from root, which reads what the file modes give the owner (an empty value is pinned by TestRenderWatch)"},
 }
 
@@ -523,10 +551,11 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 	// Both kinds of unit are judged together: the classification is one table,
 	// so an option of the watch unit that nobody classified fails here just as
 	// one of the check unit does, and a class that neither text sets is stale.
-	for _, e := range couplingErrors(serviceHardening+watchHardening, sandboxPaths, hardeningClasses) {
+	watchOptions := watchStartLimit + watchHardening
+	for _, e := range couplingErrors(serviceHardening+watchOptions, sandboxPaths, hardeningClasses) {
 		t.Error(e)
 	}
-	for name, h := range map[string]string{"check": serviceHardening, "watch": watchHardening} {
+	for name, h := range map[string]string{"check": serviceHardening, "watch": watchOptions} {
 		for _, e := range couplingErrors(h, sandboxPaths, onlyClassesOf(h)) {
 			t.Errorf("%s: %s", name, e)
 		}
@@ -545,36 +574,36 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 	}
 	all := []Role{RoleBinary, RoleConfig, RoleState}
 	// Every option of both units once: the base of the cases below.
-	serviceHardening := serviceHardening + watchProcess + watchResources
+	allOptions := serviceHardening + watchStartLimit + watchProcess + watchResources
 	broken := []struct {
 		name      string
 		hardening string
 		table     []sandboxEntry
 		want      string
 	}{
-		{"a new option nobody classified", serviceHardening + "InaccessiblePaths=/srv\n", sandboxPaths, "unclassified option InaccessiblePaths=/srv"},
-		{"a new option that hides a temporary file system", serviceHardening + "TemporaryFileSystem=/var\n", sandboxPaths, "unclassified option TemporaryFileSystem=/var"},
-		{"a classified option with a new value", strings.Replace(serviceHardening, "ProtectHome=read-only", "ProtectHome=yes", 1), sandboxPaths, "option ProtectHome=yes was classified for the value read-only"},
-		{"a hiding option without an entry", serviceHardening, without("PrivateDevices=yes"), "option PrivateDevices=yes hides paths but sandboxPaths has no entry"},
-		{"another hiding option without an entry", serviceHardening, without("ProtectKernelModules=yes"), "option ProtectKernelModules=yes hides paths but sandboxPaths has no entry"},
-		{"an option was removed, its entry stayed", strings.Replace(serviceHardening, "PrivateTmp=yes\n", "", 1), sandboxPaths, "sandboxPaths names PrivateTmp=yes, which the hardening does not set"},
-		{"an option was removed, its classification stayed", strings.Replace(serviceHardening, "RemoveIPC=yes\n", "", 1), sandboxPaths, "hardeningClasses names RemoveIPC, which the hardening does not set"},
-		{"an entry for an option that is not set", serviceHardening, with(sandboxEntry{"PrivateUsers=yes", true, "w", []string{"/x"}, all}), "sandboxPaths names PrivateUsers=yes, which the hardening does not set"},
-		{"an entry for an option that does not hide", serviceHardening, with(sandboxEntry{"ProtectHome=read-only", true, "w", []string{"/home"}, all}), "sandboxPaths names ProtectHome=read-only, which is classified as not hiding paths"},
-		{"an entry without a path", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", nil, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
-		{"an entry without a role", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", []string{"/tmp"}, nil}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
-		{"an entry without a reason", serviceHardening, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "", []string{"/tmp"}, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"a new option nobody classified", allOptions + "InaccessiblePaths=/srv\n", sandboxPaths, "unclassified option InaccessiblePaths=/srv"},
+		{"a new option that hides a temporary file system", allOptions + "TemporaryFileSystem=/var\n", sandboxPaths, "unclassified option TemporaryFileSystem=/var"},
+		{"a classified option with a new value", strings.Replace(allOptions, "ProtectHome=read-only", "ProtectHome=yes", 1), sandboxPaths, "option ProtectHome=yes was classified for the value read-only"},
+		{"a hiding option without an entry", allOptions, without("PrivateDevices=yes"), "option PrivateDevices=yes hides paths but sandboxPaths has no entry"},
+		{"another hiding option without an entry", allOptions, without("ProtectKernelModules=yes"), "option ProtectKernelModules=yes hides paths but sandboxPaths has no entry"},
+		{"an option was removed, its entry stayed", strings.Replace(allOptions, "PrivateTmp=yes\n", "", 1), sandboxPaths, "sandboxPaths names PrivateTmp=yes, which the hardening does not set"},
+		{"an option was removed, its classification stayed", strings.Replace(allOptions, "RemoveIPC=yes\n", "", 1), sandboxPaths, "hardeningClasses names RemoveIPC, which the hardening does not set"},
+		{"an entry for an option that is not set", allOptions, with(sandboxEntry{"PrivateUsers=yes", true, "w", []string{"/x"}, all}), "sandboxPaths names PrivateUsers=yes, which the hardening does not set"},
+		{"an entry for an option that does not hide", allOptions, with(sandboxEntry{"ProtectHome=read-only", true, "w", []string{"/home"}, all}), "sandboxPaths names ProtectHome=read-only, which is classified as not hiding paths"},
+		{"an entry without a path", allOptions, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", nil, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"an entry without a role", allOptions, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "w", []string{"/tmp"}, nil}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
+		{"an entry without a reason", allOptions, append(without("PrivateTmp=yes"), sandboxEntry{"PrivateTmp=yes", true, "", []string{"/tmp"}, all}), "the sandboxPaths entry of PrivateTmp=yes has no path"},
 		// An entry without an option is allowed, and held to the same.
-		{"an entry without an option and without a reason", serviceHardening, with(sandboxEntry{"", false, "", []string{"/x"}, all}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
-		{"an entry without an option and without a role", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/x"}, nil}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
-		{"an entry without an option and without a path", serviceHardening, with(sandboxEntry{"", true, "w", nil, all}), "the sandboxPaths entry of (no option)  has no path, no role or no reason"},
-		{"a path in two entries", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/run"}, all}), "sandboxPaths has the path /run twice"},
-		{"a path with a trailing slash", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/x/"}, all}), "has the path /x/, which is not a clean absolute path"},
-		{"a relative path", serviceHardening, with(sandboxEntry{"", false, "w", []string{"x"}, all}), "has the path x, which is not a clean absolute path"},
-		{"a line that is no option", serviceHardening + "PrivateTmp\n", sandboxPaths, "not an option line: PrivateTmp"},
+		{"an entry without an option and without a reason", allOptions, with(sandboxEntry{"", false, "", []string{"/x"}, all}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
+		{"an entry without an option and without a role", allOptions, with(sandboxEntry{"", false, "w", []string{"/x"}, nil}), "the sandboxPaths entry of (no option) /x has no path, no role or no reason"},
+		{"an entry without an option and without a path", allOptions, with(sandboxEntry{"", true, "w", nil, all}), "the sandboxPaths entry of (no option)  has no path, no role or no reason"},
+		{"a path in two entries", allOptions, with(sandboxEntry{"", false, "w", []string{"/run"}, all}), "sandboxPaths has the path /run twice"},
+		{"a path with a trailing slash", allOptions, with(sandboxEntry{"", false, "w", []string{"/x/"}, all}), "has the path /x/, which is not a clean absolute path"},
+		{"a relative path", allOptions, with(sandboxEntry{"", false, "w", []string{"x"}, all}), "has the path x, which is not a clean absolute path"},
+		{"a line that is no option", allOptions + "PrivateTmp\n", sandboxPaths, "not an option line: PrivateTmp"},
 		{"a new option of the watch unit nobody classified", watchHardening + "ProtectProc=invisible\n", sandboxPaths, "unclassified option ProtectProc=invisible"},
 		{"a classified option of the watch unit with a new value", strings.Replace(watchHardening, "Restart=on-failure", "Restart=always", 1), sandboxPaths, "option Restart=always was classified for the value on-failure"},
-		{"a watch option was removed, its classification stayed", strings.Replace(serviceHardening, "CapabilityBoundingSet=\n", "", 1), sandboxPaths, "hardeningClasses names CapabilityBoundingSet, which the hardening does not set"},
+		{"a watch option was removed, its classification stayed", strings.Replace(allOptions, "CapabilityBoundingSet=\n", "", 1), sandboxPaths, "hardeningClasses names CapabilityBoundingSet, which the hardening does not set"},
 	}
 	for _, c := range broken {
 		errs := couplingErrors(c.hardening, c.table, hardeningClasses)
@@ -602,8 +631,24 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 		unit      []byte
 		hardening string
 	}{"check": {files[0].Content, serviceHardening}, "report": {files[1].Content, serviceHardening}, "watch": {watch.Content, watchHardening}} {
-		_, service, _ := strings.Cut(string(c.unit), "[Service]\n")
-		service, _, _ = strings.Cut(service, "\n[Install]\n")
+		unit, service, _ := strings.Cut(string(c.unit), "[Service]\n")
+		service, install, _ := strings.Cut(service, "\n[Install]\n")
+		if name == "watch" {
+			// The [Unit] section holds the start limit besides the description
+			// and the ordering, and the [Install] section nothing but WantedBy.
+			for _, line := range strings.Split(unit, "\n") {
+				if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") ||
+					strings.HasPrefix(line, "Description=") || strings.HasPrefix(line, "Wants=") || strings.HasPrefix(line, "After=") {
+					continue
+				}
+				if !strings.Contains(watchStartLimit, "\n"+line+"\n") {
+					t.Errorf("the watch [Unit] section has the line %q, which is not in watchStartLimit", line)
+				}
+			}
+			if install != "WantedBy=multi-user.target\n" {
+				t.Errorf("the watch [Install] section is %q, want only WantedBy=multi-user.target", install)
+			}
+		}
 		for _, line := range strings.Split(service, "\n") {
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Type=") || strings.HasPrefix(line, "ExecStart=") {
 				continue
@@ -818,4 +863,15 @@ func TestFirstDifference(t *testing.T) {
 			t.Errorf("%s: got %+v %v, want %+v %v", c.name, d, ok, c.d, c.differs)
 		}
 	}
+}
+
+// mib parses a size as the unit and GOMEMLIMIT write it (64MiB, 256M; systemd's
+// M is 1024 * 1024) into bytes.
+func mib(t *testing.T, v string) int {
+	t.Helper()
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(v, "iB"), "M"))
+	if err != nil || !(strings.HasSuffix(v, "MiB") || strings.HasSuffix(v, "M")) {
+		t.Fatalf("not a size in MiB: %q", v)
+	}
+	return n << 20
 }

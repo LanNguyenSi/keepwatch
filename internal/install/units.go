@@ -372,6 +372,8 @@ const (
 	watchGoMemLimit  = "64MiB"
 	watchCPUQuota    = "25%"
 	watchRestartSec  = "10s"
+	watchStartLimitS = "300"
+	watchStartBurst  = "5"
 	exitStatusOfRuns = `# 0 and 1 are normal: 1 means the host has findings, and the notification (not
 # a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
 SuccessExitStatus=1
@@ -419,6 +421,19 @@ TimeoutStartSec=` + timeoutStartSec + `
 	// the report service.
 	serviceHardening = exitStatusOfRuns + sandboxHardening + checkResources
 
+	// watchStartLimit is the start limit in the [Unit] section of the watch
+	// service. With Restart=on-failure and RestartSec=10s the default limit
+	// (5 starts in 10 s) can never be reached, so a start that always fails
+	// (a bad configuration, a missing state_dir) would loop every 10 s for ever
+	// and never leave the unit failed. Five failed starts within 300 s do reach
+	// it: the unit is then failed and stays so.
+	watchStartLimit = `# Restart=on-failure with RestartSec=10s never reaches the default start limit
+# (5 starts in 10 s), so a start that always fails would loop for ever. Five
+# failed starts within 300 s leave the unit failed instead.
+StartLimitIntervalSec=` + watchStartLimitS + `
+StartLimitBurst=` + watchStartBurst + `
+`
+
 	// watchProcess: how the watch service is started again and what it may do.
 	watchProcess = `# A crash starts it again after a pause; a clean exit or "systemctl stop" ends
 # it. There is no SuccessExitStatus: any exit status but 0 is a failure.
@@ -431,13 +446,14 @@ CapabilityBoundingSet=
 	// watchResources: the limits of a service that stays up. The target is less
 	// than 100 MiB resident while idle. GOMEMLIMIT is a soft limit for the Go
 	// heap, set below that target so that the collector works before MemoryMax
-	// does; MemoryMax is the hard backstop (the kernel kills the service, and
-	// Restart starts it again) with room for a burst. CPUQuota caps a runaway
-	// loop and leaves ample time for a service that is idle nearly always. The
-	// numbers are ceilings chosen for that target and not yet measured on a
-	// host; measure before narrowing them. There is no TimeoutStartSec of the
-	// oneshot kind: a Type=simple service is started as soon as it is forked.
+	// does. MemoryMax is the ceiling (the kernel kills the service, and Restart
+	// starts it again); MemorySwapMax=0 keeps growth past it from going to swap
+	// instead. CPUQuota caps a runaway loop. The numbers are reasoned ceilings,
+	// not measurements; measure before relying on them. There is no
+	// TimeoutStartSec of the oneshot kind: a Type=simple service is started as
+	// soon as it is forked.
 	watchResources = `MemoryMax=` + watchMemoryMax + `
+MemorySwapMax=0
 Environment=GOMEMLIMIT=` + watchGoMemLimit + `
 CPUQuota=` + watchCPUQuota + `
 `
@@ -521,7 +537,7 @@ func RenderWatch(s Spec) (File, error) {
 Description=keepwatch watcher
 Wants=network-online.target
 After=network-online.target
-
+` + watchStartLimit + `
 [Service]
 Type=simple
 ExecStart=` + s.execLine(watchArgs) + `
