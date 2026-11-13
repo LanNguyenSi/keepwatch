@@ -3,7 +3,7 @@ type: limit
 title: What the guarantees do not cover
 description: The known limits of the trust, redaction and coordination machinery, collected with the code or reference line that states each, so a reviewer can tell a gap from a promise.
 tags: [limits, trust, redaction, concurrency]
-timestamp: 2026-11-12T14:30:28Z
+timestamp: 2026-11-13T18:05:41Z
 sources:
   - internal/cli/report.go
   - internal/config/walk.go
