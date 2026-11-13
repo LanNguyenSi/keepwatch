@@ -10,8 +10,12 @@
 //
 // Parameters such as thresholds and windows come from the caller (the daemon
 // takes them from the loaded config); this package defines no defaults of
-// its own. The only built-in numbers are the safety caps below, which bound
-// memory under hostile input.
+// its own. Thresholds count matching log lines, not login attempts: sshd
+// writes more than one counted line for a single failed attempt (an unknown
+// user gives "Invalid user" and "Failed password for invalid user", and a
+// refused connection adds a "Connection closed ... [preauth]" line), so a
+// configured threshold is in lines. The only built-in numbers are the safety
+// caps below, which bound memory under hostile input.
 package rules
 
 import (
@@ -122,14 +126,23 @@ func (e *Engine) Evaluate(ev event.Event, now time.Time) []event.Signal {
 	return out
 }
 
-// monotonic returns the later of now and the latest clock value seen, so a
-// clock that jumps backwards cannot reopen expired windows or panic.
-func monotonic(last *time.Time, now time.Time) time.Time {
+// monotonic returns the effective clock value and whether the caller must
+// drop its stored state. A small step back (at most window) is clamped to the
+// latest value seen, so it cannot reopen expired windows. A larger step back
+// means the clock itself was corrected, or one far-future value was seen: the
+// stored latest is no longer credible, so now is adopted and the state is
+// reset (reset is true). Without this, one bad value would freeze the rule
+// until restart.
+func monotonic(last *time.Time, now time.Time, window time.Duration) (time.Time, bool) {
 	if now.Before(*last) {
-		return *last
+		if last.Sub(now) > window {
+			*last = now
+			return now, true
+		}
+		return *last, false
 	}
 	*last = now
-	return now
+	return now, false
 }
 
 type keyState struct {
@@ -168,7 +181,11 @@ func newWindowCounter(p Params) *windowCounter {
 func (c *windowCounter) hit(key string, now time.Time) (time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now = monotonic(&c.last, now)
+	now, reset := monotonic(&c.last, now, c.window)
+	if reset {
+		c.keys = map[string]*keyState{}
+		c.order = list.New()
+	}
 	st, ok := c.keys[key]
 	if ok {
 		c.order.MoveToBack(st.el)
@@ -237,29 +254,44 @@ func newSeenSet(ttl time.Duration, maxKeys int) *seenSet {
 	}
 }
 
-// add reports the effective time and whether key is new (not seen within
-// the ttl). A key seen again within the ttl is not refreshed.
-func (s *seenSet) add(key string, now time.Time) (time.Time, bool) {
+// add reports the effective time and whether the event is new: true when none
+// of keys was seen within the ttl. All keys are marked seen either way that
+// matters (new keys are added, expired keys are refreshed), so the several
+// names under which one kill can appear suppress each other. A key seen again
+// within the ttl is not refreshed.
+func (s *seenSet) add(now time.Time, keys ...string) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now = monotonic(&s.last, now)
-	if e, ok := s.keys[key]; ok {
-		if now.Sub(e.at) < s.ttl {
-			return now, false
+	now, reset := monotonic(&s.last, now, s.ttl)
+	if reset {
+		s.keys = map[string]*seenEntry{}
+		s.order = list.New()
+	}
+	fresh := true
+	for _, k := range keys {
+		if e, ok := s.keys[k]; ok && now.Sub(e.at) < s.ttl {
+			fresh = false
 		}
-		e.at = now
-		s.order.MoveToBack(e.el)
-		return now, true
 	}
-	for len(s.keys) >= s.maxKeys {
-		front := s.order.Front()
-		old := front.Value.(*seenEntry)
-		s.order.Remove(front)
-		delete(s.keys, old.key)
+	if !fresh {
+		return now, false
 	}
-	e := &seenEntry{key: key, at: now}
-	e.el = s.order.PushBack(e)
-	s.keys[key] = e
+	for _, k := range keys {
+		if e, ok := s.keys[k]; ok {
+			e.at = now
+			s.order.MoveToBack(e.el)
+			continue
+		}
+		for len(s.keys) >= s.maxKeys {
+			front := s.order.Front()
+			old := front.Value.(*seenEntry)
+			s.order.Remove(front)
+			delete(s.keys, old.key)
+		}
+		e := &seenEntry{key: k, at: now}
+		e.el = s.order.PushBack(e)
+		s.keys[k] = e
+	}
 	return now, true
 }
 

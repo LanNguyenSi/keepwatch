@@ -91,10 +91,27 @@ func TestSSHPerIPIsolation(t *testing.T) {
 			t.Fatalf("ip %s: unexpected signal", ip)
 		}
 	}
+	// IPv6 sources are keyed by /64 prefix: two addresses of one /64 add up.
 	v6 := r.Evaluate(sshEv(failed("2001:db8::1")), t0)
-	v6 = append(v6, r.Evaluate(sshEv(failed("2001:db8::1")), t0)...)
-	if len(v6) != 1 || v6[0].Subject != "2001:db8::1" {
+	v6 = append(v6, r.Evaluate(sshEv(failed("2001:db8::ffff:2")), t0)...)
+	if len(v6) != 1 || v6[0].Subject != "2001:db8::/64" ||
+		v6[0].Fingerprint != event.FingerprintOf(IDSSHBruteForce, "2001:db8::/64") {
 		t.Fatalf("v6 = %+v", v6)
+	}
+	// A different /64 is a different key.
+	if s := r.Evaluate(sshEv(failed("2001:db8:0:1::1")), t0); len(s) != 0 {
+		t.Fatal("different /64 must not share a key")
+	}
+	// IPv4-mapped IPv6 and zones are normalised, not keyed separately.
+	m := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
+	m.Evaluate(sshEv(failed("::ffff:203.0.113.9")), t0)
+	if s := m.Evaluate(sshEv(failed("203.0.113.9")), t0); len(s) != 1 || s[0].Subject != "203.0.113.9" {
+		t.Fatalf("mapped address: %+v", s)
+	}
+	z := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
+	z.Evaluate(sshEv(failed("fe80::1%eth0")), t0)
+	if s := z.Evaluate(sshEv(failed("fe80::2")), t0); len(s) != 1 || s[0].Subject != "fe80::/64" {
+		t.Fatalf("zone address: %+v", s)
 	}
 }
 
@@ -166,35 +183,46 @@ func TestDefaultMaxKeys(t *testing.T) {
 }
 
 func TestSSHClockBackwards(t *testing.T) {
-	r := mustBrute(t, Params{Threshold: 3, Window: time.Minute})
+	const w = time.Minute
+	// A step back larger than the window resets the state: lines whose stated
+	// times are 15 minutes apart never add up.
+	r := mustBrute(t, Params{Threshold: 3, Window: w})
+	at := t0.Add(2 * time.Hour)
 	total := 0
-	times := []time.Time{t0.Add(time.Hour), t0, t0.Add(-24 * time.Hour), t0.Add(time.Hour), t0.Add(-time.Hour)}
-	for _, at := range times[:2] {
+	for i := 0; i < 6; i++ {
 		total += len(r.Evaluate(sshEv(failed("192.0.2.1")), at))
+		at = at.Add(-15 * time.Minute)
 	}
 	if total != 0 {
-		t.Fatalf("two lines, threshold 3: %d signals", total)
+		t.Fatalf("lines 15 minutes apart gave %d signals after backwards steps", total)
 	}
-	// Third line after a backwards jump counts as same instant: still one signal at most.
-	total += len(r.Evaluate(sshEv(failed("192.0.2.1")), times[2]))
-	total += len(r.Evaluate(sshEv(failed("192.0.2.1")), times[3]))
-	total += len(r.Evaluate(sshEv(failed("192.0.2.1")), times[4]))
-	if total != 1 {
-		t.Fatalf("total = %d, want 1", total)
+	// A step back within the window is clamped: nothing expires early.
+	r2 := mustBrute(t, Params{Threshold: 2, Window: w})
+	r2.Evaluate(sshEv(failed("192.0.2.5")), t0.Add(30*time.Second))
+	if s := r2.Evaluate(sshEv(failed("192.0.2.5")), t0); len(s) != 1 {
+		t.Fatalf("small regression: %d signals", len(s))
 	}
-	// A backwards jump never expires entries early: single line per key stays below threshold.
-	r2 := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
-	r2.Evaluate(sshEv(failed("192.0.2.5")), t0)
-	if s := r2.Evaluate(sshEv(failed("192.0.2.6")), t0.Add(-time.Hour)); len(s) != 0 {
-		t.Fatal("spurious signal")
+	// One far-future value does not freeze the rule: afterwards a normal burst fires.
+	r3 := mustBrute(t, Params{Threshold: 3, Window: w})
+	r3.Evaluate(sshEv(failed("192.0.2.9")), t0.AddDate(10, 0, 0))
+	n := 0
+	for i := 0; i < 3; i++ {
+		n += len(r3.Evaluate(sshEv(failed("192.0.2.9")), t0.Add(time.Duration(i)*time.Second)))
 	}
-	// Restart and OOM rules survive it too.
+	if n != 1 {
+		t.Fatalf("after a far-future value: %d signals, want 1", n)
+	}
+	// Restart and OOM rules survive backwards steps too.
 	rl, _ := NewRestartLoop(Params{Threshold: 2, Window: time.Minute})
-	rl.Evaluate(sysdEv("Started a.service - A."), t0)
-	rl.Evaluate(sysdEv("Started b.service - B."), t0.Add(-time.Hour))
+	rl.Evaluate(sysdEv("a.service: Scheduled restart job, restart counter is at 1."), t0)
+	if s := rl.Evaluate(sysdEv("a.service: Scheduled restart job, restart counter is at 2."), t0.Add(-time.Hour)); len(s) != 0 {
+		t.Fatal("restart: spurious signal after a backwards step")
+	}
 	oo, _ := NewOOMKill(OOMParams{Window: time.Minute})
 	oo.Evaluate(sysdEv("a.service: A process of this unit has been killed by the OOM killer."), t0)
-	oo.Evaluate(sysdEv("b.service: A process of this unit has been killed by the OOM killer."), t0.Add(-time.Hour))
+	if s := oo.Evaluate(sysdEv("a.service: A process of this unit has been killed by the OOM killer."), t0.Add(-time.Hour)); len(s) != 1 {
+		t.Fatal("oom: state must reset after a large backwards step, so the kill is reported again")
+	}
 }
 
 func TestSSHHostileUserNamesCannotForgeIP(t *testing.T) {
@@ -264,14 +292,15 @@ func TestSSHForgedLinesYieldNothing(t *testing.T) {
 			t.Errorf("%s: produced a signal", name)
 		}
 	}
-	// Control: the genuine event fires with the same parameters.
-	r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
+	// Control: the genuine event fires with the same parameters, for each
+	// accepted unit, with a fresh rule each time.
 	for _, u := range []string{"ssh.service", "sshd.service"} {
+		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
 		ev := sshEv(line)
 		ev.SystemdUnit = u
 		ev.Identifier = "" // identifier is irrelevant
-		if s := r.Evaluate(ev, t0); len(s) == 0 && u == "ssh.service" {
-			t.Errorf("%s: genuine event gave no signal", u)
+		if s := r.Evaluate(ev, t0); len(s) != 1 {
+			t.Errorf("%s: genuine event gave %d signals", u, len(s))
 		}
 	}
 }
@@ -283,7 +312,7 @@ func TestRestartLoop(t *testing.T) {
 	}
 	var got []event.Signal
 	for i := 0; i < 8; i++ {
-		got = append(got, r.Evaluate(sysdEv("Started app.service - My App."), t0.Add(time.Duration(i)*time.Second))...)
+		got = append(got, r.Evaluate(sysdEv(fmt.Sprintf("app.service: Scheduled restart job, restart counter is at %d.", i)), t0.Add(time.Duration(i)*time.Second))...)
 	}
 	if len(got) != 1 {
 		t.Fatalf("want 1 signal, got %d", len(got))
@@ -304,7 +333,7 @@ func TestRestartLoopShapesAndIsolation(t *testing.T) {
 	if s := r.Evaluate(sysdEv("other.service: Scheduled restart job, restart counter is at 1."), t0); len(s) != 0 {
 		t.Fatal("units mixed")
 	}
-	if s := r.Evaluate(sysdEv("Started app.service."), t0.Add(time.Second)); len(s) != 1 {
+	if s := r.Evaluate(sysdEv("app.service: Scheduled restart job, restart counter is at 1."), t0.Add(time.Second)); len(s) != 1 {
 		t.Fatalf("want signal, got %d", len(s))
 	}
 	for _, m := range []string{"Stopped app.service - My App.", "Started Session 5 of User x.", "Starting app.service - My App...", "Started app.service - x\nStarted y.service", "xStarted app.service."} {
@@ -318,17 +347,17 @@ func TestRestartLoopShapesAndIsolation(t *testing.T) {
 func TestRestartLoopSlowAndCap(t *testing.T) {
 	r, _ := NewRestartLoop(Params{Threshold: 3, Window: time.Minute, MaxKeys: 20})
 	for i := 0; i < 6; i++ {
-		if s := r.Evaluate(sysdEv("Started app.service."), t0.Add(time.Duration(i)*40*time.Second)); len(s) != 0 {
+		if s := r.Evaluate(sysdEv("app.service: Scheduled restart job, restart counter is at 1."), t0.Add(time.Duration(i)*40*time.Second)); len(s) != 0 {
 			t.Fatal("slow restarts must not fire")
 		}
 	}
 	for i := 0; i < 200; i++ {
-		r.Evaluate(sysdEv(fmt.Sprintf("Started u%d.service.", i)), t0)
+		r.Evaluate(sysdEv(fmt.Sprintf("u%d.service: Scheduled restart job, restart counter is at 1.", i)), t0)
 		if r.c.size() > 20 {
 			t.Fatalf("cap exceeded: %d", r.c.size())
 		}
 	}
-	long := "Started " + strings.Repeat("a", maxKeyLen) + ".service."
+	long := strings.Repeat("a", maxKeyLen) + ".service: Scheduled restart job, restart counter is at 1."
 	rr, _ := NewRestartLoop(Params{Threshold: 1, Window: time.Minute})
 	if s := rr.Evaluate(sysdEv(long), t0); len(s) != 0 {
 		t.Fatal("over-long unit name must be ignored")
@@ -336,7 +365,7 @@ func TestRestartLoopSlowAndCap(t *testing.T) {
 }
 
 func TestRestartLoopForged(t *testing.T) {
-	msg := "Started app.service - My App."
+	msg := "app.service: Scheduled restart job, restart counter is at 1."
 	cases := map[string]event.Event{
 		"user process, UNIT set":   {Kind: event.KindJournal, UID: 1000, PID: 4000, Identifier: "systemd", Unit: "app.service", Message: msg},
 		"uid 1000 claiming pid 1":  {Kind: event.KindJournal, UID: 1000, PID: 1, Identifier: "systemd", Message: msg},
@@ -461,7 +490,7 @@ func TestEngineRunsAllRules(t *testing.T) {
 	if got := e.Evaluate(sshEv(failed("192.0.2.1")), t0); len(got) != 1 || got[0].RuleID != IDSSHBruteForce {
 		t.Fatalf("ssh: %+v", got)
 	}
-	if got := e.Evaluate(sysdEv("Started a.service."), t0); len(got) != 1 || got[0].RuleID != IDRestartLoop {
+	if got := e.Evaluate(sysdEv("a.service: Scheduled restart job, restart counter is at 1."), t0); len(got) != 1 || got[0].RuleID != IDRestartLoop {
 		t.Fatalf("restart: %+v", got)
 	}
 	if got := e.Evaluate(kernEv(oomKilledLine), t0); len(got) != 1 || got[0].RuleID != IDOOMKill {
@@ -475,22 +504,27 @@ func TestEngineRunsAllRules(t *testing.T) {
 	var _ Rule = oo
 }
 
-func TestClockBackwardsIsClampedToLatestSeen(t *testing.T) {
+func TestClockBackwardsClampsSmallStepsOnly(t *testing.T) {
 	r := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
-	r.Evaluate(sshEv(failed("192.0.2.1")), t0.Add(time.Hour))
+	r.Evaluate(sshEv(failed("192.0.2.1")), t0.Add(30*time.Second))
 	s := r.Evaluate(sshEv(failed("192.0.2.1")), t0)
 	if len(s) != 1 {
 		t.Fatalf("want 1 signal, got %d", len(s))
 	}
-	if !s[0].Time.Equal(t0.Add(time.Hour)) {
+	if !s[0].Time.Equal(t0.Add(30 * time.Second)) {
 		t.Errorf("signal time %v went backwards", s[0].Time)
 	}
-	// A line that is a window older than the latest seen time is not
-	// resurrected by the jump: the first hit is expired, so this is hit one.
+	// An hour back resets the state: the first hit is gone, so this is hit one.
 	r2 := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
-	r2.Evaluate(sshEv(failed("192.0.2.2")), t0)
-	r2.Evaluate(sshEv(failed("192.0.2.3")), t0.Add(time.Hour))
-	if s := r2.Evaluate(sshEv(failed("192.0.2.2")), t0.Add(time.Hour+time.Second)); len(s) != 0 {
+	r2.Evaluate(sshEv(failed("192.0.2.2")), t0.Add(time.Hour))
+	if s := r2.Evaluate(sshEv(failed("192.0.2.2")), t0); len(s) != 0 {
+		t.Fatal("hits an hour apart must not add up")
+	}
+	// An expired hit is not resurrected by a small step back.
+	r3 := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
+	r3.Evaluate(sshEv(failed("192.0.2.3")), t0)
+	r3.Evaluate(sshEv(failed("192.0.2.4")), t0.Add(time.Hour))
+	if s := r3.Evaluate(sshEv(failed("192.0.2.3")), t0.Add(time.Hour+time.Second)); len(s) != 0 {
 		t.Fatal("expired hit must not count")
 	}
 }

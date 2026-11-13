@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/event"
@@ -11,17 +12,28 @@ import (
 
 // sshd line shapes. The user name is attacker-chosen and may contain
 // spaces, newlines or the text "from 1.2.3.4 port 5", so the patterns are
-// anchored at both ends and the address is the last "from <addr> port <n>"
-// of the line, which is the part sshd itself appends after the name.
-var (
-	sshFailedRE  = regexp.MustCompile(`(?s)\AFailed (?:password|none|keyboard-interactive/pam) for (?:invalid user )?.* from (\S+) port [0-9]+(?: ssh2)?\z`)
-	sshInvalidRE = regexp.MustCompile(`(?s)\AInvalid user .* from (\S+) port [0-9]+\z`)
-)
+// anchored at both ends and the address is the last "<addr> port <n>" of the
+// line, which is the part sshd itself appends after the name.
+//
+// Besides "Failed password" and "Invalid user", the per-connection
+// "Connection closed by" and "Disconnected from" lines of a pre-auth
+// connection are counted: sshd writes them for every refused connection,
+// including keyboard-interactive and public key guessing against existing
+// accounts, which produce no "Failed ..." line.
+var sshFailureREs = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)\AFailed (?:password|none|keyboard-interactive(?:/pam)?) for (?:invalid user )?.* from (\S+) port [0-9]+(?: ssh2)?\z`),
+	regexp.MustCompile(`(?s)\AInvalid user .* from (\S+) port [0-9]+\z`),
+	regexp.MustCompile(`(?s)\AConnection closed by (?:authenticating|invalid) user (?:.* )?(\S+) port [0-9]+ \[preauth\]\z`),
+	regexp.MustCompile(`(?s)\ADisconnected from (?:authenticating|invalid) user (?:.* )?(\S+) port [0-9]+ \[preauth\]\z`),
+}
 
-// SSHBruteForce fires when one source IP causes Threshold "Failed password"
-// or "Invalid user" lines from sshd within Window. Only lines logged by the
-// ssh.service or sshd.service unit as root are counted. Lines without a
-// port, and any other shape, are ignored.
+// SSHBruteForce fires when one source causes Threshold counted sshd lines
+// within Window. Only lines logged by ssh.service, sshd.service or a
+// per-connection ssh@<instance>.service or sshd@<instance>.service unit as
+// root are counted. IPv4 sources are keyed by address; IPv6 sources by their
+// /64 prefix, so a host holding a whole /64 cannot stay below the threshold
+// by rotating addresses. Lines without a port, and any other shape, are
+// ignored.
 type SSHBruteForce struct {
 	c *windowCounter
 	w time.Duration
@@ -39,21 +51,43 @@ func NewSSHBruteForce(p Params) (*SSHBruteForce, error) {
 // ID implements Rule.
 func (r *SSHBruteForce) ID() string { return IDSSHBruteForce }
 
-func sshUnit(u string) bool { return u == "ssh.service" || u == "sshd.service" }
+// sshUnit reports whether u is the ssh service or a per-connection instance
+// of the ssh template unit (Accept=yes socket activation).
+func sshUnit(u string) bool {
+	if u == "ssh.service" || u == "sshd.service" {
+		return true
+	}
+	for _, prefix := range []string{"ssh@", "sshd@"} {
+		if strings.HasPrefix(u, prefix) && strings.HasSuffix(u, ".service") &&
+			len(u) > len(prefix)+len(".service") {
+			return true
+		}
+	}
+	return false
+}
 
-// parseSSHFailure returns the raw source address of a failed-login line.
+// sourceKey returns the key of a source address: the address for IPv4
+// (IPv4-mapped IPv6 counts as IPv4) and the /64 prefix for IPv6.
+func sourceKey(raw string) (string, bool) {
+	a, err := netip.ParseAddr(raw)
+	if err != nil {
+		return "", false
+	}
+	a = a.WithZone("").Unmap()
+	if a.Is4() {
+		return a.String(), true
+	}
+	return netip.PrefixFrom(a, 64).Masked().String(), true
+}
+
+// parseSSHFailure returns the source key of a counted sshd line.
 func parseSSHFailure(msg string) (string, bool) {
-	m := sshFailedRE.FindStringSubmatch(msg)
-	if m == nil {
-		m = sshInvalidRE.FindStringSubmatch(msg)
+	for _, re := range sshFailureREs {
+		if m := re.FindStringSubmatch(msg); m != nil {
+			return sourceKey(m[1])
+		}
 	}
-	if m == nil {
-		return "", false
-	}
-	if _, err := netip.ParseAddr(m[1]); err != nil {
-		return "", false
-	}
-	return m[1], true
+	return "", false
 }
 
 // Evaluate implements Rule.
@@ -61,21 +95,21 @@ func (r *SSHBruteForce) Evaluate(ev event.Event, now time.Time) []event.Signal {
 	if ev.Kind != event.KindJournal || !sshUnit(ev.SystemdUnit) || !isRoot(ev) {
 		return nil
 	}
-	ip, ok := parseSSHFailure(ev.Message)
+	key, ok := parseSSHFailure(ev.Message)
 	if !ok {
 		return nil
 	}
-	at, crossed := r.c.hit(ip, now)
+	at, crossed := r.c.hit(key, now)
 	if !crossed {
 		return nil
 	}
 	return []event.Signal{{
 		RuleID:      IDSSHBruteForce,
-		Fingerprint: event.FingerprintOf(IDSSHBruteForce, ip),
+		Fingerprint: event.FingerprintOf(IDSSHBruteForce, key),
 		Severity:    SeveritySSHBruteForce,
 		Time:        at,
 		Notify:      true,
-		Subject:     ip,
-		Summary:     fmt.Sprintf("%d failed ssh logins from %s within %s", r.n, ip, r.w),
+		Subject:     key,
+		Summary:     fmt.Sprintf("%d failed ssh logins from %s within %s", r.n, key, r.w),
 	}}
 }

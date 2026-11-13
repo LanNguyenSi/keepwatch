@@ -13,19 +13,21 @@ import (
 // victim process, so the patterns are anchored and the numeric suffix the
 // kernel appends is matched from the end.
 var (
-	oomKillRE   = regexp.MustCompile(`(?s)\Aoom-kill:constraint=[A-Z_]+,nodemask=[^,]*,cpuset=[^,]*,mems_allowed=[^,]*,(?:global_oom|oom_memcg=[^,]*),task_memcg=([^,]*),task=(.*),pid=([0-9]+),uid=[0-9]+\z`)
+	oomKillRE   = regexp.MustCompile(`(?s)\Aoom-kill:constraint=[A-Z_]+,nodemask=(?:\(null\)|[0-9,-]*),cpuset=[^,]*,mems_allowed=[0-9,-]*,(?:global_oom|oom_memcg=[^,]*),task_memcg=([^,]*),task=(.*),pid=([0-9]+),uid=[0-9]+\z`)
 	oomKilledRE = regexp.MustCompile(`(?s)\A(?:Memory cgroup out of memory|Out of memory): Killed process ([0-9]+) \((.*)\) total-vm:`)
 	oomUnitRE   = regexp.MustCompile(`(?s)\A(` + unitPattern + `): (?:A process of this unit has been killed by the OOM killer\.|Failed with result 'oom-kill'\.)\z`)
 )
 
-// OOMKill fires once per victim when the kernel kills a process for lack of
+// OOMKill fires once per kill when the kernel kills a process for lack of
 // memory, or systemd reports that a unit was killed by the OOM killer. Kernel
 // lines count only with Transport kernel, systemd lines only from PID 1 as
-// root. The kernel writes several lines per kill; they share a victim key
-// (pid and command name) and so give one signal. The fingerprint comes from
-// the unit when known (the .service element of the victim's cgroup, or the
-// unit systemd names), otherwise from the command name parsed from the
-// message.
+// root. One kill is written as several lines (kernel oom-kill and Killed
+// process, then two systemd lines); they share victim keys (pid and command
+// name for the kernel lines, the unit for the systemd lines, and a kernel
+// line that names a unit marks that unit's systemd key too) and so give one
+// signal per OOMParams.Window. The fingerprint comes from the unit when known
+// (see serviceOfCgroup, or the unit systemd names), otherwise from the
+// command name parsed from the message.
 type OOMKill struct {
 	s *seenSet
 }
@@ -41,12 +43,23 @@ func NewOOMKill(p OOMParams) (*OOMKill, error) {
 // ID implements Rule.
 func (r *OOMKill) ID() string { return IDOOMKill }
 
-// serviceOfCgroup returns the innermost .service element of a cgroup path.
+// serviceOfCgroup returns the unit a cgroup path belongs to, or "". A unit is
+// derived only from a chain of *.slice elements followed by one *.service
+// element: /system.slice/x.service gives x.service, and
+// /user.slice/user-1000.slice/user@1000.service/... gives user@1000.service.
+// Anything below the service element is ignored, because its names are
+// chosen by the user who runs the service manager. Container paths
+// (/docker/...), scopes and any other shape give no unit; the rule then
+// falls back to the command name.
 func serviceOfCgroup(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if strings.HasSuffix(parts[i], ".service") && len(parts[i]) > len(".service") {
-			return parts[i]
+	for _, el := range strings.Split(path, "/") {
+		switch {
+		case el == "":
+		case strings.HasSuffix(el, ".slice") && len(el) > len(".slice"):
+		case strings.HasSuffix(el, ".service") && len(el) > len(".service"):
+			return el
+		default:
+			return ""
 		}
 	}
 	return ""
@@ -57,15 +70,19 @@ func (r *OOMKill) Evaluate(ev event.Event, now time.Time) []event.Signal {
 	if ev.Kind != event.KindJournal {
 		return nil
 	}
-	var victimKey, unit, comm string
+	var victimKeys []string
+	var unit, comm string
 	switch {
 	case ev.Transport == "kernel":
 		if m := oomKillRE.FindStringSubmatch(ev.Message); m != nil {
 			unit, comm = serviceOfCgroup(m[1]), m[2]
-			victimKey = "kernel/" + m[3] + "/" + comm
+			victimKeys = []string{"kernel/" + m[3] + "/" + comm}
+			if unit != "" {
+				victimKeys = append(victimKeys, "systemd/"+unit)
+			}
 		} else if m := oomKilledRE.FindStringSubmatch(ev.Message); m != nil {
 			comm = m[2]
-			victimKey = "kernel/" + m[1] + "/" + comm
+			victimKeys = []string{"kernel/" + m[1] + "/" + comm}
 		} else {
 			return nil
 		}
@@ -75,11 +92,11 @@ func (r *OOMKill) Evaluate(ev event.Event, now time.Time) []event.Signal {
 			return nil
 		}
 		unit = m[1]
-		victimKey = "systemd/" + unit
+		victimKeys = []string{"systemd/" + unit}
 	default:
 		return nil
 	}
-	if len(unit) > maxKeyLen || len(comm) > maxKeyLen || len(victimKey) > 2*maxKeyLen {
+	if len(unit) > maxKeyLen || len(comm) > maxKeyLen {
 		return nil
 	}
 	var fp event.Fingerprint
@@ -90,7 +107,7 @@ func (r *OOMKill) Evaluate(ev event.Event, now time.Time) []event.Signal {
 		fp = event.FingerprintOf(IDOOMKill, "comm", comm)
 		subject = comm
 	}
-	at, isNew := r.s.add(victimKey, now)
+	at, isNew := r.s.add(now, victimKeys...)
 	if !isNew {
 		return nil
 	}

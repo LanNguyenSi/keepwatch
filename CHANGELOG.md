@@ -24,6 +24,12 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- Rules for the daemon that turn journal events into signals: an ssh brute
+  force rule (failed and invalid-user logins, plus refused pre-auth
+  connections, per source address or IPv6 /64), a restart loop rule (systemd
+  automatic restarts per unit) and an OOM kill rule (kernel and systemd lines,
+  one signal per kill). They trust only journald-set fields, so a local user
+  cannot forge their input, and they keep a capped amount of state per rule.
 
 ### Security
 
