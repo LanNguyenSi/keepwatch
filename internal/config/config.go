@@ -12,9 +12,11 @@
 // mapping (an empty or null document is fine) is an error; a file
 // never replaces another file's root. A section key with a null value
 // (host, checks, listeners, listeners.allow, authorized_keys,
-// exceptions, notify, redact, redact.patterns) counts as an absent section, and so do the
-// optional nested mappings checks.<id>.params, authorized_keys.expected
-// and notify.ntfy when they are null. Entries of conf.d whose name
+// exceptions, notify, redact, redact.patterns and watch) counts as an
+// absent section, and so do the optional nested mappings
+// checks.<id>.params, authorized_keys.expected, notify.ntfy,
+// watch.ssh_bruteforce, watch.restart_loop and watch.notify when they
+// are null. Entries of conf.d whose name
 // starts with a dot (.hidden.yaml, an editor lock symlink such as
 // .#a.yaml, a .git directory) are ignored, as a shell glob ignores
 // them.
@@ -108,6 +110,7 @@ type Config struct {
 	Exceptions     []Exception
 	Notify         Notify
 	Redact         Redact
+	Watch          Watch
 
 	ownerOf OwnerOf // the owner lookup Load used; ReadToken reuses it
 }
@@ -168,6 +171,32 @@ type Ntfy struct {
 	URL       string
 	Topic     string
 	TokenFile string
+}
+
+// Watch configures the continuous watch mode that the daemon and
+// install read. Every key is optional; the zero Watch is not the
+// default Watch, so a configuration that does not mention watch gets
+// defaultWatch, whose values are the defaults of the watch rules. The
+// keys and their ranges are documented in docs/configuration.md.
+type Watch struct {
+	Enabled        bool          // watch runs; default false
+	LearningPeriod time.Duration // findings are held back while learning; default 7d
+	SSHBruteforce  WatchRule     // ssh authentication failures; default 5 in 10m
+	RestartLoop    WatchRule     // repeated service restarts; default 3 in 15m
+	Notify         WatchNotify   // notification queueing and rate
+}
+
+// WatchRule raises from this many events within a sliding window.
+type WatchRule struct {
+	Threshold int           // at least 1
+	Window    time.Duration // above 0 and at most watchMaxDuration
+}
+
+// WatchNotify configures the watch daemon's notification queue.
+type WatchNotify struct {
+	Queue               int           // notifications kept waiting; 1 to watchMaxQueue
+	PerIncidentInterval time.Duration // least time between two notices of one incident; default 1h
+	GlobalPerMinute     int           // notices sent per minute, global; 1 to watchMaxPerMinute
 }
 
 // Option customises Load for testing; production callers use none.

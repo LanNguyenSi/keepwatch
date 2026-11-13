@@ -88,6 +88,33 @@ More rules, all reported with `file:line`:
 - `redact.patterns` is an optional list of extra redaction patterns, see
   [Redaction](running.md#redaction).
 
+## Watch
+
+`watch` is the top-level section the watch daemon and `install` read.
+Every key is optional and may appear in `conf.d` like any other
+section (mappings merge per key, later files win, a null counts as
+absent). Durations are written as a Go duration (`45s`, `90m`, `2h`)
+optionally preceded by a whole number of days (`7d`, `1d12h`).
+`ssh_bruteforce` and `restart_loop` are rules: `threshold` events
+within `window` raise a finding; `learning_period` is the start-up
+period during which findings are held back; `notify.queue` is how many
+notifications may wait, `notify.per_incident_interval` the least time
+between two notices of one incident, and `notify.global_per_minute`
+the global notice rate. The ranges are checked, each error naming
+`file:line`.
+
+| key | default | range |
+| --- | --- | --- |
+| `watch.enabled` | `false` | `true` or `false` |
+| `watch.learning_period` | `7d` | above 0, at most 720h (30 days) |
+| `watch.ssh_bruteforce.threshold` | `5` | at least 1 |
+| `watch.ssh_bruteforce.window` | `10m` | above 0, at most 720h (30 days) |
+| `watch.restart_loop.threshold` | `3` | at least 1 |
+| `watch.restart_loop.window` | `15m` | above 0, at most 720h (30 days) |
+| `watch.notify.queue` | `100` | 1 to 1000 |
+| `watch.notify.per_incident_interval` | `1h` | above 0, at most 720h (30 days) |
+| `watch.notify.global_per_minute` | `6` | 1 to 60 |
+
 ```sh
 keepwatch init --config /etc/keepwatch/keepwatch.yaml   # write a commented example
 keepwatch config check --config /etc/keepwatch/keepwatch.yaml

@@ -20,7 +20,7 @@ which no single file documents.
 
 **One descent, one handle.** `config.Load` does not open the configuration by
 path. It calls `openCheckedDir` on the main file's directory
-(`internal/config/config.go:215#"openCheckedDir(mainDir"`), which opens `/`
+(`internal/config/config.go:244#"openCheckedDir(mainDir"`), which opens `/`
 with `os.Root` (`internal/config/walk.go:91#"os.OpenRoot("`) and walks
 down one component at a time, each step an `OpenRoot` on the descriptor of
 the component just checked. The return value is a handle on the checked
@@ -28,7 +28,7 @@ directory, and every file (`config.go` and `conf.d` entries alike) is opened
 relative to it, never by path again
 (`internal/config/secure.go:94-95#"never through the path again"`). `conf.d`
 itself is reached by the same descent continued on the main directory's
-handle (`internal/config/config.go:242#"descend(dirRoot"`), so a swapped-in
+handle (`internal/config/config.go:271#"descend(dirRoot"`), so a swapped-in
 `conf.d` symlink is caught by the walk, dangling or not.
 
 **Look, open, compare.** For each component the walk Lstats the name in the

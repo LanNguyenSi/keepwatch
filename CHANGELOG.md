@@ -8,6 +8,16 @@ report.
 
 ## [Unreleased]
 
+### Added
+
+- Configuration: a `watch` section for the watch daemon and its install:
+  `enabled` (default off), `learning_period` (default `7d`), the
+  `ssh_bruteforce` and `restart_loop` rules with a `threshold` and a
+  `window`, and notification queueing (`notify.queue`,
+  `notify.per_incident_interval`, `notify.global_per_minute`), all with
+  defaults and ranges that `config check` enforces; the keys are
+  documented in `docs/configuration.md`.
+
 ### Security
 
 - Probes no longer cut, escape or replace characters of command output and
