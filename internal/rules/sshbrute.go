@@ -12,19 +12,25 @@ import (
 
 // sshd line shapes. The user name is attacker-chosen and may contain
 // spaces, newlines or the text "from 1.2.3.4 port 5", so the patterns are
-// anchored at both ends and the address is the last "<addr> port <n>" of the
-// line, which is the part sshd itself appends after the name.
+// anchored at both ends and the address is the last one before the port (or,
+// for the PAM line, the last word), which is the part sshd itself appends
+// after the name.
 //
-// Besides "Failed password" and "Invalid user", the per-connection
-// "Connection closed by" and "Disconnected from" lines of a pre-auth
-// connection are counted: sshd writes them for every refused connection,
-// including keyboard-interactive and public key guessing against existing
-// accounts, which produce no "Failed ..." line.
+// Besides "Failed password" and "Invalid user", one family of pre-auth lines
+// is counted: a connection that ends before authentication succeeded and
+// names a user ("Connection closed by|reset by authenticating|invalid user
+// ... [preauth]", "Disconnected from ..."). sshd writes these for every
+// refused connection, including keyboard-interactive and public key
+// guessing against existing accounts, which produce no "Failed ..." line.
+// The per-attempt "error: PAM: Authentication failure" line is counted too,
+// because a reset connection can end without any line that names an address.
+// Lines without a user ("Connection closed by 1.2.3.4 port 5 [preauth]", left
+// by scanners and health checks) and lines without [preauth] never count.
 var sshFailureREs = []*regexp.Regexp{
-	regexp.MustCompile(`(?s)\AFailed (?:password|none|keyboard-interactive(?:/pam)?) for (?:invalid user )?.* from (\S+) port [0-9]+(?: ssh2)?\z`),
+	regexp.MustCompile(`(?s)\AFailed (?:password|none|keyboard-interactive(?:/pam)?) for .* from (\S+) port [0-9]+(?: ssh2)?\z`),
 	regexp.MustCompile(`(?s)\AInvalid user .* from (\S+) port [0-9]+\z`),
-	regexp.MustCompile(`(?s)\AConnection closed by (?:authenticating|invalid) user (?:.* )?(\S+) port [0-9]+ \[preauth\]\z`),
-	regexp.MustCompile(`(?s)\ADisconnected from (?:authenticating|invalid) user (?:.* )?(\S+) port [0-9]+ \[preauth\]\z`),
+	regexp.MustCompile(`(?s)\A(?:Connection (?:closed|reset) by|Disconnected from) (?:authenticating|invalid) user .* (\S+) port [0-9]+ \[preauth\]\z`),
+	regexp.MustCompile(`(?s)\Aerror: PAM: Authentication failure for .* from (\S+)\z`),
 }
 
 // SSHBruteForce fires when one source causes Threshold counted sshd lines
@@ -67,13 +73,14 @@ func sshUnit(u string) bool {
 }
 
 // sourceKey returns the key of a source address: the address for IPv4
-// (IPv4-mapped IPv6 counts as IPv4) and the /64 prefix for IPv6.
+// (IPv4-mapped IPv6 counts as IPv4) and the /64 prefix for IPv6. A zone
+// ("fe80::1%eth0") does not reach the key: a prefix carries no zone.
 func sourceKey(raw string) (string, bool) {
 	a, err := netip.ParseAddr(raw)
 	if err != nil {
 		return "", false
 	}
-	a = a.WithZone("").Unmap()
+	a = a.Unmap()
 	if a.Is4() {
 		return a.String(), true
 	}
@@ -92,6 +99,9 @@ func parseSSHFailure(msg string) (string, bool) {
 
 // Evaluate implements Rule.
 func (r *SSHBruteForce) Evaluate(ev event.Event, now time.Time) []event.Signal {
+	if now.IsZero() {
+		return nil
+	}
 	if ev.Kind != event.KindJournal || !sshUnit(ev.SystemdUnit) || !isRoot(ev) {
 		return nil
 	}
@@ -110,6 +120,6 @@ func (r *SSHBruteForce) Evaluate(ev event.Event, now time.Time) []event.Signal {
 		Time:        at,
 		Notify:      true,
 		Subject:     key,
-		Summary:     fmt.Sprintf("%d failed ssh logins from %s within %s", r.n, key, r.w),
+		Summary:     fmt.Sprintf("%d ssh login failure lines from %s within %s", r.n, key, r.w),
 	}}
 }

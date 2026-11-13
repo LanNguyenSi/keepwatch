@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/event"
@@ -28,9 +29,23 @@ var (
 // signal per OOMParams.Window. The fingerprint comes from the unit when known
 // (see serviceOfCgroup, or the unit systemd names), otherwise from the
 // command name parsed from the message.
+//
+// With memory.oom.group (OOMPolicy=kill) the kernel writes one oom-kill line
+// and then one "Killed process" line per process of the group, and those
+// carry no cgroup. A "Killed process" line within killedGrace after an
+// oom-kill line is therefore taken to belong to that kill and is ignored. On
+// kernels that write no oom-kill line, or for a "Killed process" line more
+// than killedGrace later, the line alone is reported (by command name).
 type OOMKill struct {
 	s *seenSet
+
+	mu        sync.Mutex
+	episodeAt time.Time // time of the latest matched oom-kill line
 }
+
+// killedGrace is how long after an oom-kill line the "Killed process" lines
+// of the same kill are attributed to it.
+const killedGrace = 5 * time.Second
 
 // NewOOMKill returns the rule, or an error for invalid params.
 func NewOOMKill(p OOMParams) (*OOMKill, error) {
@@ -65,22 +80,38 @@ func serviceOfCgroup(path string) string {
 	return ""
 }
 
+// inEpisode reports whether now lies within killedGrace after the latest
+// oom-kill line.
+func (r *OOMKill) inEpisode(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// With no episode yet episodeAt is the zero time, and the difference
+	// saturates far above killedGrace.
+	d := now.Sub(r.episodeAt)
+	return d >= 0 && d < killedGrace
+}
+
 // Evaluate implements Rule.
 func (r *OOMKill) Evaluate(ev event.Event, now time.Time) []event.Signal {
-	if ev.Kind != event.KindJournal {
+	if now.IsZero() || ev.Kind != event.KindJournal {
 		return nil
 	}
+	isKillLine := false
 	var victimKeys []string
 	var unit, comm string
 	switch {
 	case ev.Transport == "kernel":
 		if m := oomKillRE.FindStringSubmatch(ev.Message); m != nil {
+			isKillLine = true
 			unit, comm = serviceOfCgroup(m[1]), m[2]
 			victimKeys = []string{"kernel/" + m[3] + "/" + comm}
 			if unit != "" {
 				victimKeys = append(victimKeys, "systemd/"+unit)
 			}
 		} else if m := oomKilledRE.FindStringSubmatch(ev.Message); m != nil {
+			if r.inEpisode(now) {
+				return nil
+			}
 			comm = m[2]
 			victimKeys = []string{"kernel/" + m[1] + "/" + comm}
 		} else {
@@ -108,6 +139,11 @@ func (r *OOMKill) Evaluate(ev event.Event, now time.Time) []event.Signal {
 		subject = comm
 	}
 	at, isNew := r.s.add(now, victimKeys...)
+	if isKillLine {
+		r.mu.Lock()
+		r.episodeAt = now
+		r.mu.Unlock()
+	}
 	if !isNew {
 		return nil
 	}

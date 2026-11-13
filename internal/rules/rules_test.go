@@ -326,7 +326,7 @@ func TestRestartLoop(t *testing.T) {
 
 func TestRestartLoopShapesAndIsolation(t *testing.T) {
 	r, _ := NewRestartLoop(Params{Threshold: 2, Window: time.Minute})
-	// Scheduled restart and Started lines both count; different units do not mix.
+	// Scheduled restart lines of different units do not mix.
 	if s := r.Evaluate(sysdEv("app.service: Scheduled restart job, restart counter is at 4."), t0); len(s) != 0 {
 		t.Fatal("early")
 	}
@@ -404,9 +404,9 @@ func TestOOMKernelAndSystemdLines(t *testing.T) {
 	if s := r.Evaluate(kernEv(oomKilledLine), t0.Add(time.Second)); len(s) != 0 {
 		t.Fatal("same victim reported twice")
 	}
-	// A different victim pid is reported.
+	// A different victim pid, after the kill episode, is reported.
 	other := strings.Replace(oomKilledLine, "1234", "999", 1)
-	if s := r.Evaluate(kernEv(other), t0.Add(2*time.Second)); len(s) != 1 || s[0].Fingerprint != event.FingerprintOf(IDOOMKill, "comm", "app") {
+	if s := r.Evaluate(kernEv(other), t0.Add(10*time.Second)); len(s) != 1 || s[0].Fingerprint != event.FingerprintOf(IDOOMKill, "comm", "app") {
 		t.Fatalf("other victim: %+v", s)
 	}
 	// systemd's line for a unit.

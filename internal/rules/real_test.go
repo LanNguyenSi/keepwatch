@@ -249,8 +249,7 @@ func TestOOMUnitAttribution(t *testing.T) {
 }
 
 // One kill of one unit as the journal records it on 24.04: the kernel's two
-// lines and systemd's two lines give one signal; a second kill of the same
-// unit after the window gives another.
+// lines and systemd's two lines give one signal.
 func TestOOMRealSequenceOneSignal(t *testing.T) {
 	const memcg = "/system.slice/hog.service"
 	lines := []event.Event{
@@ -370,5 +369,206 @@ func TestEngineKeepsOrderAndCopiesRules(t *testing.T) {
 	rules[0] = rl
 	if got := e.Evaluate(sshEv(failed("192.0.2.1")), t0); len(got) != 1 || got[0].RuleID != IDSSHBruteForce {
 		t.Fatalf("engine must keep its own copy: %+v", got)
+	}
+}
+
+func killLines(unit string, pid int) []event.Event {
+	memcg := "/system.slice/" + unit
+	return []event.Event{
+		kernEv("oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=" + memcg + ",task_memcg=" + memcg + fmt.Sprintf(",task=tail,pid=%d,uid=0", pid)),
+		kernEv(fmt.Sprintf("Memory cgroup out of memory: Killed process %d (tail) total-vm:27120kB, anon-rss:24448kB", pid)),
+		sysdEv(unit + ": A process of this unit has been killed by the OOM killer."),
+		sysdEv(unit + ": Failed with result 'oom-kill'."),
+	}
+}
+
+func countSignals(r Rule, evs []event.Event, at time.Time) int {
+	n := 0
+	for i, ev := range evs {
+		n += len(r.Evaluate(ev, at.Add(time.Duration(i)*time.Millisecond)))
+	}
+	return n
+}
+
+// Real 22.04 order: systemd's line reaches the journal before the kernel's.
+func TestOOMSystemdFirstOneSignal(t *testing.T) {
+	k := killLines("hog.service", 183820)
+	order := []event.Event{k[2], k[3], k[0], k[1]}
+	r, _ := NewOOMKill(OOMParams{Window: time.Hour})
+	if n := countSignals(r, order, t0); n != 1 {
+		t.Fatalf("systemd-first order gave %d signals, want 1", n)
+	}
+	// systemd line, then only the Killed process line (no oom-kill line).
+	r2, _ := NewOOMKill(OOMParams{Window: time.Hour})
+	if n := countSignals(r2, []event.Event{k[2], k[0], k[1]}, t0); n != 1 {
+		t.Fatalf("systemd, oom-kill, Killed gave %d signals", n)
+	}
+}
+
+// A second kill of the same unit after the window gives exactly one more
+// signal, in either line order.
+func TestOOMSecondKillAfterWindow(t *testing.T) {
+	for name, order := range map[string][]int{"kernel first": {0, 1, 2, 3}, "systemd first": {2, 3, 0, 1}} {
+		r, _ := NewOOMKill(OOMParams{Window: time.Minute})
+		k1 := killLines("hog.service", 100)
+		k2 := killLines("hog.service", 200)
+		var e1, e2 []event.Event
+		for _, i := range order {
+			e1 = append(e1, k1[i])
+			e2 = append(e2, k2[i])
+		}
+		if n := countSignals(r, e1, t0); n != 1 {
+			t.Fatalf("%s: first kill gave %d signals", name, n)
+		}
+		if n := countSignals(r, e2, t0.Add(10*time.Second)); n != 0 {
+			t.Fatalf("%s: repeat within the window gave %d signals", name, n)
+		}
+		if n := countSignals(r, e2, t0.Add(2*time.Minute)); n != 1 {
+			t.Fatalf("%s: second kill after the window gave %d signals, want 1", name, n)
+		}
+	}
+}
+
+// memory.oom.group: one oom-kill line, then one Killed process line per
+// process and a note line, then systemd's lines (22.04 and 24.04 capture).
+func TestOOMGroupKillOneSignal(t *testing.T) {
+	const memcg = "/system.slice/hoggroup.service"
+	evs := []event.Event{
+		kernEv("oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=" + memcg + ",task_memcg=" + memcg + ",task=tail,pid=260394,uid=0"),
+		kernEv("Memory cgroup out of memory: Killed process 260394 (tail) total-vm:26440kB, anon-rss:23680kB, file-rss:1408kB, shmem-rss:0kB, UID:0 pgtables:92kB oom_score_adj:0"),
+		kernEv("Tasks in " + memcg + " are going to be killed due to memory.oom.group set"),
+		kernEv("Memory cgroup out of memory: Killed process 260397 (sleep) total-vm:2696kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:0 pgtables:48kB oom_score_adj:0"),
+		kernEv("Memory cgroup out of memory: Killed process 260398 (sleep) total-vm:2696kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:0 pgtables:48kB oom_score_adj:0"),
+		sysdEv("hoggroup.service: A process of this unit has been killed by the OOM killer."),
+		sysdEv("hoggroup.service: Main process exited, code=killed, status=9/KILL"),
+		sysdEv("hoggroup.service: Failed with result 'oom-kill'."),
+	}
+	r, _ := NewOOMKill(OOMParams{Window: time.Hour})
+	if n := countSignals(r, evs, t0); n != 1 {
+		t.Fatalf("group kill gave %d signals, want 1", n)
+	}
+	// A Killed process line long after the episode is reported on its own.
+	if s := r.Evaluate(evs[3], t0.Add(killedGrace+time.Second)); len(s) != 1 || s[0].Subject != "sleep" {
+		t.Fatalf("late Killed line: %+v", s)
+	}
+	// Exactly killedGrace after the oom-kill line the episode is over.
+	r2, _ := NewOOMKill(OOMParams{Window: time.Hour})
+	r2.Evaluate(evs[0], t0)
+	if s := r2.Evaluate(evs[3], t0.Add(killedGrace)); len(s) != 1 {
+		t.Fatalf("at the grace boundary: %+v", s)
+	}
+	// A Killed line before the oom-kill line (a clock step back) is not in the episode.
+	r3, _ := NewOOMKill(OOMParams{Window: time.Hour})
+	r3.Evaluate(evs[0], t0.Add(time.Minute))
+	if s := r3.Evaluate(evs[3], t0); len(s) != 1 {
+		t.Fatalf("Killed line before the episode: %+v", s)
+	}
+}
+
+// Userless and non-preauth lines left by scanners, health checks and
+// ssh-keyscan never count; lines with a user do, including a reset close.
+func TestSSHPreauthFamily(t *testing.T) {
+	never := []string{
+		"Connection closed by 127.0.0.1 port 36448 [preauth]",
+		"Connection reset by 127.0.0.1 port 36422 [preauth]",
+		"Connection reset by 127.0.0.1 port 36380",
+		"Disconnected from 127.0.0.1 port 36448 [preauth]",
+		"Disconnected from authenticating user root 127.0.0.1 port 36448",
+		"Connection closed by authenticating user root 127.0.0.1 port 36448",
+		"Connection reset by invalid user admin 127.0.0.1 port 36448",
+		"Disconnected from user mallory 127.0.0.1 port 36516",
+		"error: kex_exchange_identification: read: Connection reset by peer",
+		"fatal: userauth_finish: send failure packet: Connection reset by peer [preauth]",
+		"Connection closed by authenticating user root 127.0.0.1 port 36448 [preauth] x",
+		"Connection aborted by authenticating user root 127.0.0.1 port 36448 [preauth]",
+	}
+	for _, m := range never {
+		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
+		if s := r.Evaluate(sshEv(m), t0); len(s) != 0 {
+			t.Errorf("%q gave a signal", m)
+		}
+	}
+	counted := []string{
+		"Connection reset by authenticating user mallory 127.0.0.1 port 55794 [preauth]",
+		"Connection reset by invalid user admin 127.0.0.1 port 55794 [preauth]",
+		"Connection closed by invalid user admin 127.0.0.1 port 55794 [preauth]",
+		"Disconnected from authenticating user root 127.0.0.1 port 55794 [preauth]",
+		"error: PAM: Authentication failure for mallory from 127.0.0.1",
+		"error: PAM: Authentication failure for illegal user admin from 127.0.0.1",
+		"error: PAM: Authentication failure for bob from 1.2.3.4 from 127.0.0.1",
+		"Connection reset by authenticating user bob from 1.2.3.4 port 22 127.0.0.1 port 5 [preauth]",
+	}
+	for _, m := range counted {
+		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
+		s := r.Evaluate(sshEv(m), t0)
+		if len(s) != 1 || s[0].Subject != "127.0.0.1" {
+			t.Errorf("%q: %+v", m, s)
+		}
+	}
+	for _, m := range []string{"x error: PAM: Authentication failure for mallory from 127.0.0.1", "error: PAM: Authentication failure for mallory from 127.0.0.1 trailing", "error: PAM: Authentication failure for mallory from not-an-ip"} {
+		r := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
+		if s := r.Evaluate(sshEv(m), t0); len(s) != 0 {
+			t.Errorf("%q gave a signal", m)
+		}
+	}
+	// Keyboard-interactive guessing that ends in a reset: PAM line plus reset
+	// line per connection; three connections fire once.
+	r := mustBrute(t, Params{Threshold: 5, Window: time.Minute})
+	n := 0
+	for i := 0; i < 3; i++ {
+		at := t0.Add(time.Duration(i) * time.Second)
+		n += len(r.Evaluate(sshEv("error: PAM: Authentication failure for mallory from 127.0.0.1"), at))
+		n += len(r.Evaluate(sshEv(fmt.Sprintf("Connection reset by authenticating user mallory 127.0.0.1 port %d [preauth]", 55794+i)), at))
+	}
+	if n != 1 {
+		t.Fatalf("reset-closed guessing gave %d signals, want 1", n)
+	}
+}
+
+func TestSummaryText(t *testing.T) {
+	r := mustBrute(t, Params{Threshold: 1, Window: 10 * time.Minute})
+	s := r.Evaluate(sshEv(failed("203.0.113.9")), t0)
+	if len(s) != 1 || s[0].Summary != "1 ssh login failure lines from 203.0.113.9 within 10m0s" {
+		t.Fatalf("summary = %+v", s)
+	}
+}
+
+func TestZeroNowIsIgnored(t *testing.T) {
+	var zero time.Time
+	b := mustBrute(t, Params{Threshold: 1, Window: time.Minute})
+	if s := b.Evaluate(sshEv(failed("192.0.2.1")), zero); len(s) != 0 {
+		t.Fatal("ssh: zero now gave a signal")
+	}
+	rl, _ := NewRestartLoop(Params{Threshold: 1, Window: time.Minute})
+	if s := rl.Evaluate(sysdEv("a.service: Scheduled restart job, restart counter is at 1."), zero); len(s) != 0 {
+		t.Fatal("restart: zero now gave a signal")
+	}
+	oo, _ := NewOOMKill(OOMParams{Window: time.Minute})
+	if s := oo.Evaluate(sysdEv("a.service: A process of this unit has been killed by the OOM killer."), zero); len(s) != 0 {
+		t.Fatal("oom: zero now gave a signal")
+	}
+	// A zero now changes no state: a hit, a zero, then the second hit still adds up
+	// and the zero does not reset the stored clock.
+	b2 := mustBrute(t, Params{Threshold: 2, Window: time.Minute})
+	b2.Evaluate(sshEv(failed("192.0.2.2")), t0)
+	b2.Evaluate(sshEv(failed("192.0.2.2")), zero)
+	if s := b2.Evaluate(sshEv(failed("192.0.2.2")), t0.Add(time.Second)); len(s) != 1 {
+		t.Fatalf("zero now disturbed the state: %+v", s)
+	}
+}
+
+// A step back of exactly the window is clamped (state kept), one nanosecond
+// more resets.
+func TestClockStepBackBoundary(t *testing.T) {
+	const w = time.Minute
+	r := mustBrute(t, Params{Threshold: 2, Window: w})
+	r.Evaluate(sshEv(failed("192.0.2.1")), t0.Add(w))
+	if s := r.Evaluate(sshEv(failed("192.0.2.1")), t0); len(s) != 1 {
+		t.Fatalf("step back of exactly the window must clamp: %+v", s)
+	}
+	r2 := mustBrute(t, Params{Threshold: 2, Window: w})
+	r2.Evaluate(sshEv(failed("192.0.2.1")), t0.Add(w+time.Nanosecond))
+	if s := r2.Evaluate(sshEv(failed("192.0.2.1")), t0); len(s) != 0 {
+		t.Fatalf("step back beyond the window must reset: %+v", s)
 	}
 }

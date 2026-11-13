@@ -45,6 +45,9 @@ func parseUnitRestart(msg string) (string, bool) {
 
 // Evaluate implements Rule.
 func (r *RestartLoop) Evaluate(ev event.Event, now time.Time) []event.Signal {
+	if now.IsZero() {
+		return nil
+	}
 	if ev.Kind != event.KindJournal || !fromSystemd(ev) {
 		return nil
 	}

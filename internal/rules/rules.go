@@ -58,6 +58,14 @@ type Rule interface {
 	ID() string
 	// Evaluate looks at ev with the injected clock value now. It never
 	// panics, whatever ev contains, and is safe for concurrent use.
+	//
+	// Clock contract: now must come from one clock that event senders
+	// cannot set (the journal's own timestamp or the daemon's clock),
+	// and the two must never be mixed across calls. A zero now is
+	// ignored (no state change, no signal). A step back of at most the
+	// rule's window is clamped to the latest value seen; a larger step
+	// back resets the rule's state, so a mixed or sender-controlled
+	// clock would blind the rule.
 	Evaluate(ev event.Event, now time.Time) []event.Signal
 }
 
@@ -255,10 +263,10 @@ func newSeenSet(ttl time.Duration, maxKeys int) *seenSet {
 }
 
 // add reports the effective time and whether the event is new: true when none
-// of keys was seen within the ttl. All keys are marked seen either way that
-// matters (new keys are added, expired keys are refreshed), so the several
-// names under which one kill can appear suppress each other. A key seen again
-// within the ttl is not refreshed.
+// of keys was seen within the ttl. Every key that is not seen within the ttl
+// is marked (added, or refreshed when it had expired), also when the event
+// is suppressed, so the several lines of one kill suppress each other
+// whatever their order. A key seen within the ttl is not refreshed.
 func (s *seenSet) add(now time.Time, keys ...string) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -273,13 +281,12 @@ func (s *seenSet) add(now time.Time, keys ...string) (time.Time, bool) {
 			fresh = false
 		}
 	}
-	if !fresh {
-		return now, false
-	}
 	for _, k := range keys {
 		if e, ok := s.keys[k]; ok {
-			e.at = now
-			s.order.MoveToBack(e.el)
+			if now.Sub(e.at) >= s.ttl {
+				e.at = now
+				s.order.MoveToBack(e.el)
+			}
 			continue
 		}
 		for len(s.keys) >= s.maxKeys {
@@ -292,7 +299,7 @@ func (s *seenSet) add(now time.Time, keys ...string) (time.Time, bool) {
 		e.el = s.order.PushBack(e)
 		s.keys[k] = e
 	}
-	return now, true
+	return now, fresh
 }
 
 func (s *seenSet) size() int {
