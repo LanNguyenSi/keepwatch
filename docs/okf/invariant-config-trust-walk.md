@@ -3,7 +3,7 @@ type: invariant
 title: The loader walks the path before it reads a byte
 description: How config.Load turns a path into trusted bytes, via the os.Root descent with its swap check, the sticky-ancestor exception, and the merge rule that refuses a later file changing a key's YAML kind.
 tags: [config, trust, filesystem, invariants]
-timestamp: 2026-11-11T10:18:36Z
+timestamp: 2026-11-13T13:11:15Z
 sources:
   - internal/config/config.go
   - internal/config/walk.go
