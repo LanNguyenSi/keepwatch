@@ -24,6 +24,9 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- Notification worker for the watch daemon: a bounded queue with its own
+  goroutine, a per-incident and a global rate limit, reported drops, and an
+  incident notice that is cleaned before it is cut.
 - Rules for the daemon that turn journal events into signals: an ssh brute
   force rule (failed and invalid-user logins, plus refused pre-auth
   connections, per source address or IPv6 /64), a restart loop rule (systemd
