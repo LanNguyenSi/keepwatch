@@ -3,7 +3,7 @@ type: invariant
 title: doctor judges the unit systemd runs, not the file install wrote
 description: The file-equals-rendering comparison plus four properties asked of systemd per service, and the classification rule that tells a hostile drop-in from a host-wide one.
 tags: [doctor, systemd, units, invariants]
-timestamp: 2026-11-12T14:30:28Z
+timestamp: 2026-11-13T13:05:06Z
 sources:
   - internal/doctor/doctor.go
   - internal/install/units.go
@@ -21,14 +21,14 @@ contains alone.
 from the values the file itself holds (program, `--config`, `--notify`,
 `ReadWritePaths`) and compares line by line
 (`internal/doctor/doctor.go:849-850#"RenderInstalled(u.name, u.content)"`,
-`internal/install/units.go:537#"func FirstDifference"`), naming the first
+`internal/install/units.go:627#"func FirstDifference"`), naming the first
 difference. Re-rendering from the file's own values, rather than from the
 configuration, is what keeps a hand-edited option visible: `Inspect` reads
 only the last `ExecStart` and a few values, so without this comparison a
 second `ExecStart` line (which a oneshot service also runs) or an added
 option would pass every other check
 (`internal/doctor/doctor.go:845-847#"a second ExecStart line"`,
-`internal/install/units.go:471#"func Inspect"`).
+`internal/install/units.go:561#"func Inspect"`).
 
 **Systemd gets the last word.** For each service whose file exists, `doctor`
 asks `systemctl show` for eight properties at once
