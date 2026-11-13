@@ -154,9 +154,13 @@ func (w *Worker) report(r Result) {
 // slot in both rate limits, keyed by its fingerprint. The slot is given back
 // when the send fails or is cut short by shutdown, so the caller may try the
 // same fingerprint again at once; a job that was sent keeps its slot.
+//
+// Enqueue is safe for concurrent use. It reads the clock while holding the
+// lock, so that the times of the slots follow the order in which jobs were
+// admitted; Clock must therefore not call back into the Worker.
 func (w *Worker) Enqueue(j Job) DropReason {
-	now := w.now()
 	w.mu.Lock()
+	now := w.now()
 	reason := w.admit(j, now)
 	w.mu.Unlock()
 	if reason != NotDropped {
