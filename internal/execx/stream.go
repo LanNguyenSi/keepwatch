@@ -382,7 +382,7 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 	go func() {
 		defer close(lr.done)
 		defer close(lr.lines)
-		br := bufio.NewReaderSize(pipeReader{r, lr}, 4096)
+		br := bufio.NewReaderSize(pipeReader{r, lr}, lineReaderBufSize)
 		var acc []byte
 		over := false
 		for {
@@ -426,3 +426,7 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 	}()
 	return lr
 }
+
+// lineReaderBufSize is the size of the line reader's buffer on stdout, so
+// the most it takes from the pipe in one read.
+const lineReaderBufSize = 4096

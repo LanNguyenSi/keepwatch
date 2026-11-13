@@ -1110,7 +1110,7 @@ func TestStreamExactlyFullPipeBacklogIsDelivered(t *testing.T) {
 		t.Skipf("the pipe holds %d bytes, not the bound of %d", capacity, postExitMaxBytes)
 	}
 	// What the line reader took from the pipe before the exit: one buffer.
-	const readerBuffer = 4096
+	const readerBuffer = lineReaderBufSize
 	n := capacity + readerBuffer
 	script := "echo first; sleep 0.1; head -c " + strconv.Itoa(n) + " /dev/zero | tr '\\0' '\\n'"
 	r := realRunner(t, "sh", "sleep", "head", "tr")
@@ -1181,7 +1181,7 @@ func TestStreamFloodOfShortLinesAfterExitEndsAtTheByteBound(t *testing.T) {
 	// one read that was under way) is delivered on top of the bound, and
 	// what it holds when the bound is passed is not delivered. A few lines
 	// may come before the exit is seen.
-	const readAhead = 4096 + 2*width
+	const readAhead = lineReaderBufSize + 2*width
 	lo, hi := (bound-readAhead)/width, (bound+2*readAhead)/width+64
 	if n < lo || n > hi {
 		t.Fatalf("%d lines of %d bytes delivered, want %d to %d for a bound of %d bytes", n, width, lo, hi, bound)
