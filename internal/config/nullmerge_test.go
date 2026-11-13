@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // nullMergeMain sets every section a drop-in could blank.
@@ -29,6 +30,11 @@ notify:
   ntfy:
     url: https://ntfy.example.com
     topic: alerts
+watch:
+  enabled: true
+  learning_period: 3d
+  ssh_bruteforce:
+    threshold: 9
 `
 
 // requireMainIntact asserts every value nullMergeMain sets survived.
@@ -51,6 +57,13 @@ func requireMainIntact(t *testing.T, cfg *Config) {
 	}
 	if cfg.Notify.Ntfy == nil || cfg.Notify.Ntfy.URL != "https://ntfy.example.com" || cfg.Notify.Ntfy.Topic != "alerts" {
 		t.Errorf("Notify.Ntfy = %+v, want the main ntfy section", cfg.Notify.Ntfy)
+	}
+	want := defaultWatch()
+	want.Enabled = true
+	want.LearningPeriod = 3 * 24 * time.Hour
+	want.SSHBruteforce.Threshold = 9
+	if cfg.Watch != want {
+		t.Errorf("Watch = %+v, want %+v", cfg.Watch, want)
 	}
 }
 
@@ -77,6 +90,12 @@ func TestNullInConfDLeavesMainSectionIntact(t *testing.T) {
 		{"null checks.sshd.params", "checks:\n  sshd:\n    params: ~\n"},
 		{"null checks.sshd.enabled", "checks:\n  sshd:\n    enabled:\n"},
 		{"null ntfy.url", "notify:\n  ntfy:\n    url:\n"},
+		{"bare watch", "watch:\n"},
+		{"null watch", "watch: ~\n"},
+		{"null watch.learning_period", "watch:\n  learning_period: ~\n"},
+		{"null watch.ssh_bruteforce", "watch:\n  ssh_bruteforce:\n"},
+		{"null watch.ssh_bruteforce.threshold", "watch:\n  ssh_bruteforce:\n    threshold: ~\n"},
+		{"null watch.notify", "watch:\n  notify:\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,6 +108,30 @@ func TestNullInConfDLeavesMainSectionIntact(t *testing.T) {
 				t.Fatalf("Load: %v", err)
 			}
 			requireMainIntact(t, cfg)
+		})
+	}
+}
+
+func TestNullWatchKeysInSingleFileKeepDefaults(t *testing.T) {
+	// A null or bare ssh_bruteforce, restart_loop or notify in one
+	// main file counts as absent: the rule and notify defaults stay.
+	// Each key alone and all three together.
+	for _, tc := range []struct{ name, yaml string }{
+		{"null ssh_bruteforce", "watch:\n  ssh_bruteforce: ~\n"},
+		{"bare ssh_bruteforce", "watch:\n  ssh_bruteforce:\n"},
+		{"null restart_loop", "watch:\n  restart_loop: ~\n"},
+		{"bare restart_loop", "watch:\n  restart_loop:\n"},
+		{"null notify", "watch:\n  notify: ~\n"},
+		{"bare notify", "watch:\n  notify:\n"},
+		{"all three null", "watch:\n  ssh_bruteforce: ~\n  restart_loop: ~\n  notify: ~\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, main := setup(t, map[string]string{"keepwatch.yaml": tc.yaml})
+			cfg, err := Load(main)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			checkWatch(t, cfg, wantWatch{})
 		})
 	}
 }
@@ -146,6 +189,19 @@ func TestNullInMainDoesNotBlockConfD(t *testing.T) {
 		}
 		if len(cfg.Exceptions) != 1 {
 			t.Errorf("Exceptions = %+v, want the conf.d entry", cfg.Exceptions)
+		}
+	})
+	t.Run("main null watch and watch.notify, conf.d sets them", func(t *testing.T) {
+		_, main := setup(t, map[string]string{
+			"keepwatch.yaml":   "watch:\n",
+			"conf.d/10-w.yaml": "watch:\n  enabled: true\n  notify:\n    queue: 4\n",
+		})
+		cfg, err := Load(main)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Watch.Enabled || cfg.Watch.Notify.Queue != 4 {
+			t.Errorf("Watch = %+v, want enabled with queue 4", cfg.Watch)
 		}
 	})
 }
