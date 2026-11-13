@@ -47,9 +47,11 @@ func (l *Lock) Path() string { return l.path }
 //
 // A known limit: renaming or removing watch.lock while a watch holds it
 // lets a second watch start, because the next Acquire then creates a fresh
-// file and flocks that; state_dir is trusted (root-owned or owned by the
-// running user, mode 0700), so doing that takes the rights of whoever could
-// stop the watch anyway.
+// file and flocks that. state_dir is trusted (root-owned or owned by the
+// running user, not writable by group or other), so doing that takes the
+// rights of whoever could stop the watch anyway, given trusted ancestors:
+// securefile does not examine the ancestors of state_dir or ACLs, and
+// whoever can write a parent of state_dir can rename state_dir itself away.
 func Acquire(dir string) (*Lock, error) {
 	d, err := securefile.OpenDir(dir, false, nil)
 	if err != nil {
