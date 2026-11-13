@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -994,4 +995,144 @@ func TestOpenAppendRetriedAfterReplaceOrRemoval(t *testing.T) {
 			t.Fatal(serr)
 		}
 	})
+}
+
+// An existing file swapped for a dangling link after the first look is not
+// opened through: the link target is not created.
+func TestExistingSwappedForDanglingLink(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "audit"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.beforeOpen = func() {
+		_ = os.Remove(filepath.Join(p, "audit"))
+		_ = os.Symlink("victim", filepath.Join(p, "audit"))
+	}
+	f, _, err := d.OpenAppend("audit", 100)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(p, "victim")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatalf("link target was created: %v", serr)
+	}
+}
+
+// An existing file renamed away after the first look is created anew,
+// exclusively, with one directory flush.
+func TestExistingRenamedAwayIsCreated(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "audit"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	d.hooks.beforeOpen = func() {
+		if n++; n == 1 {
+			_ = os.Rename(filepath.Join(p, "audit"), filepath.Join(p, "moved"))
+		}
+	}
+	synced := 0
+	d.hooks.syncDir = func(f *os.File) error { synced++; return f.Sync() }
+	f, size, err := d.OpenAppend("audit", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if size != 0 || synced != 1 {
+		t.Fatalf("size %d, %d flushes; want 0 and 1", size, synced)
+	}
+}
+
+// A directory swapped in after the first look is refused when appending.
+func TestDirectorySwappedBeforeAppend(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "audit"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.beforeOpen = func() {
+		_ = os.Remove(filepath.Join(p, "audit"))
+		_ = os.Mkdir(filepath.Join(p, "audit"), 0o700)
+	}
+	f, _, err := d.OpenAppend("audit", 100)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+}
+
+// A trusted file that appears between the look and the exclusive create is
+// taken as it is, with its size, and no directory flush.
+func TestFileAppearsBeforeExclusiveCreate(t *testing.T) {
+	d, p := newDir(t)
+	n := 0
+	d.hooks.beforeOpen = func() {
+		if n++; n == 1 {
+			_ = os.WriteFile(filepath.Join(p, "audit"), []byte("theirs"), 0o600)
+		}
+	}
+	synced := 0
+	d.hooks.syncDir = func(f *os.File) error { synced++; return f.Sync() }
+	f, size, err := d.OpenAppend("audit", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if size != 6 || synced != 0 {
+		t.Fatalf("size %d, %d flushes; want 6 and 0", size, synced)
+	}
+}
+
+// A unix socket swapped in after the first look is refused for read and
+// append (opening it fails with a different errno per platform).
+func TestSocketSwappedBeforeOpen(t *testing.T) {
+	for _, op := range []string{"read", "append"} {
+		t.Run(op, func(t *testing.T) {
+			// A unix socket path is limited to about 100 bytes, so use a short
+			// base directory instead of the test's temporary one.
+			base, err := os.MkdirTemp("/tmp", "kw")
+			if err != nil {
+				t.Skip(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(base) })
+			p := filepath.Join(base, "s")
+			d, err := OpenDir(p, true, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { d.Close() })
+			if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+				t.Fatal(err)
+			}
+			var l net.Listener
+			d.hooks.beforeOpen = func() {
+				_ = os.Remove(filepath.Join(p, "a"))
+				var err error
+				l, err = net.Listen("unix", filepath.Join(p, "a"))
+				if err != nil {
+					t.Error(err)
+				}
+			}
+			defer func() {
+				if l != nil {
+					l.Close()
+				}
+			}()
+			if op == "read" {
+				_, err = d.ReadCapped("a", 10)
+			} else {
+				var f *os.File
+				f, _, err = d.OpenAppend("a", 10)
+				if f != nil {
+					f.Close()
+				}
+			}
+			if !errors.Is(err, ErrUntrusted) {
+				t.Fatalf("got %v, want ErrUntrusted", err)
+			}
+		})
+	}
 }

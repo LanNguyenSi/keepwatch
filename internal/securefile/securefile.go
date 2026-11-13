@@ -163,9 +163,9 @@ func checkDirInfo(path string, fi fs.FileInfo, ownerOf OwnerOf) error {
 // The check is made on the path (Lstat, so a symlink is seen) and the opened
 // directory must be the very directory that was checked, so a swap between
 // the two is caught. Ancestors of path are not examined (known limit), and
-// neither is a swap of path itself for a FIFO between the look and the open
-// of the directory (it needs write access to the parent, the same
-// precondition as for the ancestors).
+// neither is a swap of path itself for a FIFO: if path is replaced by a FIFO
+// between the look and the open, OpenDir blocks in the open (known limit;
+// needs write access to the parent, like the ancestors).
 func OpenDir(path string, create bool, ownerOf OwnerOf) (*Dir, error) {
 	return openDir(path, create, ownerOf, defaultHooks())
 }
@@ -340,13 +340,21 @@ func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, 
 			// after the look is never opened or created through, and a file
 			// this call did not create is never removed again.
 			oflag |= os.O_EXCL
+		} else if !absent {
+			// The file was there at the look: open it as it is. A create
+			// here could create through a link swapped in meanwhile.
+			oflag &^= os.O_CREATE
 		}
 		f, err = d.root.OpenFile(name, oflag, perm)
 		switch {
 		case err == nil:
 		case absent && errors.Is(err, fs.ErrExist):
 			continue
-		case errors.Is(err, syscall.ENXIO), errors.Is(err, syscall.EISDIR):
+		case !absent && errors.Is(err, fs.ErrNotExist):
+			// Removed or renamed away after the look; the next attempt sees
+			// it absent (and creates it exclusively when asked to).
+			continue
+		case errors.Is(err, syscall.ENXIO), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.EOPNOTSUPP):
 			return nil, nil, false, fmt.Errorf("%s is not a regular file (%v): %w", d.filePath(name), err, ErrUntrusted)
 		case errors.Is(err, syscall.ELOOP), strings.Contains(err.Error(), "path escapes from parent"):
 			return nil, nil, false, fmt.Errorf("%s is a link that is not followed (%v): %w", d.filePath(name), err, ErrUntrusted)
@@ -424,9 +432,12 @@ func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 // the directory is flushed after a successful create. The caller closes the
 // file.
 //
-// The create is exclusive, so a link (even a dangling one) planted after the
-// first look makes the open fail instead of creating its target, and a file
-// that someone else created is never removed by the cleanup. ErrChanged may be
+// Every create is exclusive and happens only when the first look found the
+// name absent. A file that was there at the look is opened without O_CREATE,
+// so a link (even a dangling one) swapped in afterwards never makes the open
+// create its target, and a file that someone else created is never removed by
+// the cleanup. A file that vanishes or appears between the look and the open
+// is handled by the next attempt. ErrChanged may be
 // returned when the file keeps being replaced; the caller retries. The
 // returned file is in non-blocking mode, which does not affect a regular file.
 // If the directory flush after a create fails, the new file stays in place.
