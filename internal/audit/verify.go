@@ -74,7 +74,7 @@ func (e *BreakError) Error() string {
 //     that was in the region (if any) is gone from the chain.
 //
 // The reader is consumed in lines; a line over MaxLineBytes is not a record
-// whatever the buffer of the reader, and Verify holds at most MaxTornBytes+1
+// whatever the buffer of the reader, and Verify holds at most MaxTornBytes
 // bytes of any line.
 func Verify(r io.Reader) (Result, error) {
 	return walk(r, nil)
@@ -87,8 +87,9 @@ type region struct {
 	line   int
 	offset int64
 	detail string
-	// buf holds the bytes of the region, each line with its newline, up to
-	// MaxTornBytes+1 bytes; n counts all of them.
+	// buf holds the bytes of the region, each line with its newline, until
+	// the region is too long to be accounted for (MaxTornBytes+1 bytes: the
+	// region Open found plus a newline it added); n counts all of them.
 	buf []byte
 	n   int64
 }
@@ -101,7 +102,7 @@ func (g *region) add(l rawLine) {
 	}
 	if room := MaxTornBytes + 1 - len(g.buf); room > 0 {
 		g.buf = append(g.buf, l.data[:min(room, len(l.data))]...)
-		if l.terminated && len(g.buf) < MaxTornBytes+1 {
+		if l.terminated {
 			g.buf = append(g.buf, '\n')
 		}
 	}
@@ -112,20 +113,19 @@ func (g *region) tooLong() bool { return g.n > MaxTornBytes+1 }
 
 // accounts reports whether rec is the record that Open writes for exactly
 // this region. A region Open found without a final newline is followed by a
-// newline Open added, which is not part of what the record names.
+// newline Open added, which is not part of what the record names, so rec may
+// name the region with or without its last byte. The caller has checked that
+// the region is not too long (buf then holds all of it) and that a record
+// follows it (so every line of it, the last one too, ended with a newline).
 func (g *region) accounts(rec Record) bool {
-	if rec.Kind != AuditRecovered || g.tooLong() {
+	if rec.Kind != AuditRecovered {
 		return false
 	}
-	// Not too long: buf holds every byte of the region.
 	n := len(g.buf)
 	if n <= MaxTornBytes && rec.Summary == tornSummary(g.offset, int64(n), true, sumHex(g.buf)) {
 		return true
 	}
-	if n >= 2 && n-1 <= MaxTornBytes && g.buf[n-1] == '\n' {
-		return rec.Summary == tornSummary(g.offset, int64(n-1), false, sumHex(g.buf[:n-1]))
-	}
-	return false
+	return n >= 2 && rec.Summary == tornSummary(g.offset, int64(n-1), false, sumHex(g.buf[:n-1]))
 }
 
 func (g *region) breakError() *BreakError {
@@ -138,7 +138,8 @@ func (g *region) breakError() *BreakError {
 
 // rawLine is one line as read from the log.
 type rawLine struct {
-	// data is the line without its newline, cut at MaxTornBytes+1 bytes; it
+	// data is the line without its newline, cut at MaxTornBytes bytes (a
+	// longer line is not part of any region that can be accounted for); it
 	// is valid until the next call of lineReader.next.
 	data       []byte
 	length     int64 // all bytes of the line, without the newline
@@ -169,7 +170,7 @@ func (lr *lineReader) next() (rawLine, error) {
 			chunk = chunk[:len(chunk)-1]
 		}
 		l.length += int64(len(chunk))
-		if room := MaxTornBytes + 1 - len(lr.buf); room > 0 {
+		if room := MaxTornBytes - len(lr.buf); room > 0 {
 			lr.buf = append(lr.buf, chunk[:min(room, len(chunk))]...)
 		}
 		if terminated || errors.Is(err, io.EOF) {

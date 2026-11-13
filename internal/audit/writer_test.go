@@ -395,7 +395,9 @@ func TestOpenReadsTheFileItAppendsTo(t *testing.T) {
 	recs := put(t, w, 2)
 	w.Close()
 	_, other := chainLines(sample(9))
+	ran := false
 	w2, _, err := Open(d, Options{afterOpen: func() {
+		ran = true
 		// Between the open and the read, swap the file by name.
 		if err := os.WriteFile(logPath(p)+".new", join(other), 0o600); err != nil {
 			t.Error(err)
@@ -408,6 +410,9 @@ func TestOpenReadsTheFileItAppendsTo(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w2.Close()
+	if !ran {
+		t.Fatal("test bug: the file was not swapped")
+	}
 	r, err := w2.Append(sample(1)[0])
 	if err != nil || r.Seq != 3 || r.Prev != recs[1].Hash {
 		t.Fatalf("resumed from the swapped file: %+v %v", r, err)
@@ -951,5 +956,23 @@ func TestCloseReportsTheCloseError(t *testing.T) {
 	w.f.Close() // the descriptor is gone: closing it again fails
 	if err := w.Close(); err == nil {
 		t.Fatal("Close hid the error of the file")
+	}
+}
+
+// Open looks at the end only. A record with a wrong hash in the middle of the
+// log is for Verify to find; it must not stop the writer from resuming at the
+// intact record behind it.
+func TestOpenIgnoresDamageBeforeTheLastIntactRecord(t *testing.T) {
+	recs, lines := chainLines(sample(4))
+	bad := bytes.Replace(lines[1], []byte(recs[1].Hash), []byte(strings.Repeat("a", 64)), 1)
+	d, p := newDir(t)
+	appendRaw(t, p, join([][]byte{lines[0], bad, lines[2], lines[3]}))
+	w, rec := openW(t, d, Options{})
+	if rec != nil || w.seq != 4 || w.prev != recs[3].Hash {
+		t.Fatalf("%+v seq %d", rec, w.seq)
+	}
+	be := mustBreak(t, "damaged middle", readLog(t, p))
+	if be.Seq != 2 || be.Reason != ReasonHash {
+		t.Fatalf("%+v", be)
 	}
 }

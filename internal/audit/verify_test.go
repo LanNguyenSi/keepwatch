@@ -485,9 +485,36 @@ func TestVerifyTornRegionBound(t *testing.T) {
 			}
 			continue
 		}
-		if !errors.As(err, &be) || be.Reason != ReasonMalformed || be.Seq != 3 || be.Line != 3 || be.Offset != off {
+		// The region Open would have to account for, with the newline it
+		// adds, is one byte longer than the bytes of the region.
+		withNL := len(region)
+		if region[len(region)-1] != '\n' {
+			withNL++
+		}
+		wantDetail := "not followed by a matching"
+		if withNL > MaxTornBytes+1 {
+			wantDetail = fmt.Sprintf("more than %d bytes", MaxTornBytes)
+		}
+		if !errors.As(err, &be) || be.Reason != ReasonMalformed || be.Seq != 3 || be.Line != 3 || be.Offset != off ||
+			!strings.Contains(be.Detail, wantDetail) {
 			t.Errorf("%s: got %v", name, err)
 		}
+	}
+	// The break is reported at once: bytes behind it are not read, so a
+	// failing reader after the region is not what Verify returns.
+	long := bytes.Repeat([]byte("z\n"), MaxTornBytes/2+2)
+	logLong, _ := recoveredLog(t, 2, long)
+	cut := bytes.Index(logLong, long) + len(long)
+	_, err := Verify(io.MultiReader(bytes.NewReader(logLong[:cut]), &failingReader{}))
+	var be *BreakError
+	if !errors.As(err, &be) {
+		t.Errorf("with a failing reader behind the region: %v", err)
+	}
+	// A region that does not add up to the bound has the plain detail.
+	log, _ := recoveredLog(t, 2, []byte("junk"))
+	_, err = Verify(bytes.NewReader(log[:len(log)-5]))
+	if !errors.As(err, &be) || !strings.Contains(be.Detail, "not followed by a matching") {
+		t.Errorf("plain detail: %v", err)
 	}
 }
 
@@ -541,6 +568,15 @@ func TestVerifyTornLineNeedsItsRecoveryRecord(t *testing.T) {
 	withNL.Hash = hashOf(withNL)
 	if res := mustVerify(t, "region named with its newline", tornAt(frag, string(encodeLine(withNL)))); res.TornLines != 1 {
 		t.Errorf("%+v", res)
+	}
+	// A blank line is a region of one byte; a record that claims an empty
+	// region without a newline for it does not account for it.
+	blank := recovery
+	blank.Summary = tornSummary(off, 0, false, sumHex(nil))
+	blank.Hash = hashOf(blank)
+	be0 := mustBreak(t, "empty region claimed over a blank line", tornAt("", string(encodeLine(blank))))
+	if be0.Seq != 4 || be0.Line != 4 || be0.Offset != off {
+		t.Errorf("empty region claimed: %+v", be0)
 	}
 	// Both lines of a two-line region are accounted for by one record that
 	// names both.

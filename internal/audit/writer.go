@@ -134,10 +134,10 @@ type Writer struct {
 // completed (Recovery.Completed).
 //
 // ErrCorrupt: a line after the last intact record that looks like a record
-// but has a wrong hash (that is not what an interrupted write looks like),
-// more than MaxTornBytes after the last intact record, or no intact record
-// within the window although the log is longer than it. The recovery record
-// may use the reserve (ReserveBytes); if even that is not enough, Open
+// but has a wrong hash (that is not what an interrupted write looks like), or
+// more than MaxTornBytes after the last intact record (which includes a log
+// longer than the window that has no intact record in it). The recovery
+// record may use the reserve (ReserveBytes); if even that is not enough, Open
 // returns ErrFull.
 func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 	limit := opts.MaxSize
@@ -204,31 +204,20 @@ type torn struct {
 // if there is one. It reads a window of at most tailWindow bytes from the end
 // of the file it holds open, with ReadAt.
 func (w *Writer) resume() (*torn, error) {
-	if w.size == 0 {
-		return nil, nil
-	}
 	if fi, err := w.f.Stat(); err != nil {
 		return nil, err
 	} else if fi.Size() != w.size {
 		return nil, fmt.Errorf("%s was %d bytes when opened and %d bytes when read: %w", FileName, w.size, fi.Size(), securefile.ErrChanged)
 	}
+	// The window may start in the middle of a line. That first line is then
+	// cut and so not a record, which is all that is needed of it.
 	base := max(0, w.size-tailWindow)
-	buf := make([]byte, w.size-base)
-	if _, err := w.f.ReadAt(buf, base); err != nil {
+	data := make([]byte, w.size-base)
+	if _, err := w.f.ReadAt(data, base); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("%s ended before %d bytes when read: %w", FileName, w.size, securefile.ErrChanged)
 		}
 		return nil, err
-	}
-	data := buf
-	if base > 0 {
-		// The window starts somewhere in a line: the first line is not whole.
-		nl := bytes.IndexByte(data, '\n')
-		if nl < 0 {
-			return nil, fmt.Errorf("%w: no line break in the last %d bytes", ErrCorrupt, len(data))
-		}
-		data = data[nl+1:]
-		base += int64(nl + 1)
 	}
 
 	// Walk the lines of the window. regionAt is where the bytes after the
@@ -250,7 +239,7 @@ func (w *Writer) resume() (*torn, error) {
 			badAt = -1
 			lastStart = pos
 			completed = end == len(data)
-			regionAt = min(end+1, len(data))
+			regionAt = end + 1
 		case lerr.reason != ReasonMalformed:
 			badAt = pos
 		}
@@ -258,9 +247,6 @@ func (w *Writer) resume() (*torn, error) {
 	}
 	if badAt >= 0 {
 		return nil, fmt.Errorf("%w: the line at offset %d has a wrong hash and follows the last intact record", ErrCorrupt, base+int64(badAt))
-	}
-	if !haveIntact && base > 0 {
-		return nil, fmt.Errorf("%w: no intact record in the last %d bytes", ErrCorrupt, w.size-base)
 	}
 	if haveIntact {
 		w.seq, w.prev = last.Seq, last.Hash
