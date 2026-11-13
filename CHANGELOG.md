@@ -44,6 +44,16 @@ report.
   (closed incidents go first), so a flood of low-severity incidents cannot
   blind the daemon. A file that is corrupt or of another version is reported
   and left as it is.
+- A request spool for the watch daemon: acknowledging or closing an incident
+  is asked for by dropping a small file into `requests/` in the state
+  directory, which the daemon reads with owner, mode, size and schema checks
+  (a file that fails one is reported with its reason instead of being
+  applied) and consumes. At most 100 request files are looked at per pass,
+  other entries of the directory are reported apart (at most 20, never
+  opened) so they cannot hold requests back, and at most 10000 directory
+  entries are examined per pass, with a flag when there are more (while it is
+  set, order is kept among the examined entries only). Leftover temporary files
+  are swept by age, and those dated ahead of the clock are swept at once.
 
 ### Security
 
