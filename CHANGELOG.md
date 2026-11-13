@@ -8,6 +8,10 @@ report.
 
 ## [Unreleased]
 
+### Added
+
+- A posture source for the daemon: it compares each new timer run in the state file with the one it saw before and turns alert-worthy changes into signals that do not notify on their own, so `check --notify` stays the only notification path for posture.
+
 ### Security
 
 - Probes no longer cut, escape or replace characters of command output and
