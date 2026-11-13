@@ -86,6 +86,34 @@ report.
   a leftover process keeps writing is cut after a grace period or a pipe's
   worth of bytes, and a stream cut short is reported as incomplete instead of
   silently losing lines.
+- A login rule for the daemon: successful sshd logins (every `Accepted
+  <method> ... ssh2` line, whichever method sshd printed, with the same sender
+  trust gate as the brute force rule) are learned for a configurable learning
+  period as info findings that do not notify; after it a login from a source
+  address or key the rule does not know raises one high notifying signal and
+  is then added, so it alerts once. A certificate publickey line is read to
+  the user key's fingerprint (the ID, serial and CA parts are ignored), and a
+  line whose key part does not parse (an MD5 fingerprint, for instance) is
+  checked by source address only. A line that admits more than one split into
+  user, address and port (a free-text certificate ID can carry a ` from
+  <addr> port <n> ssh2` fragment of its own) raises one high notifying signal
+  saying it was ambiguous and learns nothing, so no trusted Accepted line is
+  ever dropped on the split. Keys from `authorized_keys.expected` are
+  given to the rule as an input and count as known from the start without
+  entering the baseline; once the learning period has elapsed the baseline
+  records that, and a clock step back does not reopen the phase. The baseline
+  has a versioned, capped JSON form so the learning can live in the state
+  directory: at most 256 users and 128 source addresses and keys per user, a
+  user name of at most 64 bytes of valid UTF-8 without control bytes, a
+  source address that is an IP address in canonical form (what the rule
+  writes: a non-address, a control byte or a spelling such as
+  `::ffff:1.2.3.4` is refused) of at most 64 bytes whose IPv6 zone is
+  `A-Za-z0-9._-` only, and a key fingerprint that normalizes to 1 to 64 bytes
+  of the base64 alphabet (a leading `SHA256:` prefix, however many times it
+  is repeated, and base64 padding are equal spellings of one key); the
+  loader's size bound is derived from those caps and lengths, and a document
+  carrying a field that fails a check is refused. Its fingerprint comparison
+  treats the config and log spellings of a `SHA256:` fingerprint as equal.
 
 ### Security
 
