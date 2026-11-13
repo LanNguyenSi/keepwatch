@@ -3,7 +3,7 @@ type: invariant
 title: doctor judges the unit systemd runs, not the file install wrote
 description: The file-equals-rendering comparison plus four properties asked of systemd per service, and the classification rule that tells a hostile drop-in from a host-wide one.
 tags: [doctor, systemd, units, invariants]
-timestamp: 2026-11-13T13:05:06Z
+timestamp: 2026-11-13T20:55:21Z
 sources:
   - internal/doctor/doctor.go
   - internal/install/units.go

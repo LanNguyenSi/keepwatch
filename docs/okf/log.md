@@ -4,6 +4,10 @@
 
 ## 2026-11-13
 
+- Re-stamped `invariant-doctor-effective-unit.md`, `invariant-placement.md` and
+  `limit-known-limits.md` after the v0.2.0 release commit: `docs/install.md`
+  changed only in the version of the install example; every cited line
+  (137, 139, 371) is unchanged and still says what the docs claim.
 - Re-verified `module-execx.md` and `limit-known-limits.md` after the line
   reader buffer size in `stream.go` became a named constant; no cited line
   moved and no claim changed.
