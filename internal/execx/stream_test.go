@@ -1075,6 +1075,90 @@ func TestStreamNearlyFullPipeBacklogIsDelivered(t *testing.T) {
 	}
 }
 
+// pipeCapacity returns the capacity of a fresh pipe, where the system can
+// say (F_GETPIPE_SZ on linux).
+func pipeCapacity() (int, bool) {
+	if runtime.GOOS != "linux" {
+		return 0, false
+	}
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		return 0, false
+	}
+	defer syscall.Close(fds[0])
+	defer syscall.Close(fds[1])
+	const fGetPipeSz = 1032
+	n, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fds[1]), fGetPipeSz, 0)
+	if errno != 0 {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// A program that leaves an exactly full pipe behind when it exits delivers
+// all of it: the bytes read after the exit equal the bound and do not pass
+// it. The first callback stalls, so the program has written everything and
+// exited before the loop looks at the pipe again; the line reader holds one
+// buffer of the data and the pipe the rest.
+func TestStreamExactlyFullPipeBacklogIsDelivered(t *testing.T) {
+	capacity, ok := pipeCapacity()
+	if !ok {
+		t.Skip("the capacity of a pipe cannot be read on " + runtime.GOOS + ", so it cannot be filled exactly")
+	}
+	t.Logf("pipe capacity %d bytes, post-exit bound %d bytes", capacity, postExitMaxBytes)
+	if int64(capacity) != postExitMaxBytes {
+		t.Skipf("the pipe holds %d bytes, not the bound of %d", capacity, postExitMaxBytes)
+	}
+	// What the line reader took from the pipe before the exit: one buffer.
+	const readerBuffer = 4096
+	n := capacity + readerBuffer
+	script := "echo first; sleep 0.1; head -c " + strconv.Itoa(n) + " /dev/zero | tr '\\0' '\\n'"
+	r := realRunner(t, "sh", "sleep", "head", "tr")
+	for i := 0; i < 5; i++ {
+		got := 0
+		res, err := callStream(t, r, bg, []string{"sh", "-c", script}, StreamOpts{}, func([]byte) error {
+			got++
+			if got == 1 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			return nil
+		})
+		if err != nil || res.IOIncomplete || res.ExitCode != 0 || got != n+1 {
+			t.Fatalf("run %d: delivered %d/%d lines err=%v res=%+v", i, got, n+1, err, res)
+		}
+	}
+}
+
+// pipeReader counts a read only when the exit was seen before the read began:
+// a read that sets the flag and returns bytes is not counted, the next one is.
+func TestPipeReaderCountsByTheFlagAtTheStartOfTheRead(t *testing.T) {
+	lr := &lineReader{}
+	const n = 100
+	fake := readerFunc(func(b []byte) (int, error) {
+		lr.exitSeen.Store(true)
+		return n, nil
+	})
+	p := pipeReader{r: fake, lr: lr}
+	buf := make([]byte, 4096)
+	if got, err := p.Read(buf); got != n || err != nil {
+		t.Fatalf("Read = %d, %v", got, err)
+	}
+	if c := lr.postExit.Load(); c != 0 {
+		t.Fatalf("a read that began before the exit counted %d bytes", c)
+	}
+	if got, err := p.Read(buf); got != n || err != nil {
+		t.Fatalf("second Read = %d, %v", got, err)
+	}
+	if c := lr.postExit.Load(); c != n {
+		t.Fatalf("a read that began after the exit counted %d bytes, want %d", c, n)
+	}
+}
+
+// readerFunc is an io.Reader made of a function.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(b []byte) (int, error) { return f(b) }
+
 // The post-exit bound is a byte volume: a leftover that floods stdout with
 // short lines behind a slow onLine is cut once that many bytes were read,
 // and onLine has been called for the lines in them. The grace period is far
