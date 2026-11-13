@@ -964,9 +964,9 @@ func setGrace(t *testing.T, d time.Duration) {
 }
 
 // defaultPipeBound is the documented value of postExitMaxBytes, written out so
-// that the tests below pin it: the default pipe capacity plus one read.
+// that the tests below pin it: the default capacity of a pipe.
 func defaultPipeBound() int {
-	return 16*os.Getpagesize() + 4096
+	return 16 * os.Getpagesize()
 }
 
 // A dropped line far longer than the post-exit bound, read while the program
@@ -1093,11 +1093,12 @@ func TestStreamFloodOfShortLinesAfterExitEndsAtTheByteBound(t *testing.T) {
 		t.Fatalf("err=%v res=%+v after %d lines", err, res, n)
 	}
 	// The reader runs ahead of the delivered lines by at most its buffer and
-	// one line, in both directions: what it held when the exit was seen is
-	// delivered on top of the bound, and what it holds when the bound is
-	// passed is not delivered. A few lines may come before the exit is seen.
+	// one line, in both directions: what it held when the exit was seen (and
+	// one read that was under way) is delivered on top of the bound, and
+	// what it holds when the bound is passed is not delivered. A few lines
+	// may come before the exit is seen.
 	const readAhead = 4096 + 2*width
-	lo, hi := (bound-readAhead)/width, (bound+readAhead)/width+64
+	lo, hi := (bound-readAhead)/width, (bound+2*readAhead)/width+64
 	if n < lo || n > hi {
 		t.Fatalf("%d lines of %d bytes delivered, want %d to %d for a bound of %d bytes", n, width, lo, hi, bound)
 	}

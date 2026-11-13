@@ -98,7 +98,7 @@ adjacent ones stop short.
   (`internal/execx/real.go:162-163#"Go has no fexecve"`).
 - **The process-group kill does not reach a new session.** `Run` and `Stream`
   SIGKILL the child's process group when they return
-  (`internal/execx/stream.go:184#"cleanup := func() {"`), which covers
+  (`internal/execx/stream.go:179#"cleanup := func() {"`), which covers
   everything the child left in that group. A grandchild that starts a new
   session (`setsid`) and ignores SIGPIPE is outside the group, survives the
   call and keeps holding stdout and stderr. A silent holder makes both return
@@ -107,9 +107,8 @@ adjacent ones stop short.
   byte bound (a volume, not a time: behind a slow callback a flood of short
   lines lasts for as many calls as the bound has lines, unless the caller set
   a `Timeout`), and `Run` stops at its grace period whatever the holder
-  writes. The
-  process itself keeps running until it ends on its own. Pinned for `Stream` by
-  `TestStreamEscapeeHoldingPipesIsBounded` and
+  writes. The process itself keeps running until it ends on its own. Pinned
+  for `Stream` by `TestStreamEscapeeHoldingPipesIsBounded` and
   `TestStreamChattyEscapeeAfterExitIsBounded`.
 - **A fork can outlive the group kill on non-linux hosts.** The group is
   signalled once, with no second signal afterwards, so a child that forks at
@@ -118,11 +117,11 @@ adjacent ones stop short.
   linux; development hosts on darwin can see an orphan after a cancelled
   stream.
 - **A stream's backlog bound assumes a pipe of the default size.** After a
-  streamed program exited, `Stream` reads at most 16 pages plus one read from
-  its stdout (`internal/execx/stream.go:33#"var postExitMaxBytes"`), which is
-  what such a pipe can still hold. A program that enlarged its own stdout
-  pipe and exits with more than that unread loses the rest; the stream is
-  then flagged `IOIncomplete`, never silently short.
+  streamed program exited, `Stream` reads at most 16 pages from its stdout
+  (`internal/execx/stream.go:28#"var postExitMaxBytes"`), which is what such
+  a pipe can still hold. A program that enlarged its own stdout pipe and
+  exits with more than that unread loses the rest; the stream is then
+  flagged `IOIncomplete`, never silently short.
 - **Drop-ins are counted, not read.** `doctor` judges a drop-in's existence
   and location, never its content, and says so in the finding
   (`docs/install.md:371#"judged by its existence"`,

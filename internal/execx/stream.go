@@ -14,23 +14,18 @@ import (
 
 var _ Streamer = (*Real)(nil)
 
-// lineReaderBuf is the size of the stdout reader's buffer, which is also the
-// most a single read takes from the pipe.
-const lineReaderBuf = 4096
-
 // postExitMaxBytes bounds how many bytes Stream reads from the stdout pipe
-// after it saw the program exit. Only bytes read from then on count, whatever
-// lines they belong to. What the program wrote and Stream had not read yet
-// was inside the pipe when the program exited, so it is at most the pipe's
-// capacity: 16 pages on linux (64 KiB with 4 KiB pages), and at most 64 KiB on
-// darwin, which 16 pages cover as well. One reader buffer is added for a read
-// that returned just before the exit was seen and is counted just after. A
-// stream that reads more than this after the exit is fed by a leftover
-// process, not by the program, and is ended with IOIncomplete. Two limits:
-// a program that enlarged its own stdout pipe can leave more than this
-// behind, and the rest is then cut as if a leftover had written it; and the
-// bound is a volume, not a time, see Stream.
-var postExitMaxBytes = int64(16*os.Getpagesize() + lineReaderBuf)
+// after it saw the program exit. Only reads that begin after that moment
+// count (see pipeReader), whatever lines their bytes belong to. What the
+// program wrote and Stream had not read yet was inside the pipe when the
+// program exited, so it is at most the pipe's capacity: 16 pages on linux
+// (64 KiB with 4 KiB pages), and at most 64 KiB on darwin, which 16 pages
+// cover as well. A stream that reads more than this after the exit is fed by
+// a leftover process, not by the program, and is ended with IOIncomplete. Two
+// limits: a program that enlarged its own stdout pipe can leave more than
+// this behind, and the rest is then cut as if a leftover had written it; and
+// the bound is a volume, not a time, see Stream.
+var postExitMaxBytes = int64(16 * os.Getpagesize())
 
 // killProcessGroup is killGroup; a variable so a test can count the calls.
 var killProcessGroup = killGroup
@@ -84,7 +79,7 @@ func (o StreamOpts) withDefaults() StreamOpts {
 // either the wall time since the exit minus the time spent inside onLine
 // since then reaches the grace period Run uses, or more than postExitMaxBytes
 // bytes were read from the pipe since the exit was seen. What the program
-// itself left in a pipe of the default size is below that bound and is
+// itself left in a pipe of the default size is within that bound and is
 // delivered in full even to a slow onLine. The second bound is a byte volume,
 // not a time: a leftover process that floods stdout with short lines is cut
 // after postExitMaxBytes bytes, and a slow onLine is still called once for
@@ -219,13 +214,11 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 		}
 	}()
 
-	// Post-exit bookkeeping: when the exit was seen, the time spent inside
-	// onLine since then, and how many bytes the reader had taken from the
-	// pipe at that moment.
+	// Post-exit bookkeeping: when the exit was seen and the time spent inside
+	// onLine since then. The bytes read since then are counted by the reader.
 	var (
-		exitAt   time.Time
-		cbSince  time.Duration
-		exitRead int64
+		exitAt  time.Time
+		cbSince time.Duration
 	)
 	linesC := rd.lines
 	wc := (<-chan error)(waitC)
@@ -238,13 +231,10 @@ loop:
 				linesC = nil
 				continue
 			}
-			// Bytes the reader took from the pipe before the exit was seen
-			// do not count, also when their line arrives here afterwards.
-			var post int64
-			if exited {
-				post = rd.read.Load() - exitRead
-			}
-			if post > postExitMaxBytes {
+			// The count is zero until the exit was seen and leaves out what
+			// the reader took from the pipe before, also when the line of
+			// those bytes arrives here afterwards.
+			if rd.postExit.Load() > postExitMaxBytes {
 				incomplete = true
 				break loop
 			}
@@ -281,7 +271,7 @@ loop:
 			// and by the bytes read from now on.
 			idleC = nil
 			exitAt = time.Now()
-			exitRead = rd.read.Load()
+			rd.exitSeen.Store(true)
 			grace = time.NewTimer(waitDelay)
 			graceC = grace.C
 		case <-graceC:
@@ -355,20 +345,32 @@ type lineReader struct {
 	// dropped is written by the goroutine and may be read only after done
 	// is closed.
 	dropped int
-	// read counts the bytes taken from the pipe so far. It runs ahead of
-	// the lines sent: by the reader's buffer and by the line being read.
-	read atomic.Int64
+	// exitSeen is set by Stream when it saw the program exit. postExit is
+	// the number of bytes taken from the pipe by reads that began after
+	// that. It runs ahead of the lines sent: by the reader's buffer and by
+	// the line being read.
+	exitSeen atomic.Bool
+	postExit atomic.Int64
 }
 
-// countingReader adds every byte read from r to n.
-type countingReader struct {
-	r io.Reader
-	n *atomic.Int64
+// pipeReader reads the stdout pipe for a lineReader and keeps its post-exit
+// count. Whether a read counts is decided before the read, not after it: a
+// read that was under way when the exit was seen may return bytes the
+// program wrote before it filled the pipe once more, and counting those
+// would let the program's own backlog go past the pipe's capacity. Such a
+// read stays uncounted, which gives a leftover process at most one buffer on
+// top of the bound.
+type pipeReader struct {
+	r  io.Reader
+	lr *lineReader
 }
 
-func (c countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n.Add(int64(n))
+func (p pipeReader) Read(b []byte) (int, error) {
+	counts := p.lr.exitSeen.Load()
+	n, err := p.r.Read(b)
+	if counts {
+		p.lr.postExit.Add(int64(n))
+	}
 	return n, err
 }
 
@@ -380,7 +382,7 @@ func startLineReader(r *os.File, max int, stop <-chan struct{}) *lineReader {
 	go func() {
 		defer close(lr.done)
 		defer close(lr.lines)
-		br := bufio.NewReaderSize(countingReader{r, &lr.read}, lineReaderBuf)
+		br := bufio.NewReaderSize(pipeReader{r, lr}, 4096)
 		var acc []byte
 		over := false
 		for {
