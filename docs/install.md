@@ -9,13 +9,13 @@ carries static `linux/amd64` and `linux/arm64` archives
 (`keepwatch_<version>_linux_<arch>.tar.gz`, containing the binary, `LICENSE`,
 `README.md` and `docs/`), a `checksums.txt` with their SHA-256 sums, and a build-provenance
 attestation for the archives and the checksum file. The example below installs
-version 0.1.0 on `amd64`; the version in the file name has no leading `v`.
+version 0.2.0 on `amd64`; the version in the file name has no leading `v`.
 
 ```sh
-# download keepwatch_0.1.0_linux_amd64.tar.gz and checksums.txt from the release, then:
+# download keepwatch_0.2.0_linux_amd64.tar.gz and checksums.txt from the release, then:
 sha256sum -c checksums.txt --ignore-missing
-gh attestation verify keepwatch_0.1.0_linux_amd64.tar.gz --repo LanNguyenSi/keepwatch
-tar -xzf keepwatch_0.1.0_linux_amd64.tar.gz keepwatch
+gh attestation verify keepwatch_0.2.0_linux_amd64.tar.gz --repo LanNguyenSi/keepwatch
+tar -xzf keepwatch_0.2.0_linux_amd64.tar.gz keepwatch
 sudo install -o root -g root -m 0755 keepwatch /usr/local/bin/keepwatch
 keepwatch version
 ```
