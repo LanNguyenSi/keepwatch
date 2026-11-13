@@ -39,7 +39,7 @@ func reqDir(t *testing.T, state string) string {
 
 func fname(i int) string { return fmt.Sprintf("req-%020d-%032x", i, i) }
 
-const goodBody = `{"schema_version":1,"action":"ack","incident_id":"inc-1","note":"n","requested_at":"2026-01-02T03:04:05Z"}`
+const goodBody = `{"schema_version":1,"action":"ack","incident_id":"ab12cd34","note":"n","requested_at":"2026-01-02T03:04:05Z"}`
 
 // plant writes a request file with an exact mode.
 func plant(t *testing.T, state, name, body string, mode os.FileMode) string {
@@ -105,7 +105,7 @@ func wantReject(t *testing.T, b Batch, name string, r Reason) {
 func TestSubmitPendingRoundTrip(t *testing.T) {
 	state := newState(t)
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	name, err := Submit(state, Request{Action: ActionClose, IncidentID: "inc_7-A", Note: "done", RequestedAt: at})
+	name, err := Submit(state, Request{Action: ActionClose, IncidentID: "abc-7", Note: "done", RequestedAt: at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSubmitPendingRoundTrip(t *testing.T) {
 	if b.More || len(b.Items) != 1 || !b.Items[0].Accepted() {
 		t.Fatalf("got %+v", b)
 	}
-	want := Request{Action: ActionClose, IncidentID: "inc_7-A", Note: "done", RequestedAt: at}
+	want := Request{Action: ActionClose, IncidentID: "abc-7", Note: "done", RequestedAt: at}
 	got := b.Items[0].Request
 	if got.Action != want.Action || got.IncidentID != want.IncidentID || got.Note != want.Note || !got.RequestedAt.Equal(at) {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -149,7 +149,7 @@ func TestSubmitPendingRoundTrip(t *testing.T) {
 func TestSubmitNoteIsRaw(t *testing.T) {
 	state := newState(t)
 	note := "a\x1b[31mred\x1b[0m\nline2\x00nul \u202e bidi"
-	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "x", Note: note}); err != nil {
+	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1", Note: note}); err != nil {
 		t.Fatal(err)
 	}
 	b := pending(t, state)
@@ -162,7 +162,7 @@ func TestSubmitFillsZeroTime(t *testing.T) {
 	state := newState(t)
 	at := time.Date(2030, 5, 6, 7, 8, 9, 0, time.UTC)
 	setNow(t, func() time.Time { return at })
-	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "x"}); err != nil {
+	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1"}); err != nil {
 		t.Fatal(err)
 	}
 	b := pending(t, state)
@@ -171,11 +171,11 @@ func TestSubmitFillsZeroTime(t *testing.T) {
 	}
 	// A given time wins over the clock.
 	given := at.Add(-time.Hour)
-	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "y", RequestedAt: given}); err != nil {
+	if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "b2", RequestedAt: given}); err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range pending(t, state).Items {
-		if it.Request.IncidentID == "y" && !it.Request.RequestedAt.Equal(given) {
+		if it.Request.IncidentID == "b2" && !it.Request.RequestedAt.Equal(given) {
 			t.Fatalf("RequestedAt %v, want the given %v", it.Request.RequestedAt, given)
 		}
 	}
@@ -187,13 +187,13 @@ func TestSubmitRejectsInvalid(t *testing.T) {
 		name string
 		req  Request
 	}{
-		{"action empty", Request{IncidentID: "x"}},
-		{"action unknown", Request{Action: "delete", IncidentID: "x"}},
-		{"action upper", Request{Action: "ACK", IncidentID: "x"}},
+		{"action empty", Request{IncidentID: "a1"}},
+		{"action unknown", Request{Action: "delete", IncidentID: "a1"}},
+		{"action upper", Request{Action: "ACK", IncidentID: "a1"}},
 		{"id empty", Request{Action: ActionAck}},
 		{"id slash", Request{Action: ActionAck, IncidentID: "a/b"}},
 		{"id long", Request{Action: ActionAck, IncidentID: strings.Repeat("a", MaxIncidentIDBytes+1)}},
-		{"note long", Request{Action: ActionAck, IncidentID: "x", Note: strings.Repeat("n", MaxNoteBytes+1)}},
+		{"note long", Request{Action: ActionAck, IncidentID: "a1", Note: strings.Repeat("n", MaxNoteBytes+1)}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -216,8 +216,16 @@ func TestSubmitRejectsInvalid(t *testing.T) {
 }
 
 func TestValidIncidentID(t *testing.T) {
-	good := []string{"a", "z", "A", "Z", "0", "9", "az", "AZ", "09", "-", "_", "inc-1", "inc_1", strings.Repeat("x", MaxIncidentIDBytes)}
-	bad := []string{"", " ", "a b", "a.b", "a/b", "../x", "a\n", "a\x00", "é", "a:b", "@", "[", "`", "{", "/", ":", "~", "a\x7f", strings.Repeat("x", MaxIncidentIDBytes+1)}
+	hex64 := strings.Repeat("0123456789abcdef", 4)
+	good := []string{
+		"a", "f", "0", "9", "ab12cd34", hex64, hex64 + "-2", hex64 + "-12", "a-", "a--b",
+		strings.Repeat("a", MaxIncidentIDBytes), "a" + strings.Repeat("-", MaxIncidentIDBytes-1),
+	}
+	bad := []string{
+		"", "-", "-a", "--", "-" + hex64, "A", "ABCDEF12", "abcdefG", "abCdef", "g", "z", "inc-1", "a_b", "_a",
+		" ", "a b", "a.b", "a/b", "../x", "a\n", "a\x00", "é", "a:b", "@", "[", "`", "{", "/", ":", "~", "a\x7f",
+		strings.Repeat("a", MaxIncidentIDBytes+1), hex64 + "-" + strings.Repeat("1", MaxIncidentIDBytes),
+	}
 	for _, id := range good {
 		if !ValidIncidentID(id) {
 			t.Errorf("%q should be valid", id)
@@ -230,6 +238,24 @@ func TestValidIncidentID(t *testing.T) {
 	}
 }
 
+func TestLimitsArePinned(t *testing.T) {
+	// The documented values, as literals: changing one is a decision, not an
+	// accident.
+	for name, c := range map[string][2]int{
+		"MaxPending":         {MaxPending, 100},
+		"MaxStray":           {MaxStray, 20},
+		"MaxExamined":        {MaxExamined, 10000},
+		"MaxFileSize":        {MaxFileSize, 16384},
+		"MaxNoteBytes":       {MaxNoteBytes, 1024},
+		"MaxIncidentIDBytes": {MaxIncidentIDBytes, 80},
+		"SchemaVersion":      {SchemaVersion, 1},
+	} {
+		if c[0] != c[1] {
+			t.Errorf("%s = %d, documented %d", name, c[0], c[1])
+		}
+	}
+}
+
 func TestActionValid(t *testing.T) {
 	if !ActionAck.Valid() || !ActionClose.Valid() || Action("").Valid() || Action("open").Valid() {
 		t.Fatal("Action.Valid is wrong")
@@ -238,7 +264,7 @@ func TestActionValid(t *testing.T) {
 
 func TestSubmitNeedsExistingStateDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")
-	_, err := Submit(missing, Request{Action: ActionAck, IncidentID: "x"})
+	_, err := Submit(missing, Request{Action: ActionAck, IncidentID: "a1"})
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("got %v, want ErrNotExist", err)
 	}
@@ -249,7 +275,7 @@ func TestSubmitNeedsExistingStateDir(t *testing.T) {
 
 func TestDirectoryTrust(t *testing.T) {
 	submit := func(state string) error {
-		_, err := Submit(state, Request{Action: ActionAck, IncidentID: "x"})
+		_, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1"})
 		return err
 	}
 	pend := func(state string) error { _, err := Pending(state); return err }
@@ -353,10 +379,6 @@ func TestRejections(t *testing.T) {
 		owner  bool // plant as a foreign-owned file
 	}
 	cases := []tc{
-		{name: "name: wrong prefix", file: "request-1", body: goodBody, mode: 0o600, reason: ReasonName},
-		{name: "name: json suffix", file: fname(1) + ".json", body: goodBody, mode: 0o600, reason: ReasonName},
-		{name: "name: dotfile", file: ".hidden", body: goodBody, mode: 0o600, reason: ReasonName},
-		{name: "name: short random part", file: "req-00000000000000000001-ab", body: goodBody, mode: 0o600, reason: ReasonName},
 		{name: "owner foreign", file: fname(1), body: goodBody, mode: 0o600, reason: ReasonOwner, owner: true},
 		{name: "mode 0644", file: fname(1), body: goodBody, mode: 0o644, reason: ReasonMode},
 		{name: "mode 0640", file: fname(1), body: goodBody, mode: 0o640, reason: ReasonMode},
@@ -372,20 +394,20 @@ func TestRejections(t *testing.T) {
 		{name: "malformed: not json", file: fname(1), body: "ack inc-1", mode: 0o600, reason: ReasonMalformed},
 		{name: "malformed: array", file: fname(1), body: "[]", mode: 0o600, reason: ReasonMalformed},
 		{name: "malformed: truncated", file: fname(1), body: goodBody[:40], mode: 0o600, reason: ReasonMalformed},
-		{name: "malformed: unknown field", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"x","extra":1}`, mode: 0o600, reason: ReasonMalformed},
-		{name: "malformed: wrong type", file: fname(1), body: `{"schema_version":1,"action":1,"incident_id":"x"}`, mode: 0o600, reason: ReasonMalformed},
-		{name: "malformed: bad time", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"x","requested_at":"yesterday"}`, mode: 0o600, reason: ReasonMalformed},
+		{name: "malformed: unknown field", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"a1","extra":1}`, mode: 0o600, reason: ReasonMalformed},
+		{name: "malformed: wrong type", file: fname(1), body: `{"schema_version":1,"action":1,"incident_id":"a1"}`, mode: 0o600, reason: ReasonMalformed},
+		{name: "malformed: bad time", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"a1","requested_at":"yesterday"}`, mode: 0o600, reason: ReasonMalformed},
 		{name: "malformed: trailing object", file: fname(1), body: goodBody + `{"schema_version":1}`, mode: 0o600, reason: ReasonMalformed},
 		{name: "malformed: trailing garbage", file: fname(1), body: goodBody + "x", mode: 0o600, reason: ReasonMalformed},
-		{name: "malformed: note too long", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"x","note":"` + strings.Repeat("n", MaxNoteBytes+1) + `"}`, mode: 0o600, reason: ReasonMalformed},
-		{name: "schema: missing", file: fname(1), body: `{"action":"ack","incident_id":"x"}`, mode: 0o600, reason: ReasonSchema},
-		{name: "schema: zero", file: fname(1), body: `{"schema_version":0,"action":"ack","incident_id":"x"}`, mode: 0o600, reason: ReasonSchema},
-		{name: "schema: future with unknown fields", file: fname(1), body: `{"schema_version":2,"action":"ack","incident_id":"x","extra":true}`, mode: 0o600, reason: ReasonSchema},
-		{name: "schema: string", file: fname(1), body: `{"schema_version":"1","action":"ack","incident_id":"x"}`, mode: 0o600, reason: ReasonMalformed},
-		{name: "action: unknown", file: fname(1), body: `{"schema_version":1,"action":"reopen","incident_id":"x"}`, mode: 0o600, reason: ReasonAction},
-		{name: "action: empty", file: fname(1), body: `{"schema_version":1,"action":"","incident_id":"x"}`, mode: 0o600, reason: ReasonAction},
-		{name: "action: missing", file: fname(1), body: `{"schema_version":1,"incident_id":"x"}`, mode: 0o600, reason: ReasonAction},
-		{name: "action: case", file: fname(1), body: `{"schema_version":1,"action":"Ack","incident_id":"x"}`, mode: 0o600, reason: ReasonAction},
+		{name: "malformed: note too long", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"a1","note":"` + strings.Repeat("n", MaxNoteBytes+1) + `"}`, mode: 0o600, reason: ReasonMalformed},
+		{name: "schema: missing", file: fname(1), body: `{"action":"ack","incident_id":"a1"}`, mode: 0o600, reason: ReasonSchema},
+		{name: "schema: zero", file: fname(1), body: `{"schema_version":0,"action":"ack","incident_id":"a1"}`, mode: 0o600, reason: ReasonSchema},
+		{name: "schema: future with unknown fields", file: fname(1), body: `{"schema_version":2,"action":"ack","incident_id":"a1","extra":true}`, mode: 0o600, reason: ReasonSchema},
+		{name: "schema: string", file: fname(1), body: `{"schema_version":"1","action":"ack","incident_id":"a1"}`, mode: 0o600, reason: ReasonMalformed},
+		{name: "action: unknown", file: fname(1), body: `{"schema_version":1,"action":"reopen","incident_id":"a1"}`, mode: 0o600, reason: ReasonAction},
+		{name: "action: empty", file: fname(1), body: `{"schema_version":1,"action":"","incident_id":"a1"}`, mode: 0o600, reason: ReasonAction},
+		{name: "action: missing", file: fname(1), body: `{"schema_version":1,"incident_id":"a1"}`, mode: 0o600, reason: ReasonAction},
+		{name: "action: case", file: fname(1), body: `{"schema_version":1,"action":"Ack","incident_id":"a1"}`, mode: 0o600, reason: ReasonAction},
 		{name: "incident id: missing", file: fname(1), body: `{"schema_version":1,"action":"ack"}`, mode: 0o600, reason: ReasonIncidentID},
 		{name: "incident id: empty", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":""}`, mode: 0o600, reason: ReasonIncidentID},
 		{name: "incident id: path", file: fname(1), body: `{"schema_version":1,"action":"ack","incident_id":"../../etc/passwd"}`, mode: 0o600, reason: ReasonIncidentID},
@@ -583,7 +605,7 @@ func TestNameOrder(t *testing.T) {
 	setNow(t, func() time.Time { tick = tick.Add(time.Second); return tick })
 	var want []string
 	for i := 0; i < 20; i++ {
-		n, err := Submit(state, Request{Action: ActionAck, IncidentID: fmt.Sprintf("i%d", i)})
+		n, err := Submit(state, Request{Action: ActionAck, IncidentID: fmt.Sprintf("a%d", i)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -604,7 +626,7 @@ func TestNameOrder(t *testing.T) {
 func TestNegativeClockDoesNotBreakName(t *testing.T) {
 	state := newState(t)
 	setNow(t, func() time.Time { return time.Unix(-5, 0) })
-	n, err := Submit(state, Request{Action: ActionAck, IncidentID: "x", RequestedAt: time.Unix(1, 0)})
+	n, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1", RequestedAt: time.Unix(1, 0)})
 	if err != nil || !nameRE.MatchString(n) {
 		t.Fatalf("name %q, err %v", n, err)
 	}
@@ -627,7 +649,7 @@ func TestConcurrentSubmit(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				n, err := Submit(state, Request{Action: ActionAck, IncidentID: fmt.Sprintf("w%d-%d", w, i)})
+				n, err := Submit(state, Request{Action: ActionAck, IncidentID: fmt.Sprintf("a%d-%d", w, i)})
 				mu.Lock()
 				if err != nil {
 					errs = append(errs, err)
@@ -672,7 +694,7 @@ func TestSubmitWhilePending(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < 50; i++ {
-			if _, err := Submit(state, Request{Action: ActionClose, IncidentID: fmt.Sprintf("i%d", i), Note: strings.Repeat("n", 500)}); err != nil {
+			if _, err := Submit(state, Request{Action: ActionClose, IncidentID: fmt.Sprintf("a%d", i), Note: strings.Repeat("n", 500)}); err != nil {
 				t.Error(err)
 				return
 			}
@@ -799,7 +821,7 @@ func TestRemoveRejectsBadNames(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", ".", "..", "../incidents.json", "a/b", `a\b`, "a\x00b", securefile.TempPrefix + "x"} {
+	for _, name := range []string{"", ".", "..", "/", "../incidents.json", "a/b", "/a", "a/", "a\x00b", securefile.TempPrefix + "x", securefile.TempPrefix} {
 		if err := Remove(state, name); !errors.Is(err, securefile.ErrInvalidName) {
 			t.Errorf("Remove(%q) = %v, want ErrInvalidName", name, err)
 		}
@@ -814,17 +836,38 @@ func TestRemoveRejectsBadNames(t *testing.T) {
 
 func TestRemoveRejectedFilesOfEveryKind(t *testing.T) {
 	// A rejected entry of any kind can be removed, so the daemon is not stuck
-	// with it: a bad name, a symlink, and a directory.
+	// with it: a bad name, a backslash name, a symlink, a directory, and a
+	// directory with content (with a link to a file outside inside it).
 	state := newState(t)
 	rd := reqDir(t, state)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	plant(t, state, ".hidden", "x", 0o600)
+	plant(t, state, `a\b`, "x", 0o600)
+	plant(t, state, `\`, "x", 0o600)
 	if err := os.Symlink("/nonexistent", filepath.Join(rd, fname(1))); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(rd, fname(2)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, it := range pending(t, state).Items {
+	full := filepath.Join(rd, "a000")
+	if err := os.MkdirAll(filepath.Join(full, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "sub", "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(full, "link")); err != nil {
+		t.Fatal(err)
+	}
+	b := pending(t, state)
+	if len(b.Items) != 2 || len(b.Stray) != 4 {
+		t.Fatalf("got %d items and %d stray, want 2 and 4: %+v", len(b.Items), len(b.Stray), b)
+	}
+	for _, it := range append(append([]Item{}, b.Stray...), b.Items...) {
 		if it.Accepted() {
 			t.Fatalf("accepted: %+v", it)
 		}
@@ -832,8 +875,35 @@ func TestRemoveRejectedFilesOfEveryKind(t *testing.T) {
 			t.Fatalf("Remove(%q): %v", it.Name, err)
 		}
 	}
-	if b := pending(t, state); len(b.Items) != 0 {
-		t.Fatalf("still pending: %+v", b.Items)
+	if b := pending(t, state); len(b.Items) != 0 || len(b.Stray) != 0 {
+		t.Fatalf("still pending: %+v", b)
+	}
+	if ents, _ := os.ReadDir(rd); len(ents) != 0 {
+		t.Fatalf("directory not empty: %v", ents)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "keep" {
+		t.Fatalf("a link inside a removed directory was followed: %q %v", got, err)
+	}
+}
+
+func TestRemoveBackslashName(t *testing.T) {
+	// A backslash is an ordinary byte of a file name here: Remove must delete
+	// such an entry and nothing else.
+	state := newState(t)
+	plant(t, state, `a\b`, "x", 0o600)
+	plant(t, state, "ab", "x", 0o600)
+	b := pending(t, state)
+	if len(b.Stray) != 2 {
+		t.Fatalf("got %+v", b)
+	}
+	if err := Remove(state, `a\b`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(state, DirName, `a\b`)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("entry still there: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(state, DirName, "ab")); err != nil {
+		t.Fatalf("other entry gone: %v", err)
 	}
 }
 
@@ -841,7 +911,7 @@ func TestRequestsDirSwappedWhileOpening(t *testing.T) {
 	// The directory is replaced by another one after it passed the trust
 	// check: the second look notices and nothing is read or written.
 	for name, op := range map[string]func(string) error{
-		"Submit":  func(s string) error { _, err := Submit(s, Request{Action: ActionAck, IncidentID: "x"}); return err },
+		"Submit":  func(s string) error { _, err := Submit(s, Request{Action: ActionAck, IncidentID: "a1"}); return err },
 		"Pending": func(s string) error { _, err := Pending(s); return err },
 		"Remove":  func(s string) error { return Remove(s, fname(1)) },
 	} {
@@ -935,7 +1005,7 @@ func TestNamesDifferWithFrozenClock(t *testing.T) {
 	setNow(t, func() time.Time { return at })
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
-		n, err := Submit(state, Request{Action: ActionAck, IncidentID: "x", RequestedAt: at})
+		n, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1", RequestedAt: at})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -955,7 +1025,7 @@ func TestNamesDifferWithFrozenClock(t *testing.T) {
 func TestSubmitTwiceReusesRequestsDir(t *testing.T) {
 	state := newState(t)
 	for i := 0; i < 2; i++ {
-		if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "x"}); err != nil {
+		if _, err := Submit(state, Request{Action: ActionAck, IncidentID: "a1"}); err != nil {
 			t.Fatalf("Submit %d: %v", i, err)
 		}
 	}
