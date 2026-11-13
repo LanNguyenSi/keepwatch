@@ -29,6 +29,9 @@ const (
 	CheckTimer    = "keepwatch-check.timer"
 	ReportService = "keepwatch-report.service"
 	ReportTimer   = "keepwatch-report.timer"
+	// WatchService is rendered by RenderWatch. It is not one of UnitNames: no
+	// command installs it yet.
+	WatchService = "keepwatch-watch.service"
 )
 
 // UnitNames lists the unit files keepwatch owns, services first.
@@ -354,17 +357,29 @@ type File struct {
 	Content []byte
 }
 
-// Hardening of both services. The reason for every option is in docs/install.md.
+// Hardening of the units. The reason for every option is in docs/install.md.
+// The check and report services (serviceHardening) and the watch service
+// (watchHardening) share the sandbox, and each has its own exit and resource
+// lines, because a oneshot run that ends and a service that stays up are not
+// sized or judged the same way.
 const (
 	memoryMax        = "1536M"
 	goMemLimit       = "384MiB"
 	cpuQuota         = "50%"
 	timeoutStartSec  = "10min"
 	addressFamilies  = "AF_UNIX AF_INET AF_INET6 AF_NETLINK"
-	serviceHardening = `# 0 and 1 are normal: 1 means the host has findings, and the notification (not
+	watchMemoryMax   = "256M"
+	watchGoMemLimit  = "64MiB"
+	watchCPUQuota    = "25%"
+	watchRestartSec  = "10s"
+	exitStatusOfRuns = `# 0 and 1 are normal: 1 means the host has findings, and the notification (not
 # a failed unit) tells the operator. 3 (internal error) and 4 (delivery) fail.
 SuccessExitStatus=1
-UMask=0077
+`
+	// sandboxHardening is what every unit of keepwatch shares. It starts at
+	// UMask so that the lines of the check and report services stay in the order
+	// of their unit files.
+	sandboxHardening = `UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={{state}}
@@ -387,7 +402,9 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 # AF_UNIX: docker.sock, fail2ban.sock, the journal. AF_NETLINK: ss, nft.
 RestrictAddressFamilies=` + addressFamilies + `
-# Sized by the most memory the listeners check can use (two 64 MiB buffers of
+`
+	// checkResources: the limits of a check or report run.
+	checkResources = `# Sized by the most memory the listeners check can use (two 64 MiB buffers of
 # "ss" output and their copies), measured as the peak of the unit's cgroup under
 # the GOMEMLIMIT below, with at least 1.5 times headroom. GOMEMLIMIT is not
 # needed to stay under MemoryMax, but it lowers the usual worst case
@@ -398,6 +415,34 @@ Environment=GOMEMLIMIT=` + goMemLimit + `
 CPUQuota=` + cpuQuota + `
 TimeoutStartSec=` + timeoutStartSec + `
 `
+	// serviceHardening is the [Service] text after ExecStart of the check and
+	// the report service.
+	serviceHardening = exitStatusOfRuns + sandboxHardening + checkResources
+
+	// watchProcess: how the watch service is started again and what it may do.
+	watchProcess = `# A crash starts it again after a pause; a clean exit or "systemctl stop" ends
+# it. There is no SuccessExitStatus: any exit status but 0 is a failure.
+Restart=on-failure
+RestartSec=` + watchRestartSec + `
+# The watcher runs as root but needs no capability: it reads what the file
+# modes give the owner and changes nothing outside state_dir. Empty drops all.
+CapabilityBoundingSet=
+`
+	// watchResources: the limits of a service that stays up. The target is less
+	// than 100 MiB resident while idle. GOMEMLIMIT is a soft limit for the Go
+	// heap, set below that target so that the collector works before MemoryMax
+	// does; MemoryMax is the hard backstop (the kernel kills the service, and
+	// Restart starts it again) with room for a burst. CPUQuota caps a runaway
+	// loop and leaves ample time for a service that is idle nearly always. The
+	// numbers are ceilings chosen for that target and not yet measured on a
+	// host; measure before narrowing them. There is no TimeoutStartSec of the
+	// oneshot kind: a Type=simple service is started as soon as it is forked.
+	watchResources = `MemoryMax=` + watchMemoryMax + `
+Environment=GOMEMLIMIT=` + watchGoMemLimit + `
+CPUQuota=` + watchCPUQuota + `
+`
+	// watchHardening is the [Service] text after ExecStart of the watch service.
+	watchHardening = watchProcess + sandboxHardening + watchResources
 )
 
 // checkArgs and reportArgs are what the services run after the binary;
@@ -405,9 +450,19 @@ TimeoutStartSec=` + timeoutStartSec + `
 var (
 	checkArgs  = []string{"check"}
 	reportArgs = []string{"report", "--weekly"}
+	watchArgs  = []string{"watch"}
 )
 
 const notifyFlag = "--notify"
+
+// execLine is the ExecStart value: the binary, the arguments, --notify when the
+// spec notifies, and the configuration file.
+func (s Spec) execLine(args []string) string {
+	if s.Notify {
+		args = append(append([]string(nil), args...), notifyFlag)
+	}
+	return s.Binary + " " + strings.Join(args, " ") + " --config " + s.ConfigPath
+}
 
 // Render returns the four unit files for spec, in write order. It fails if
 // the spec does not validate.
@@ -416,12 +471,7 @@ func Render(s Spec) ([]File, error) {
 		return nil, err
 	}
 	hard := strings.ReplaceAll(serviceHardening, "{{state}}", s.StateDir)
-	exec := func(args []string) string {
-		if s.Notify {
-			args = append(append([]string(nil), args...), notifyFlag)
-		}
-		return s.Binary + " " + strings.Join(args, " ") + " --config " + s.ConfigPath
-	}
+	exec := s.execLine
 	service := func(desc string, args []string) string {
 		return markerLine + `
 [Unit]
@@ -455,6 +505,30 @@ WantedBy=timers.target
 		{ReportTimer, []byte(timer("keepwatch weekly report", ReportService,
 			"OnCalendar="+s.Weekly.OnCalendar()+"\nPersistent=true"))},
 	}, nil
+}
+
+// RenderWatch returns the unit file of the watch service: a long-running
+// service as root, with an empty capability bounding set, that systemd starts
+// again after a crash. It fails if the spec does not validate. Render does not
+// include it and nothing installs it yet.
+func RenderWatch(s Spec) (File, error) {
+	if err := s.Validate(); err != nil {
+		return File{}, err
+	}
+	hard := strings.ReplaceAll(watchHardening, "{{state}}", s.StateDir)
+	return File{WatchService, []byte(markerLine + `
+[Unit]
+Description=keepwatch watcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=` + s.execLine(watchArgs) + `
+` + hard + `
+[Install]
+WantedBy=multi-user.target
+`)}, nil
 }
 
 // Installed describes what an installed service file says; doctor compares it

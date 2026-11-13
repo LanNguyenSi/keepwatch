@@ -55,6 +55,101 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
+func TestRenderWatchGolden(t *testing.T) {
+	for name, spec := range map[string]Spec{"default": defaultSpec(), "custom": customSpec()} {
+		f, err := RenderWatch(spec)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if f.Name != WatchService {
+			t.Errorf("%s: name %q, want %q", name, f.Name, WatchService)
+		}
+		golden := filepath.Join("testdata", name, f.Name+".golden")
+		if *update {
+			if err := os.WriteFile(golden, f.Content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("%v (run go test -update ./internal/install)", err)
+		}
+		if string(want) != string(f.Content) {
+			t.Errorf("%s/%s differs from %s:\n--- got ---\n%s--- want ---\n%s", name, f.Name, golden, f.Content, want)
+		}
+	}
+}
+
+// The watch unit is a service that stays up, as root and with no capability:
+// the lines that say so are there, the lines of a oneshot run are not, and the
+// shared sandbox is whole. Notify is the only thing of the spec that changes
+// the ExecStart line besides the paths.
+func TestRenderWatch(t *testing.T) {
+	lines := func(s Spec) map[string]bool {
+		f, err := RenderWatch(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !HasMarker(f.Content) {
+			t.Error("no marker")
+		}
+		out := map[string]bool{}
+		for _, l := range strings.Split(string(f.Content), "\n") {
+			out[l] = true
+		}
+		return out
+	}
+	d := lines(defaultSpec())
+	for _, want := range []string{
+		"Type=simple", "Restart=on-failure", "RestartSec=" + watchRestartSec,
+		"CapabilityBoundingSet=", "NoNewPrivileges=yes", "ReadWritePaths=/var/lib/keepwatch",
+		"MemoryMax=" + watchMemoryMax, "Environment=GOMEMLIMIT=" + watchGoMemLimit, "CPUQuota=" + watchCPUQuota,
+		"WantedBy=multi-user.target", "ExecStart=/usr/local/bin/keepwatch watch --config /etc/keepwatch/keepwatch.yaml",
+	} {
+		if !d[want] {
+			t.Errorf("the watch unit has no line %q", want)
+		}
+	}
+	for _, line := range []string{"Type=oneshot", "SuccessExitStatus=1", "TimeoutStartSec=" + timeoutStartSec, "WantedBy=timers.target", "MemoryMax=" + memoryMax} {
+		if d[line] {
+			t.Errorf("the watch unit has the line %q of the oneshot units", line)
+		}
+	}
+	// The sandbox is the one of the check unit, line for line.
+	for _, l := range strings.Split(strings.ReplaceAll(sandboxHardening, "{{state}}", "/var/lib/keepwatch"), "\n") {
+		if !d[l] {
+			t.Errorf("the watch unit lacks the sandbox line %q", l)
+		}
+	}
+	// The empty capability set is empty: a value after the equals sign would
+	// grant capabilities.
+	f, _ := RenderWatch(defaultSpec())
+	for _, l := range strings.Split(string(f.Content), "\n") {
+		if strings.HasPrefix(l, "CapabilityBoundingSet") && l != "CapabilityBoundingSet=" {
+			t.Errorf("CapabilityBoundingSet is not empty: %q", l)
+		}
+	}
+	// --notify follows the spec and nothing else does.
+	n := defaultSpec()
+	n.Notify = true
+	if !lines(n)["ExecStart=/usr/local/bin/keepwatch watch --notify --config /etc/keepwatch/keepwatch.yaml"] {
+		t.Error("Notify: no --notify in ExecStart")
+	}
+	// The watch unit is not one of the installed units yet, and a spec that
+	// does not validate renders nothing.
+	for _, n := range UnitNames {
+		if n == WatchService {
+			t.Error("the watch unit is in UnitNames")
+		}
+	}
+	bad := defaultSpec()
+	bad.ConfigPath = "relative.yaml"
+	if _, err := RenderWatch(bad); err == nil {
+		t.Error("a relative configuration path was accepted")
+	}
+}
+
 func TestRenderedFilesCarryTheMarkerAndNothingElseDoes(t *testing.T) {
 	files, err := Render(defaultSpec())
 	if err != nil {
@@ -336,6 +431,11 @@ var hardeningClasses = map[string]optionClass{
 	"Environment":             {"", false, "an environment variable"},
 	"CPUQuota":                {"", false, "a resource limit"},
 	"TimeoutStartSec":         {"", false, "a time limit"},
+
+	// The watch service.
+	"Restart":               {"on-failure", false, "when systemd starts the service again, no path"},
+	"RestartSec":            {"", false, "a time limit"},
+	"CapabilityBoundingSet": {"", false, "the capabilities of the service, no path; it hides nothing from root, which reads what the file modes give the owner (an empty value is pinned by TestRenderWatch)"},
 }
 
 // couplingErrors checks the hardening text against the table of hidden paths
@@ -420,8 +520,16 @@ func couplingErrors(hardening string, table []sandboxEntry, classes map[string]o
 // such an entry is held to the same form, and to the measurement of a real
 // sandbox by the test of the measured files.
 func TestSandboxPathsFollowTheHardening(t *testing.T) {
-	for _, e := range couplingErrors(serviceHardening, sandboxPaths, hardeningClasses) {
+	// Both kinds of unit are judged together: the classification is one table,
+	// so an option of the watch unit that nobody classified fails here just as
+	// one of the check unit does, and a class that neither text sets is stale.
+	for _, e := range couplingErrors(serviceHardening+watchHardening, sandboxPaths, hardeningClasses) {
 		t.Error(e)
+	}
+	for name, h := range map[string]string{"check": serviceHardening, "watch": watchHardening} {
+		for _, e := range couplingErrors(h, sandboxPaths, onlyClassesOf(h)) {
+			t.Errorf("%s: %s", name, e)
+		}
 	}
 	with := func(extra ...sandboxEntry) []sandboxEntry {
 		return append(append([]sandboxEntry(nil), sandboxPaths...), extra...)
@@ -436,6 +544,8 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 		return out
 	}
 	all := []Role{RoleBinary, RoleConfig, RoleState}
+	// Every option of both units once: the base of the cases below.
+	serviceHardening := serviceHardening + watchProcess + watchResources
 	broken := []struct {
 		name      string
 		hardening string
@@ -462,6 +572,9 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 		{"a path with a trailing slash", serviceHardening, with(sandboxEntry{"", false, "w", []string{"/x/"}, all}), "has the path /x/, which is not a clean absolute path"},
 		{"a relative path", serviceHardening, with(sandboxEntry{"", false, "w", []string{"x"}, all}), "has the path x, which is not a clean absolute path"},
 		{"a line that is no option", serviceHardening + "PrivateTmp\n", sandboxPaths, "not an option line: PrivateTmp"},
+		{"a new option of the watch unit nobody classified", watchHardening + "ProtectProc=invisible\n", sandboxPaths, "unclassified option ProtectProc=invisible"},
+		{"a classified option of the watch unit with a new value", strings.Replace(watchHardening, "Restart=on-failure", "Restart=always", 1), sandboxPaths, "option Restart=always was classified for the value on-failure"},
+		{"a watch option was removed, its classification stayed", strings.Replace(serviceHardening, "CapabilityBoundingSet=\n", "", 1), sandboxPaths, "hardeningClasses names CapabilityBoundingSet, which the hardening does not set"},
 	}
 	for _, c := range broken {
 		errs := couplingErrors(c.hardening, c.table, hardeningClasses)
@@ -474,21 +587,45 @@ func TestSandboxPathsFollowTheHardening(t *testing.T) {
 		}
 	}
 	// What is rendered is what was classified: every option line of a service
-	// file is a line of serviceHardening (with state_dir filled in), plus the
-	// two lines Render adds itself.
+	// file is a line of its hardening text (with state_dir filled in), plus the
+	// two lines the renderer adds itself, and the [Install] section of the
+	// watch unit is only a WantedBy.
 	files, err := Render(defaultSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, service, _ := strings.Cut(string(files[0].Content), "[Service]\n")
-	for _, line := range strings.Split(service, "\n") {
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Type=") || strings.HasPrefix(line, "ExecStart=") {
-			continue
-		}
-		if !strings.Contains(serviceHardening, "\n"+strings.Replace(line, defaultSpec().StateDir, "{{state}}", 1)+"\n") {
-			t.Errorf("the service has the line %q, which is not in serviceHardening", line)
+	watch, err := RenderWatch(defaultSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		unit      []byte
+		hardening string
+	}{"check": {files[0].Content, serviceHardening}, "report": {files[1].Content, serviceHardening}, "watch": {watch.Content, watchHardening}} {
+		_, service, _ := strings.Cut(string(c.unit), "[Service]\n")
+		service, _, _ = strings.Cut(service, "\n[Install]\n")
+		for _, line := range strings.Split(service, "\n") {
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Type=") || strings.HasPrefix(line, "ExecStart=") {
+				continue
+			}
+			if !strings.Contains(c.hardening, "\n"+strings.Replace(line, defaultSpec().StateDir, "{{state}}", 1)+"\n") {
+				t.Errorf("the %s service has the line %q, which is not in its hardening text", name, line)
+			}
 		}
 	}
+}
+
+// onlyClassesOf is hardeningClasses without the options h does not set, so that
+// one unit can be checked on its own: the test of both units together finds a
+// class that neither sets.
+func onlyClassesOf(h string) map[string]optionClass {
+	out := map[string]optionClass{}
+	for name, c := range hardeningClasses {
+		if strings.Contains("\n"+h, "\n"+name+"=") {
+			out[name] = c
+		}
+	}
+	return out
 }
 
 // Validate is the grammar of the unit lines and nothing else: a path the

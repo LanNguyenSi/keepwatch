@@ -73,15 +73,17 @@ commands print the identical sentence, because both print
 **The table, pinned twice.** `sandboxPaths` maps each forbidden place to the
 unit option that removes it, or to a reason no option owns (kernel file
 systems, tmpfs a reboot empties)
-(`internal/install/units.go:289#"var sandboxPaths"`); within the table the
-most specific path wins (`internal/install/units.go:329-330#"longest path"`).
+(`internal/install/units.go:292#"var sandboxPaths"`); within the table the
+most specific path wins (`internal/install/units.go:332-333#"longest path"`).
 The table is text-matching, so it is only right because the walk refuses any
 symlink in the path first. Two tests hold it honest from opposite sides:
 `TestSandboxPathsFollowTheHardening` binds every entry to a line of
-`serviceHardening` in both directions (an option that hides paths needs an
+`serviceHardening` (the check and report services) or `watchHardening` (the
+watch service, which shares the sandbox lines and is not installed yet) in
+both directions (an option that hides paths needs an
 entry, an entry needs an option that is actually set)
-(`internal/install/units_test.go:422#"func TestSandboxPathsFollowTheHardening"`,
-`internal/install/units.go:364#"serviceHardening = "`), and
+(`internal/install/units_test.go:522#"func TestSandboxPathsFollowTheHardening"`,
+`internal/install/units.go:420#"serviceHardening = "`), and
 `TestSandboxPathsFollowTheMeasuredSandbox` binds it to what a real sandbox
 was measured to hide in `test/systemd/`, also both directions
 (`internal/install/measured_test.go:114#"func TestSandboxPathsFollowTheMeasuredSandbox"`).
