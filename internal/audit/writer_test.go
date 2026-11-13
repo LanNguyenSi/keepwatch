@@ -376,6 +376,15 @@ func TestOpenRefusesChangedFile(t *testing.T) {
 			t.Fatalf("believed %d: got %v", believed, err)
 		}
 	}
+	// A file that cannot be examined at all is an error, not a size.
+	gone, err := os.Open(logPath(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone.Close()
+	if _, err := (&Writer{f: gone, size: w.Size(), max: DefaultMaxSize}).resume(); err == nil || errors.Is(err, securefile.ErrChanged) {
+		t.Fatalf("closed file: got %v", err)
+	}
 	// A file that shrank between the check and the read.
 	x := &Writer{f: w.f, size: w.Size(), max: DefaultMaxSize}
 	if err := os.Truncate(logPath(p), w.Size()-3); err != nil {

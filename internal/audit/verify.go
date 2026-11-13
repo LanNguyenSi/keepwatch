@@ -87,9 +87,11 @@ type region struct {
 	line   int
 	offset int64
 	detail string
-	// buf holds the bytes of the region, each line with its newline, until
-	// the region is too long to be accounted for (MaxTornBytes+1 bytes: the
-	// region Open found plus a newline it added); n counts all of them.
+	// buf holds the bytes of the region, each line with its newline; n
+	// counts them. Lines come in at most MaxTornBytes bytes each (see
+	// lineReader), and Verify stops at the first line that makes the region
+	// too long, so buf stays under 2*MaxTornBytes+2 bytes. It holds every
+	// byte of the region as long as the region is not too long.
 	buf []byte
 	n   int64
 }
@@ -97,14 +99,10 @@ type region struct {
 // add appends one line to the region.
 func (g *region) add(l rawLine) {
 	g.n += l.length
+	g.buf = append(g.buf, l.data...)
 	if l.terminated {
 		g.n++
-	}
-	if room := MaxTornBytes + 1 - len(g.buf); room > 0 {
-		g.buf = append(g.buf, l.data[:min(room, len(l.data))]...)
-		if l.terminated {
-			g.buf = append(g.buf, '\n')
-		}
+		g.buf = append(g.buf, '\n')
 	}
 }
 
@@ -170,9 +168,7 @@ func (lr *lineReader) next() (rawLine, error) {
 			chunk = chunk[:len(chunk)-1]
 		}
 		l.length += int64(len(chunk))
-		if room := MaxTornBytes - len(lr.buf); room > 0 {
-			lr.buf = append(lr.buf, chunk[:min(room, len(chunk))]...)
-		}
+		lr.buf = append(lr.buf, chunk[:min(MaxTornBytes-len(lr.buf), len(chunk))]...)
 		if terminated || errors.Is(err, io.EOF) {
 			l.terminated = terminated
 			break

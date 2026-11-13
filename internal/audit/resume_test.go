@@ -366,3 +366,32 @@ func TestRecoveryWriteCutShortByAFailingFile(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 }
+
+// In a log longer than the window, a last record that only lacks its newline
+// is completed and located by its offset in the file, not in the window.
+func TestCompletedRecordInALongLog(t *testing.T) {
+	d, p := newDir(t)
+	seq, last, size := writeChain(t, logPath(p), 60, bigRecord)
+	if size < tailWindow+2*MaxLineBytes {
+		t.Fatalf("test bug: %d bytes", size)
+	}
+	if err := os.Truncate(logPath(p), size-1); err != nil {
+		t.Fatal(err)
+	}
+	w, rec, err := Open(d, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if rec == nil || !rec.Completed || rec.Terminated || rec.Offset >= size || rec.Offset < size-int64(MaxLineBytes+1) ||
+		rec.Offset+rec.Length != size-1 || rec.Seq != seq+1 {
+		t.Fatalf("%+v (size %d)", rec, size)
+	}
+	if w.prev == last {
+		t.Fatal("the recovery record was not chained")
+	}
+	res := mustVerify(t, "completed", readLog(t, p))
+	if res.Count != seq+1 {
+		t.Fatalf("%+v", res)
+	}
+}
