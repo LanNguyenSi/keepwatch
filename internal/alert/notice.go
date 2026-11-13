@@ -14,40 +14,50 @@ const cutMark = "..."
 
 // BuildMessage builds the notification of an incident. It reads only the
 // incident (whose text is cleaned already, never a raw event field) and
-// passes each output string through clean exactly once; the cut to the limits
-// of notify comes after that, so a secret that straddles the cut is redacted
-// whole before anything is cut off. The message is plain text.
+// passes each text field through clean exactly once; the lines are put
+// together after that, with real line breaks (clean escapes the ones inside a
+// field), and the cut to the limits of notify comes last, so a secret that
+// straddles the cut is redacted whole before anything is cut off. The message
+// is plain text.
 func BuildMessage(inc incident.Incident, clean func(string) string) notify.Message {
-	title := cutBytes(oneLine(clean(titleText(inc))), notify.MaxTitleBytes)
-	body := cutBytes(clean(bodyText(inc)), notify.MaxBodyBytes)
+	f := fields{
+		title:    clean(inc.Title),
+		id:       clean(inc.ID),
+		rule:     clean(inc.RuleID),
+		severity: clean(string(inc.Severity)),
+		summary:  clean(inc.Summary),
+	}
 	return notify.Message{
-		Title:    title,
-		Body:     body,
+		Title:    cutBytes(oneLine(titleText(inc, f)), notify.MaxTitleBytes),
+		Body:     cutBytes(bodyText(inc, f), notify.MaxBodyBytes),
 		Priority: notify.PriorityOf(inc.Severity),
 		Tags:     tags(inc),
 	}
 }
 
-func titleText(inc incident.Incident) string {
-	t := inc.Title
+// fields are the cleaned text fields of an incident.
+type fields struct{ title, id, rule, severity, summary string }
+
+func titleText(inc incident.Incident, f fields) string {
+	t := f.title
 	if inc.ReopenCount > 0 {
 		t = "Reopened: " + t
 	}
-	return "[" + string(inc.Severity) + "] " + t
+	return "[" + f.severity + "] " + t
 }
 
-func bodyText(inc incident.Incident) string {
+func bodyText(inc incident.Incident, f fields) string {
 	var b strings.Builder
-	b.WriteString("Incident " + inc.ID + " (rule " + inc.RuleID + ")\n")
-	b.WriteString("Severity: " + string(inc.Severity) + "\n")
+	b.WriteString("Incident " + f.id + " (rule " + f.rule + ")\n")
+	b.WriteString("Severity: " + f.severity + "\n")
 	b.WriteString("Seen " + strconv.Itoa(inc.Count) + " times")
 	if inc.ReopenCount > 0 {
 		b.WriteString(", reopened " + strconv.Itoa(inc.ReopenCount) + " times")
 	}
 	b.WriteString("\nFirst seen: " + inc.FirstSeen.UTC().Format("2006-01-02T15:04:05Z") + "\n")
 	b.WriteString("Last seen: " + inc.LastSeen.UTC().Format("2006-01-02T15:04:05Z") + "\n")
-	if inc.Summary != "" {
-		b.WriteString("\n" + inc.Summary + "\n")
+	if f.summary != "" {
+		b.WriteString("\n" + f.summary + "\n")
 	}
 	return b.String()
 }

@@ -72,7 +72,9 @@ func (b *blockNotifier) Send(ctx context.Context, _ notify.Message) error {
 	return ctx.Err()
 }
 
-func job(id string) Job { return Job{IncidentID: id, Msg: notify.Message{Title: id}} }
+func job(id string) Job {
+	return Job{IncidentID: "inc-" + id, Fingerprint: id, Msg: notify.Message{Title: id}}
+}
 
 func mk(t *testing.T, n notify.Notifier, p Params, s *sink, c *fakeClock) *Worker {
 	t.Helper()
@@ -113,7 +115,7 @@ func TestSendAndResults(t *testing.T) {
 	if r := w.Enqueue(job("a")); r != NotDropped {
 		t.Fatalf("enqueue: %q", r)
 	}
-	if r := s.next(t); r.Status != Sent || r.Job.IncidentID != "a" {
+	if r := s.next(t); r.Status != Sent || r.Job.Fingerprint != "a" {
 		t.Errorf("result = %+v", r)
 	}
 	fn.mu.Lock()
@@ -154,7 +156,7 @@ func TestEnqueueNeverBlocksWhenQueueFull(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Enqueue blocked on a full queue")
 	}
-	if r := s.next(t); r.Status != Dropped || r.Reason != DropQueueFull || r.Job.IncidentID != "c" {
+	if r := s.next(t); r.Status != Dropped || r.Reason != DropQueueFull || r.Job.Fingerprint != "c" {
 		t.Errorf("drop result = %+v", r)
 	}
 }
@@ -215,9 +217,9 @@ func TestGlobalLimit(t *testing.T) {
 	if r := w.Enqueue(job("x")); r != DropGlobal {
 		t.Fatalf("within the minute: %q", r)
 	}
-	c.add(2 * time.Second)
+	c.add(time.Second) // exactly 60 s after the first three
 	if r := w.Enqueue(job("x")); r != NotDropped {
-		t.Fatalf("after the minute: %q", r)
+		t.Fatalf("at exactly the minute: %q", r)
 	}
 }
 
@@ -282,7 +284,7 @@ func TestCancelDrainsQueueAndLeaksNothing(t *testing.T) {
 		if r.Status != Dropped {
 			t.Errorf("result %+v is not a drop", r)
 		}
-		got[r.Job.IncidentID] = r.Reason
+		got[r.Job.Fingerprint] = r.Reason
 	}
 	for _, id := range []string{"a", "b", "c"} {
 		if got[id] != DropShutdown {
@@ -306,8 +308,8 @@ func TestCancelDrainsQueueAndLeaksNothing(t *testing.T) {
 
 func TestPrunesExpiredIncidents(t *testing.T) {
 	c := &fakeClock{t: time.Unix(1000, 0)}
-	w := mk(t, &fakeNotifier{}, Params{QueueSize: maxTracked + 10, PerIncidentInterval: time.Minute}, newSink(), c)
-	for i := 0; i < maxTracked; i++ {
+	w := mk(t, &fakeNotifier{}, Params{QueueSize: minPrune + 10, PerIncidentInterval: time.Minute}, newSink(), c)
+	for i := 0; i < minPrune; i++ {
 		w.Enqueue(job("i" + strconv.Itoa(i)))
 	}
 	c.add(2 * time.Minute)
@@ -317,5 +319,160 @@ func TestPrunesExpiredIncidents(t *testing.T) {
 	w.mu.Unlock()
 	if n != 1 {
 		t.Errorf("tracked incidents = %d, want 1", n)
+	}
+}
+
+func TestEmptyFingerprintRejected(t *testing.T) {
+	s := newSink()
+	w := mk(t, &fakeNotifier{}, Params{QueueSize: 2, PerIncidentInterval: time.Hour}, s, nil)
+	if r := w.Enqueue(Job{IncidentID: "inc-1"}); r != DropInvalid {
+		t.Fatalf("reason = %q", r)
+	}
+	if r := s.next(t); r.Status != Dropped || r.Reason != DropInvalid {
+		t.Errorf("result = %+v", r)
+	}
+	if len(w.queue) != 0 {
+		t.Error("invalid job queued")
+	}
+}
+
+// The limit keys on the fingerprint: two incident ids with one fingerprint
+// share a slot, and one incident id with two fingerprints does not.
+func TestLimitKeyIsFingerprint(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	w := mk(t, &fakeNotifier{}, Params{QueueSize: 10, PerIncidentInterval: time.Hour}, newSink(), c)
+	if r := w.Enqueue(Job{IncidentID: "i1", Fingerprint: "fp"}); r != NotDropped {
+		t.Fatal(r)
+	}
+	if r := w.Enqueue(Job{IncidentID: "i2", Fingerprint: "fp"}); r != DropIncident {
+		t.Errorf("same fingerprint, new id: %q", r)
+	}
+	if r := w.Enqueue(Job{IncidentID: "i1", Fingerprint: "other"}); r != NotDropped {
+		t.Errorf("same id, other fingerprint: %q", r)
+	}
+}
+
+func TestBackwardsClock(t *testing.T) {
+	c := &fakeClock{t: time.Unix(100000, 0)}
+	w := mk(t, &fakeNotifier{}, Params{QueueSize: 10, PerIncidentInterval: time.Hour, GlobalPerMinute: 1}, newSink(), c)
+	if r := w.Enqueue(job("a")); r != NotDropped {
+		t.Fatal(r)
+	}
+	c.add(-24 * time.Hour)
+	// Both slots lie in the future: they count as expired.
+	if r := w.Enqueue(job("a")); r != NotDropped {
+		t.Errorf("per-incident slot in the future still limits: %q", r)
+	}
+	c.add(-24 * time.Hour)
+	if r := w.Enqueue(job("b")); r != NotDropped {
+		t.Errorf("global entries in the future still limit: %q", r)
+	}
+	// And the limits work again from the new time.
+	if r := w.Enqueue(job("b")); r != DropIncident {
+		t.Errorf("after the step: %q", r)
+	}
+	if r := w.Enqueue(job("c")); r != DropGlobal {
+		t.Errorf("after the step: %q", r)
+	}
+}
+
+// Both channels ready at the start of Run: no job may be sent with a dead
+// context. The select picks at random, so repeat.
+func TestRunAfterCancelSendsNothing(t *testing.T) {
+	for round := 0; round < 40; round++ {
+		s := newSink()
+		fn := &fakeNotifier{}
+		w := mk(t, fn, Params{QueueSize: 20}, s, nil)
+		for i := 0; i < 20; i++ {
+			if r := w.Enqueue(job("j" + strconv.Itoa(i))); r != NotDropped {
+				t.Fatal(r)
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		w.Run(ctx)
+		fn.mu.Lock()
+		n := len(fn.sent)
+		fn.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("round %d: %d sends after cancel", round, n)
+		}
+		for i := 0; i < 20; i++ {
+			if r := s.next(t); r.Status != Dropped || r.Reason != DropShutdown {
+				t.Fatalf("round %d: result %+v", round, r)
+			}
+		}
+	}
+}
+
+func TestFailedSendReleasesSlots(t *testing.T) {
+	s := newSink()
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	fn := &fakeNotifier{err: &notify.Error{Class: notify.Transient, Msg: "down"}}
+	w := mk(t, fn, Params{QueueSize: 4, PerIncidentInterval: time.Hour, GlobalPerMinute: 1}, s, c)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	w.Enqueue(job("a"))
+	if r := s.next(t); r.Status != Failed {
+		t.Fatalf("result = %+v", r)
+	}
+	if r := w.Enqueue(job("a")); r != NotDropped {
+		t.Errorf("retry after a failed send: %q", r)
+	}
+	// A sent job keeps its slots.
+	fn.mu.Lock()
+	fn.err = nil
+	fn.mu.Unlock()
+	if r := s.next(t); r.Status != Sent {
+		t.Fatalf("result = %+v", r)
+	}
+	if r := w.Enqueue(job("a")); r != DropIncident {
+		t.Errorf("after a sent job: %q", r)
+	}
+	if r := w.Enqueue(job("b")); r != DropGlobal {
+		t.Errorf("after a sent job: %q", r)
+	}
+}
+
+func TestShutdownReleasesSlots(t *testing.T) {
+	s := newSink()
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	bn := &blockNotifier{started: make(chan struct{}, 1)}
+	w := mk(t, bn, Params{QueueSize: 4, PerIncidentInterval: time.Hour, GlobalPerMinute: 10}, s, c)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	w.Enqueue(job("a")) // in flight
+	<-bn.started
+	w.Enqueue(job("b")) // queued
+	cancel()
+	<-done
+	w.mu.Lock()
+	n, nw := len(w.lastSent), len(w.window)
+	w.mu.Unlock()
+	if n != 0 || nw != 0 {
+		t.Errorf("slots kept after shutdown: %d incidents, %d window entries", n, nw)
+	}
+}
+
+// A large map of unexpired entries is not scanned on every Enqueue.
+func TestPruneDoesNotRescanEveryCall(t *testing.T) {
+	c := &fakeClock{t: time.Unix(1000, 0)}
+	w := mk(t, &fakeNotifier{}, Params{QueueSize: 6000, PerIncidentInterval: time.Hour}, newSink(), c)
+	scans := 0
+	w.onPrune = func() { scans++ }
+	for i := 0; i < 5000; i++ {
+		if r := w.Enqueue(job("i" + strconv.Itoa(i))); r != NotDropped {
+			t.Fatal(r)
+		}
+	}
+	// The map doubles between scans: 1024, 2048, 4096 (and nothing is
+	// expired, so each scan keeps everything).
+	if scans > 4 {
+		t.Errorf("%d scans for 5000 unexpired incidents", scans)
+	}
+	if scans == 0 {
+		t.Error("never pruned")
 	}
 }

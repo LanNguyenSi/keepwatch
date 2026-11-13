@@ -84,7 +84,7 @@ func TestCleanBeforeCut(t *testing.T) {
 	i = inc()
 	i.Summary = ""
 	// Put the secret so that the cut of the raw body would land inside it.
-	head := len(bodyText(i)) + 1
+	head := len(BuildMessage(i, ident).Body) + 1
 	pad := notify.MaxBodyBytes - len(cutMark) - head - 5
 	i.Summary = strings.Repeat("a", pad) + "SECRETTOKEN" + strings.Repeat("b", 400)
 	m = BuildMessage(i, clean)
@@ -96,11 +96,43 @@ func TestCleanBeforeCut(t *testing.T) {
 	}
 }
 
-func TestCleanAppliedOncePerString(t *testing.T) {
-	calls := 0
-	BuildMessage(inc(), func(s string) string { calls++; return s })
-	if calls != 2 {
-		t.Errorf("clean called %d times, want 2 (title, body)", calls)
+func TestCleanAppliedOncePerField(t *testing.T) {
+	i := inc()
+	calls := map[string]int{}
+	BuildMessage(i, func(s string) string { calls[s]++; return s })
+	want := []string{i.Title, i.ID, i.RuleID, string(i.Severity), i.Summary}
+	if len(calls) != len(want) {
+		t.Errorf("clean saw %v", calls)
+	}
+	for _, f := range want {
+		if calls[f] != 1 {
+			t.Errorf("clean called %d times for %q", calls[f], f)
+		}
+	}
+}
+
+// The real redactor escapes line breaks inside a field; the lines of the
+// body are joined after that, so they stay real.
+func TestBodyKeepsLineBreaks(t *testing.T) {
+	red, err := redact.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := inc()
+	i.Summary = "first\nsecond"
+	m := BuildMessage(i, red.Clean)
+	if got := strings.Count(m.Body, "\n"); got < 6 {
+		t.Errorf("only %d real line breaks:\n%q", got, m.Body)
+	}
+	if strings.Contains(m.Body, `\n`) && !strings.Contains(m.Body, `first\nsecond`) {
+		t.Errorf("literal backslash-n from the template: %q", m.Body)
+	}
+	if !strings.HasPrefix(m.Body, "Incident inc-1 (rule ssh-brute)\nSeverity: high\n") {
+		t.Errorf("body = %q", m.Body)
+	}
+	// The only literal backslash-n is the one inside the summary field.
+	if strings.Count(m.Body, `\n`) != 1 {
+		t.Errorf("body = %q", m.Body)
 	}
 }
 

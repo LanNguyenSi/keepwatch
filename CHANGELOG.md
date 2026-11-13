@@ -32,7 +32,9 @@ report.
 
 ### Added
 
-- Notification worker for the watch daemon: a bounded queue with its own goroutine, a per-incident and a global rate limit, counted drops, and an incident notice that is cleaned before it is cut.
+- Notification worker for the watch daemon: a bounded queue with its own
+  goroutine, a per-incident and a global rate limit, reported drops, and an
+  incident notice that is cleaned before it is cut.
 
 ### Changed
 

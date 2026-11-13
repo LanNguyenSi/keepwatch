@@ -20,8 +20,8 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/notify"
 )
 
-// Job is one message to send. IncidentID is the key of the per-incident rate
-// limit; the message must already be cleaned.
+// Job is one message to send. Fingerprint is the key of the per-incident rate
+// limit and must not be empty; the message must already be cleaned.
 type Job struct {
 	IncidentID  string
 	Fingerprint string
@@ -49,6 +49,8 @@ const (
 	DropGlobal      DropReason = "rate_limit_global"
 	DropShutdown    DropReason = "shutdown"
 	DropWorkerEnded DropReason = "worker_stopped"
+	// DropInvalid: the job has no fingerprint, so no limit could apply.
+	DropInvalid DropReason = "invalid_job"
 )
 
 // Result reports what became of a Job.
@@ -78,7 +80,10 @@ type Params struct {
 // Worker queues and sends notifications.
 type Worker struct {
 	Notifier notify.Notifier
-	// Clock returns the current time; nil means time.Now.
+	// Clock returns the current time; nil means time.Now. A replacement
+	// should keep the monotonic reading of time.Now (do not strip it), so
+	// that a step of the wall clock cannot move the limits. If it does go
+	// backwards anyway, a limit slot taken in the future counts as expired.
 	Clock func() time.Time
 	// OnResult receives every outcome. It is called from Run's goroutine for
 	// sends and from the caller's goroutine for drops at Enqueue, so it must
@@ -86,16 +91,29 @@ type Worker struct {
 	OnResult func(Result)
 
 	p     Params
-	queue chan Job
+	queue chan queued
 
 	mu       sync.Mutex
 	closed   bool
 	lastSent map[string]time.Time
 	window   []time.Time
+	// pruneAt is the size of lastSent at which expired entries are scanned
+	// for; after a scan it is twice the remaining size (at least minPrune),
+	// so a map of unexpired entries is not scanned on every Enqueue.
+	pruneAt int
+	// onPrune is called at every scan (tests).
+	onPrune func()
 }
 
-// maxTracked is the size at which expired per-incident entries are pruned.
-const maxTracked = 1024
+// queued is a job with the time its limit slots were taken.
+type queued struct {
+	Job
+	at time.Time
+}
+
+// minPrune is the smallest size at which expired per-incident entries are
+// pruned.
+const minPrune = 1024
 
 // NewWorker validates p and returns a Worker.
 func NewWorker(n notify.Notifier, p Params, onResult func(Result)) (*Worker, error) {
@@ -112,8 +130,9 @@ func NewWorker(n notify.Notifier, p Params, onResult func(Result)) (*Worker, err
 		Notifier: n,
 		OnResult: onResult,
 		p:        p,
-		queue:    make(chan Job, p.QueueSize),
+		queue:    make(chan queued, p.QueueSize),
 		lastSent: map[string]time.Time{},
+		pruneAt:  minPrune,
 	}, nil
 }
 
@@ -131,8 +150,10 @@ func (w *Worker) report(r Result) {
 }
 
 // Enqueue accepts j for sending, or drops it and says why. It never blocks.
-// A dropped job is also reported through OnResult. A job that was accepted
-// has used its slot in both rate limits, even if the send later fails.
+// A dropped job is also reported through OnResult. An accepted job takes a
+// slot in both rate limits, keyed by its fingerprint. The slot is given back
+// when the send fails or is cut short by shutdown, so the caller may try the
+// same fingerprint again at once; a job that was sent keeps its slot.
 func (w *Worker) Enqueue(j Job) DropReason {
 	now := w.now()
 	w.mu.Lock()
@@ -150,8 +171,12 @@ func (w *Worker) admit(j Job, now time.Time) DropReason {
 	if w.closed {
 		return DropWorkerEnded
 	}
+	if j.Fingerprint == "" {
+		return DropInvalid
+	}
 	if iv := w.p.PerIncidentInterval; iv > 0 {
-		if last, ok := w.lastSent[j.IncidentID]; ok && now.Sub(last) < iv {
+		// A slot taken in the future (the clock went back) is expired.
+		if last, ok := w.lastSent[j.Fingerprint]; ok && !now.Before(last) && now.Sub(last) < iv {
 			return DropIncident
 		}
 	}
@@ -159,7 +184,7 @@ func (w *Worker) admit(j Job, now time.Time) DropReason {
 		cut := now.Add(-time.Minute)
 		kept := w.window[:0]
 		for _, t := range w.window {
-			if t.After(cut) {
+			if t.After(cut) && !t.After(now) {
 				kept = append(kept, t)
 			}
 		}
@@ -169,19 +194,23 @@ func (w *Worker) admit(j Job, now time.Time) DropReason {
 		}
 	}
 	select {
-	case w.queue <- j:
+	case w.queue <- queued{Job: j, at: now}:
 	default:
 		return DropQueueFull
 	}
 	if w.p.PerIncidentInterval > 0 {
-		if len(w.lastSent) >= maxTracked {
+		if len(w.lastSent) >= w.pruneAt {
+			if w.onPrune != nil {
+				w.onPrune()
+			}
 			for k, t := range w.lastSent {
-				if now.Sub(t) >= w.p.PerIncidentInterval {
+				if now.Before(t) || now.Sub(t) >= w.p.PerIncidentInterval {
 					delete(w.lastSent, k)
 				}
 			}
+			w.pruneAt = max(minPrune, 2*len(w.lastSent))
 		}
-		w.lastSent[j.IncidentID] = now
+		w.lastSent[j.Fingerprint] = now
 	}
 	if w.p.GlobalPerMinute > 0 {
 		w.window = append(w.window, now)
@@ -199,19 +228,42 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			w.shutdown()
 			return
-		case j := <-w.queue:
+		case q := <-w.queue:
 			if ctx.Err() != nil {
 				// Both channels were ready and the queue case won.
-				w.report(Result{Job: j, Status: Dropped, Reason: DropShutdown, At: w.now()})
+				w.dropShutdown(q)
 				w.shutdown()
 				return
 			}
-			w.send(ctx, j)
+			w.send(ctx, q)
 		}
 	}
 }
 
-func (w *Worker) send(ctx context.Context, j Job) {
+// dropShutdown reports q as dropped and gives its slots back.
+func (w *Worker) dropShutdown(q queued) {
+	w.release(q)
+	w.report(Result{Job: q.Job, Status: Dropped, Reason: DropShutdown, At: w.now()})
+}
+
+// release gives back the limit slots q took: its fingerprint's slot (if no
+// later job took it over) and one entry of the global window.
+func (w *Worker) release(q queued) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if t, ok := w.lastSent[q.Fingerprint]; ok && t.Equal(q.at) {
+		delete(w.lastSent, q.Fingerprint)
+	}
+	for i, t := range w.window {
+		if t.Equal(q.at) {
+			w.window = append(w.window[:i], w.window[i+1:]...)
+			break
+		}
+	}
+}
+
+func (w *Worker) send(ctx context.Context, q queued) {
+	j := q.Job
 	sctx, cancel := ctx, context.CancelFunc(func() {})
 	if w.p.SendTimeout > 0 {
 		sctx, cancel = context.WithTimeout(ctx, w.p.SendTimeout)
@@ -223,8 +275,10 @@ func (w *Worker) send(ctx context.Context, j Job) {
 	case err == nil:
 		r.Status = Sent
 	case ctx.Err() != nil:
+		w.release(q)
 		r.Status, r.Reason = Dropped, DropShutdown
 	default:
+		w.release(q)
 		r.Status, r.Class, r.Detail = Failed, notify.Permanent, "send failed"
 		if ne := notify.AsError(err); ne != nil {
 			r.Class, r.Detail = ne.Class, ne.Error()
@@ -239,8 +293,8 @@ func (w *Worker) shutdown() {
 	w.mu.Unlock()
 	for {
 		select {
-		case j := <-w.queue:
-			w.report(Result{Job: j, Status: Dropped, Reason: DropShutdown, At: w.now()})
+		case q := <-w.queue:
+			w.dropShutdown(q)
 		default:
 			return
 		}
