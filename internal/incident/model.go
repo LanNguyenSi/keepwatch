@@ -35,21 +35,26 @@ type Incident struct {
 	FirstSeen time.Time
 	LastSeen  time.Time
 	Notify    bool
-	// Reopened is true when the incident was closed and came back.
-	Reopened   bool
-	NotifiedAt time.Time
+	// ReopenCount is the number of times the incident was reopened.
+	ReopenCount int
+	NotifiedAt  time.Time
 }
 
-// CanTransition reports whether an incident may move from one state to
-// another. Staying in a state is not a transition. A closed incident never
-// moves on: a recurrence opens a new incident or reopens by the store's
-// own rule, not through this table.
+// CanTransition reports whether a request action may move an incident from
+// one state to another: open to acked, open to closed, acked to closed.
+// Staying in a state is not a transition, and a closed incident never moves
+// on through this table.
 func CanTransition(from, to State) bool {
 	switch from {
 	case StateOpen:
 		return to == StateAcked || to == StateClosed
 	case StateAcked:
-		return to == StateOpen || to == StateClosed
+		return to == StateClosed
 	}
 	return false
 }
+
+// CanReopen reports whether an incident in state from may be reopened. It is
+// the store-only reopen edge (closed to open) that request actions never
+// reach.
+func CanReopen(from State) bool { return from == StateClosed }

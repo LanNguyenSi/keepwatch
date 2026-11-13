@@ -1,6 +1,9 @@
 package event
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFingerprintOfSplitsDiffer(t *testing.T) {
 	a := FingerprintOf("r", "ab", "c")
@@ -29,6 +32,14 @@ func TestFingerprintOfStable(t *testing.T) {
 	const want = "dae82531a0a43d9ece0a17f89d93d36f544f9f68c18fc0290b41c0928ede232a"
 	got := FingerprintOf("oom", "nginx", "1234")
 	if string(got) != want {
+		t.Errorf("golden: got %s", got)
+	}
+}
+
+func TestFingerprintOfLongPart(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	const want = "aa995d29b36167aacfa08e15e42686fcd8eb63e008b12edd8115f421d12a946d"
+	if got := FingerprintOf("r", long, "b"); string(got) != want {
 		t.Errorf("golden: got %s", got)
 	}
 }

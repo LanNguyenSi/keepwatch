@@ -7,7 +7,6 @@ func TestCanTransition(t *testing.T) {
 	want := map[[2]State]bool{
 		{StateOpen, StateAcked}:   true,
 		{StateOpen, StateClosed}:  true,
-		{StateAcked, StateOpen}:   true,
 		{StateAcked, StateClosed}: true,
 	}
 	for _, from := range states {
@@ -17,7 +16,16 @@ func TestCanTransition(t *testing.T) {
 			}
 		}
 	}
-	if CanTransition("bogus", StateOpen) {
+	if CanTransition("bogus", StateOpen) || CanTransition(StateOpen, "bogus") {
 		t.Error("unknown state may transition")
+	}
+}
+
+func TestCanReopen(t *testing.T) {
+	want := map[State]bool{StateOpen: false, StateAcked: false, StateClosed: true, "bogus": false}
+	for s, w := range want {
+		if got := CanReopen(s); got != w {
+			t.Errorf("CanReopen(%s) = %v", s, got)
+		}
 	}
 }

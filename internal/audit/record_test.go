@@ -2,18 +2,24 @@ package audit
 
 import "testing"
 
-func TestKindValuesUnique(t *testing.T) {
-	kinds := []Kind{DaemonStart, DaemonStop, IncidentOpen, IncidentUpdate, IncidentReopen,
-		IncidentAck, IncidentClose, NotifySent, NotifyFailed, NotifyDropped,
-		RequestRejected, CursorReset, PostureSeen}
-	if len(kinds) != 13 {
-		t.Fatalf("got %d kinds", len(kinds))
+func TestKindStrings(t *testing.T) {
+	want := map[Kind]string{
+		DaemonStart: "daemon_start", DaemonStop: "daemon_stop",
+		IncidentOpen: "incident_open", IncidentUpdate: "incident_update",
+		IncidentReopen: "incident_reopen", IncidentAck: "incident_ack",
+		IncidentClose: "incident_close", NotifySent: "notify_sent",
+		NotifyFailed: "notify_failed", NotifyDropped: "notify_dropped",
+		RequestRejected: "request_rejected", CursorReset: "cursor_reset",
+		PostureSeen: "posture_seen", JournalLineInvalid: "journal_line_invalid",
+		AuditRecovered: "audit_recovered", InputError: "input_error",
+		DaemonError: "daemon_error",
 	}
-	seen := map[Kind]bool{}
-	for _, k := range kinds {
-		if k == "" || seen[k] {
-			t.Errorf("empty or duplicate kind %q", k)
+	if len(want) != 17 {
+		t.Fatalf("got %d kinds", len(want))
+	}
+	for k, s := range want {
+		if string(k) != s {
+			t.Errorf("kind %q, want %q", k, s)
 		}
-		seen[k] = true
 	}
 }

@@ -7,6 +7,13 @@
 // through red.Clean (internal/redact) first. Fingerprints are the one
 // exception: they are derived from raw values on purpose, so that cleaning
 // can never merge or split incidents.
+//
+// Trust: journald sets some fields itself (names starting with an
+// underscore) and takes others from the sender, which any local user can
+// forge. Rules must base trust decisions only on the journald-set fields.
+//
+// Posture-sourced Subject and Summary are stored display text; the daemon
+// cleans them again before they are shown or stored.
 package event
 
 import (
@@ -29,31 +36,53 @@ const (
 	KindPosture Kind = "posture"
 )
 
-// Event is one normalised entry. All string fields are RAW.
+// Event is one normalised entry. All string fields are RAW. Each field is
+// marked either "set by journald (trusted)" or "set by the sender (untrusted,
+// forgeable by any local user)", following systemd.journal-fields(7).
 type Event struct {
+	// Kind is set by keepwatch: which reader produced the event.
 	Kind Kind
-	// Cursor is the journal cursor of the entry (raw, opaque).
+	// Cursor is the journal cursor of the entry. Set by journald (trusted).
 	Cursor string
-	Time   time.Time
-	// Unit is the systemd unit (raw).
+	// Time is the journal timestamp. Set by journald (trusted).
+	Time time.Time
+	// UID is the user id of the logging process (_UID). Set by journald
+	// (trusted). Absent is -1.
+	UID int
+	// SystemdUnit is the unit the logging process runs in
+	// (_SYSTEMD_UNIT). Set by journald (trusted). Empty when absent.
+	SystemdUnit string
+	// Unit is the UNIT field a sender names, for example systemd on behalf
+	// of a unit. Set by the sender (untrusted, forgeable by any local
+	// user). Never base a trust decision on it.
 	Unit string
-	// Identifier is the syslog identifier (raw).
+	// Identifier is SYSLOG_IDENTIFIER. Set by the sender (untrusted,
+	// forgeable by any local user).
 	Identifier string
-	PID        int
-	// Priority is the syslog priority, 0 (emerg) to 7 (debug).
+	// PID is _PID. Set by journald (trusted). Absent is 0.
+	PID int
+	// Priority is PRIORITY, 0 (emerg) to 7 (debug). Set by the sender
+	// (untrusted, forgeable by any local user). Absent is -1.
 	Priority int
-	// Transport is the journal transport (raw), for example "kernel".
+	// Transport is _TRANSPORT, for example "kernel". Set by journald
+	// (trusted).
 	Transport string
-	// Message is the log message (raw).
+	// Message is MESSAGE. Set by the sender (untrusted, forgeable by any
+	// local user), including kernel text relayed through a transport.
 	Message string
-	// Comm is the command name of the process involved (raw), used for
-	// OOM kills.
+	// Comm is _COMM, the command name of the logging process. Set by
+	// journald (trusted). It is not the OOM victim: a rule parses the
+	// victim name from Message.
 	Comm string
-	// UnitResult is the result of a unit stop (raw), for example
-	// "exit-code" or "oom-kill".
+	// UnitResult is the systemd UNIT_RESULT field, for example
+	// "exit-code" or "oom-kill". Set by the sender (untrusted, forgeable
+	// by any local user).
 	UnitResult string
-	// ExitCode and ExitStatus are the unit's exit fields (raw).
-	ExitCode   string
+	// ExitCode is EXIT_CODE. Set by the sender (untrusted, forgeable by
+	// any local user).
+	ExitCode string
+	// ExitStatus is EXIT_STATUS. Set by the sender (untrusted, forgeable
+	// by any local user).
 	ExitStatus string
 }
 
@@ -69,8 +98,6 @@ type Signal struct {
 	Subject string
 	// Summary is a one-line description (raw).
 	Summary string
-	// Key holds the raw values the fingerprint was built from.
-	Key map[string]string
 }
 
 // Fingerprint identifies a recurring problem: lowercase hex SHA-256.
