@@ -1,9 +1,11 @@
 package rules
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"testing"
@@ -82,7 +84,7 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	// The content bounds: a user name with a control byte, and a key
 	// fingerprint or a source address outside their allowed content, are
 	// refused everywhere (not stored, not found).
-	for _, bad := range []string{"bob\nbob", "bob\x7f", "bob\x01"} {
+	for _, bad := range []string{"bob\nbob", "bob\x7f", "bob\x01", "bob\x1f"} {
 		if b.AddIP(bad, "9.9.9.9") || b.AddKey(bad, "SHA256:x") {
 			t.Errorf("user name %q with a control byte must be refused", bad)
 		}
@@ -114,6 +116,34 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	if !b.AddIP("bob", "fe80::1%eth0") || !b.KnownIP("bob", "fe80::1%eth0") {
 		t.Error("a zone within the allowed set must be storable")
 	}
+	// Every character of the zone set is storable: A-Z a-z 0-9 . _ -
+	for _, zone := range []string{"br-lan", "eth0.100", "a_b", "ETH9"} {
+		if a := "fe80::2%" + zone; !b.AddIP("bob", a) || !b.KnownIP("bob", a) {
+			t.Errorf("zone %q must be storable", zone)
+		}
+	}
+	// An address entry is an address in its canonical form, and nothing
+	// else: a non-address, a control byte, a non-canonical spelling, a
+	// literal that merely looks like a parse failure and surrounding
+	// blanks are all refused (not stored, not found).
+	for _, bad := range []string{
+		"notanaddress", "invalid IP", "1.2.3.4\n", "1.2.3.4\x00", "\x011.2.3.4", " 1.2.3.4",
+		"1.2.3.4 ", "1.2.3.4\u2028", "::ffff:1.2.3.4", "::ffff:102:304",
+		"2001:0db8:0:0:0:0:0:1", "2001:DB8::1", "2001:db8:0:0::1", "01.2.3.4", "1.2.3",
+		"1.2.3.4/32", "[2001:db8::1]", "fe80::1%eth0%1", "::ffff:1.2.3.4%eth0",
+	} {
+		if b.AddIP("bob", bad) || b.KnownIP("bob", bad) {
+			t.Errorf("address entry %q must be refused", bad)
+		}
+		if _, ok := b.users["bob"].ips[bad]; ok {
+			t.Errorf("address entry %q must not be stored", bad)
+		}
+	}
+	for _, good := range []string{"::1", "2001:db8::1", "198.51.100.7", "fe80::1%wlan0"} {
+		if !b.AddIP("bob", good) || !b.KnownIP("bob", good) {
+			t.Errorf("canonical address %q must be storable", good)
+		}
+	}
 	if b.users["bob"].ips["fe80::1%eth~0"] || b.users["bob"].keys["a=b"] {
 		t.Fatal("a refused entry must not be stored")
 	}
@@ -136,7 +166,7 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	if _, exists := b.users[badUser]; exists {
 		t.Error("a non-UTF-8 user must not be created")
 	}
-	if len(b.users["bob"].ips) != 2 || len(b.users["bob"].keys) != 2 {
+	if len(b.users["bob"].ips) != 2+4+4 || len(b.users["bob"].keys) != 2 {
 		t.Fatalf("only the accepted entries may be stored: %+v", b.users["bob"])
 	}
 }
@@ -369,6 +399,17 @@ func TestUnmarshalSchemaAndErrors(t *testing.T) {
 		{"oversized user", `{"schema_version":1,"users":[{"user":"` + strings.Repeat("u", maxBaselineUserLen+1) + `","ips":[]}]}`, errBaselineCorrupt},
 		{"control byte user", `{"schema_version":1,"users":[{"user":"bob\u0001","ips":[]}]}`, errBaselineCorrupt},
 		{"del user name", `{"schema_version":1,"users":[{"user":"bob\u007f","ips":[]}]}`, errBaselineCorrupt},
+		{"unit separator user name", `{"schema_version":1,"users":[{"user":"bob\u001f","ips":[]}]}`, errBaselineCorrupt},
+		{"non-address entry", `{"schema_version":1,"users":[{"user":"bob","ips":["notanaddress"]}]}`, errBaselineCorrupt},
+		{"parse-failure literal entry", `{"schema_version":1,"users":[{"user":"bob","ips":["invalid IP"]}]}`, errBaselineCorrupt},
+		{"ipv4-mapped entry", `{"schema_version":1,"users":[{"user":"bob","ips":["::ffff:1.2.3.4"]}]}`, errBaselineCorrupt},
+		{"uncompressed ipv6 entry", `{"schema_version":1,"users":[{"user":"bob","ips":["2001:0db8:0:0:0:0:0:1"]}]}`, errBaselineCorrupt},
+		{"upper-case ipv6 entry", `{"schema_version":1,"users":[{"user":"bob","ips":["2001:DB8::1"]}]}`, errBaselineCorrupt},
+		{"control byte entry", `{"schema_version":1,"users":[{"user":"bob","ips":["1.2.3.4\u0001"]}]}`, errBaselineCorrupt},
+		{"newline entry", `{"schema_version":1,"users":[{"user":"bob","ips":["1.2.3.4\n"]}]}`, errBaselineCorrupt},
+		{"line separator entry", `{"schema_version":1,"users":[{"user":"bob","ips":["1.2.3.4\u2028"]}]}`, errBaselineCorrupt},
+		{"mapped entry with zone", `{"schema_version":1,"users":[{"user":"bob","ips":["::ffff:1.2.3.4%eth0"]}]}`, errBaselineCorrupt},
+		{"key list entry is not an address", `{"schema_version":1,"users":[{"user":"bob","ips":["SHA256:abc"]}]}`, errBaselineCorrupt},
 		{"bad zone char", `{"schema_version":1,"users":[{"user":"bob","ips":["fe80::1%eth~0"]}]}`, errBaselineCorrupt},
 		{"empty zone", `{"schema_version":1,"users":[{"user":"bob","ips":["fe80::1%"]}]}`, errBaselineCorrupt},
 		{"non-base64 key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:a=b"]}]}`, errBaselineCorrupt},
@@ -453,10 +494,20 @@ func TestUnmarshalCapCounts(t *testing.T) {
 	}
 }
 
+// capAddr returns a canonical IPv6 address that differs per (u, e).
+func capAddr(u, e int) string {
+	var raw [16]byte
+	raw[0], raw[1], raw[2], raw[3] = 0x20, 0x01, 0x0d, 0xb8
+	raw[4], raw[5] = byte(u>>8), byte(u)
+	raw[6], raw[7] = byte(e>>8), byte(e)
+	raw[15] = 1
+	return netip.AddrFrom16(raw).String()
+}
+
 // Marshal at the caps, with entries of realistic length, produces a
 // document Unmarshal accepts: the size bound is derived from the caps
 // and the length bounds, so a baseline can never outgrow its own load
-// bound.
+// bound. The loaded baseline marshals to the same bytes and loads again.
 func TestBaselineMarshalAtCapsRoundTrip(t *testing.T) {
 	b := NewBaseline(t0)
 	for u := 0; u < BaselineMaxUsers; u++ {
@@ -464,7 +515,7 @@ func TestBaselineMarshalAtCapsRoundTrip(t *testing.T) {
 		for e := 0; e < BaselineEntriesPerUser; e++ {
 			var ok bool
 			if e%2 == 0 {
-				ok = b.AddIP(name, fmt.Sprintf("2001:db8:%x:%x::%x", u, e, e))
+				ok = b.AddIP(name, capAddr(u, e))
 			} else {
 				ok = b.AddKey(name, fmt.Sprintf("SHA256:%s%04d%04d", "AbCdEfGhIjKlMnOpQrStUvWxYz012345678", u, e))
 			}
@@ -481,11 +532,11 @@ func TestBaselineMarshalAtCapsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a marshal at the caps must load: %d bytes, %v", len(raw), err)
 	}
-	if !again.KnownIP("user0", "2001:db8:0:0::0") || !again.KnownKey("user0", "SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz01234567800000001") {
+	if !again.KnownIP("user0", capAddr(0, 0)) || !again.KnownKey("user0", "SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz01234567800000001") {
 		t.Fatal("first user lost")
 	}
 	last := fmt.Sprintf("user%d", BaselineMaxUsers-1)
-	if !again.KnownIP(last, fmt.Sprintf("2001:db8:%x:%x::%x", BaselineMaxUsers-1, 0, 0)) ||
+	if !again.KnownIP(last, capAddr(BaselineMaxUsers-1, 0)) ||
 		!again.KnownKey(last, fmt.Sprintf("SHA256:%s%04d%04d", "AbCdEfGhIjKlMnOpQrStUvWxYz012345678", BaselineMaxUsers-1, 1)) {
 		t.Fatal("last user lost")
 	}
@@ -494,6 +545,36 @@ func TestBaselineMarshalAtCapsRoundTrip(t *testing.T) {
 	again.mu.Unlock()
 	if n != BaselineMaxUsers {
 		t.Fatalf("%d users loaded", n)
+	}
+	raw2, err := again.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, raw2) {
+		t.Fatalf("load then marshal changed the document: %d bytes, then %d", len(raw), len(raw2))
+	}
+	if _, err := Unmarshal(raw2); err != nil {
+		t.Fatalf("a second load of the re-marshalled document: %v", err)
+	}
+}
+
+// Marshal writes the document without a trailing newline, for an empty
+// and for a filled baseline, and the output parses as one JSON value.
+func TestBaselineMarshalNoTrailingNewline(t *testing.T) {
+	filled := NewBaseline(t0)
+	filled.AddIP("bob", "1.2.3.4")
+	filled.AddKey("bob", "SHA256:abc")
+	for name, b := range map[string]*Baseline{"empty": NewBaseline(t0), "filled": filled} {
+		raw, err := b.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) == 0 || raw[len(raw)-1] != '}' {
+			t.Errorf("%s: output must end with the closing brace: %q", name, raw[len(raw)-1:])
+		}
+		if !json.Valid(raw) {
+			t.Errorf("%s: output is not valid JSON: %s", name, raw)
+		}
 	}
 }
 
@@ -557,60 +638,144 @@ func TestBaselineDoubledPrefixSameEntry(t *testing.T) {
 	}
 }
 
-// Marshal of a baseline filled to the caps with maximum-length entries
-// and maximum-length user names that mix the characters a JSON encoder
-// can inflate (an ampersand, which Marshal must not expand because it
-// writes with HTML escaping off, and quotes, which it doubles) produces
-// a document at most maxBaselineUnmarshalBytes bytes that Unmarshal
-// loads: the bound is derived from the caps and the length bounds
-// without an escape factor, counting only the exact doubling a quote or
-// a backslash undergoes.
-func TestBaselineMarshalAtCapsSizeBound(t *testing.T) {
-	b := NewBaseline(t0)
-	name := func(u int) string {
-		return strings.Repeat("&", 14) + `"` + fmt.Sprintf("%03d", u) + `"` + strings.Repeat("x", 45)
+// The most a user name byte grows under Marshal, measured on the real
+// encoder: a quote and a backslash double, U+2028 and U+2029 (3 bytes)
+// are written as a six-byte escape so they double too, and the HTML
+// characters and multi-byte text do not grow. The size bound is
+// derived from "no more than doubles".
+func TestBaselineUserNameGrowth(t *testing.T) {
+	plain := func(name string) int {
+		b := NewBaseline(t0)
+		if !b.AddIP(name, "1.2.3.4") {
+			t.Fatalf("name %q refused", name)
+		}
+		raw, err := b.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(raw)
 	}
-	entry := func(e int) string {
-		return fmt.Sprintf("%0*d", maxBaselineEntryLen, e)
+	base := plain(strings.Repeat("x", maxBaselineUserLen))
+	cases := []struct {
+		name  string
+		user  string
+		extra int
+	}{
+		{"quote", strings.Repeat(`"`, maxBaselineUserLen), maxBaselineUserLen},
+		{"backslash", strings.Repeat(`\`, maxBaselineUserLen), maxBaselineUserLen},
+		{"line separator", strings.Repeat("\u2028", 21) + "x", 63},
+		{"paragraph separator", strings.Repeat("\u2029", 21) + "x", 63},
+		{"html characters", strings.Repeat("&<>", 21) + "x", 0},
+		{"multi-byte text", strings.Repeat("\u00e9", 32), 0},
 	}
-	for u := 0; u < BaselineMaxUsers; u++ {
-		for e := 0; e < BaselineEntriesPerUser; e++ {
-			var ok bool
-			if e%2 == 0 {
-				ok = b.AddIP(name(u), entry(e))
-			} else {
-				ok = b.AddKey(name(u), entry(e))
-			}
-			if !ok {
-				t.Fatalf("entry %d of user %d refused below the cap", e, u)
-			}
+	for _, tc := range cases {
+		if len(tc.user) != maxBaselineUserLen {
+			t.Fatalf("%s: test name is %d bytes", tc.name, len(tc.user))
+		}
+		if got := plain(tc.user) - base; got != tc.extra {
+			t.Errorf("%s: the encoded name grows by %d bytes, want %d", tc.name, got, tc.extra)
 		}
 	}
-	if len(name(0)) != maxBaselineUserLen || len(entry(0)) != maxBaselineEntryLen {
-		t.Fatalf("test fields are not maximum length: %d %d", len(name(0)), len(entry(0)))
+}
+
+// The true worst case of the load bound: the most users, every name
+// 64 bytes of quotes and backslashes (each byte written as two), the
+// most entries per user, each 64 bytes (a real canonical address with
+// the longest zone, or a base64 key), and the longest learning_start
+// (nanoseconds and a zone offset) with learning_done set. Its marshal
+// must fit maxBaselineUnmarshalBytes and load, and with one list empty
+// (addresses only, keys only: the layouts with the most separators) it
+// must come within one byte per user (BaselineMaxUsers bytes) of the
+// bound, so a bound shaved or padded by one unit of any per-user or
+// per-entry term of the formula fails this test rather than only a
+// restatement of it.
+func TestBaselineMarshalAtCapsSizeBound(t *testing.T) {
+	start := time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", 12*3600+45*60))
+	name := func(u int) string {
+		var sb strings.Builder
+		for i := 0; i < maxBaselineUserLen; i++ {
+			if i < 8 && u>>i&1 == 1 {
+				sb.WriteByte('\\')
+			} else {
+				sb.WriteByte('"')
+			}
+		}
+		return sb.String()
 	}
-	raw, err := b.Marshal()
-	if err != nil {
-		t.Fatal(err)
+	addr := func(e int) string {
+		const head = "fe80::1%"
+		return head + fmt.Sprintf("%0*d", maxBaselineEntryLen-len(head), e)
 	}
-	if len(raw) > maxBaselineUnmarshalBytes {
-		t.Fatalf("a marshal at the caps must fit the bound: %d bytes > %d", len(raw), maxBaselineUnmarshalBytes)
+	key := func(e int) string {
+		return fmt.Sprintf("%0*d", maxBaselineEntryLen, e)
 	}
-	again, err := Unmarshal(raw)
-	if err != nil {
-		t.Fatalf("a marshal at the caps must load: %d bytes, %v", len(raw), err)
+	if len(name(0)) != maxBaselineUserLen || len(addr(0)) != maxBaselineEntryLen || len(key(0)) != maxBaselineEntryLen {
+		t.Fatalf("test fields are not maximum length: %d %d %d", len(name(0)), len(addr(0)), len(key(0)))
 	}
-	if !again.KnownIP(name(0), entry(0)) || !again.KnownKey(name(0), entry(1)) {
-		t.Fatal("first user lost")
+	layouts := []struct {
+		name string
+		isIP func(e int) bool
+	}{
+		{"addresses only", func(int) bool { return true }},
+		{"keys only", func(int) bool { return false }},
+		{"half and half", func(e int) bool { return e%2 == 0 }},
 	}
-	if !again.KnownIP(name(BaselineMaxUsers-1), entry(BaselineEntriesPerUser-2)) ||
-		!again.KnownKey(name(BaselineMaxUsers-1), entry(BaselineEntriesPerUser-1)) {
-		t.Fatal("last user lost")
-	}
-	again.mu.Lock()
-	n := len(again.users)
-	again.mu.Unlock()
-	if n != BaselineMaxUsers {
-		t.Fatalf("%d users loaded", n)
+	for _, lay := range layouts {
+		t.Run(lay.name, func(t *testing.T) {
+			b := NewBaseline(start)
+			b.MarkLearningDone()
+			for u := 0; u < BaselineMaxUsers; u++ {
+				for e := 0; e < BaselineEntriesPerUser; e++ {
+					var ok bool
+					if lay.isIP(e) {
+						ok = b.AddIP(name(u), addr(e))
+					} else {
+						ok = b.AddKey(name(u), key(e))
+					}
+					if !ok {
+						t.Fatalf("entry %d of user %d refused below the cap", e, u)
+					}
+				}
+			}
+			raw, err := b.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			slack := maxBaselineUnmarshalBytes - len(raw)
+			if slack < 0 {
+				t.Fatalf("a marshal at the caps must fit the bound: %d bytes > %d", len(raw), maxBaselineUnmarshalBytes)
+			}
+			if lay.name != "half and half" && slack >= BaselineMaxUsers {
+				t.Fatalf("the bound is %d bytes above the worst case (%d bytes of %d): a term of its derivation is too large", slack, len(raw), maxBaselineUnmarshalBytes)
+			}
+			again, err := Unmarshal(raw)
+			if err != nil {
+				t.Fatalf("a marshal at the caps must load: %d bytes, %v", len(raw), err)
+			}
+			if !again.LearningDone() || !again.LearningStart().Equal(start) {
+				t.Fatalf("learning state lost: %v %v", again.LearningDone(), again.LearningStart())
+			}
+			known := func(user string, e int) bool {
+				if lay.isIP(e) {
+					return again.KnownIP(user, addr(e))
+				}
+				return again.KnownKey(user, key(e))
+			}
+			lastU := BaselineMaxUsers - 1
+			for _, u := range []int{0, 1, lastU} {
+				for _, e := range []int{0, 1, BaselineEntriesPerUser - 2, BaselineEntriesPerUser - 1} {
+					if !known(name(u), e) {
+						t.Fatalf("entry %d of user %d was lost", e, u)
+					}
+				}
+			}
+			again.mu.Lock()
+			n := len(again.users)
+			again.mu.Unlock()
+			if n != BaselineMaxUsers {
+				t.Fatalf("%d users loaded", n)
+			}
+			t.Logf("%s: %d bytes, bound %d, slack %d", lay.name, len(raw), maxBaselineUnmarshalBytes, slack)
+		})
 	}
 }

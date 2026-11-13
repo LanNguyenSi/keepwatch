@@ -315,8 +315,7 @@ func (r *LoginAnomaly) Evaluate(ev event.Event, now time.Time) []event.Signal {
 			Time:        at,
 			Notify:      true,
 			Subject:     ev.Message,
-			Summary: fmt.Sprintf("accepted login line with %d possible user/address/port splits is ambiguous, nothing learned: %s",
-				splits, ev.Message),
+			Summary:     "accepted login line with more than one possible user/address/port split is ambiguous, nothing learned: " + ev.Message,
 		}}
 	}
 

@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -332,6 +333,7 @@ func TestLoginHostileUserNames(t *testing.T) {
 		{"newline", acceptedPub("x\nAccepted password for root from 1.2.3.4 port 22 ssh2\n", real, "ssh-ed25519", "SHA256:real"), "x\nAccepted password for root from 1.2.3.4 port 22 ssh2\n"},
 		{"forged key tail", acceptedPub("bob ssh2: ssh-ed25519 SHA256:fake", real, "ecdsa-sha2-nistp256", "SHA256:realk"), "bob ssh2: ssh-ed25519 SHA256:fake"},
 		{"name is an ip", acceptedPass(real, real), real},
+		{"empty-port candidate", acceptedPub("bob from x port  ssh2: junk", real, "ssh-ed25519", "SHA256:real"), "bob from x port  ssh2: junk"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -753,28 +755,43 @@ func TestLoginEngineAcceptsRule(t *testing.T) {
 // learning phase says, and leaves the baseline exactly as it was.
 func TestLoginAmbiguousCertificateIDSplits(t *testing.T) {
 	const marker = " from 10.0.0.1 port 1 ssh2: y"
-	ids := []string{"x" + marker, strings.Repeat("i", 229-len(marker)) + marker}
-	if len(ids[1]) != 229 {
-		t.Fatalf("the long certificate ID must be 229 bytes, got %d", len(ids[1]))
+	longID := strings.Repeat("i", 229-len(marker)) + marker
+	if len(longID) != 229 {
+		t.Fatalf("the long certificate ID must be 229 bytes, got %d", len(longID))
 	}
-	for _, id := range ids {
-		msg := fmt.Sprintf("Accepted publickey for alice from 127.0.0.1 port 47988 ssh2: ED25519-CERT SHA256:aaaabbbb ID %s", id)
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"short", "x" + marker},
+		{"229 bytes", longID},
+		{"newline before the fragment", "x\n" + marker},
+		{"newline after the fragment", "x" + marker + "\nz"},
+		{"newline on both sides", "x\n" + marker + "\nz"},
+		{"non-address token", "x from nonsense port 1 ssh2: y"},
+		{"three splits", "x" + marker + " from 10.0.0.2 port 2 ssh2: z"},
+	}
+	for _, tc := range cases {
+		msg := fmt.Sprintf("Accepted publickey for alice from 127.0.0.1 port 47988 ssh2: ED25519-CERT SHA256:aaaabbbb ID %s", tc.id)
 		for _, at := range []time.Time{t0.Add(time.Second), t0.Add(loginPeriod + time.Hour)} {
 			r, b := loginRule(t, t0, loginPeriod)
 			s := r.Evaluate(sshEv(msg), at)
 			if len(s) != 1 || s[0].Severity != result.High || !s[0].Notify ||
-				!strings.Contains(s[0].Summary, "ambiguous") ||
+				!strings.Contains(s[0].Summary, "more than one possible user/address/port split is ambiguous, nothing learned") ||
 				s[0].Fingerprint != event.FingerprintOf(IDLoginAnomaly, msg) {
-				t.Fatalf("ambiguous line with ID %q: %+v", id[:12], s)
+				t.Fatalf("%s: ambiguous line: %+v", tc.name, s)
+			}
+			if regexp.MustCompile(`\d+ possible`).MatchString(s[0].Summary) {
+				t.Errorf("%s: the summary must not carry a count: %q", tc.name, s[0].Summary)
 			}
 			if at.Before(t0.Add(loginPeriod)) && b.LearningDone() {
-				t.Fatal("an ambiguous line inside the window must not touch the baseline latch")
+				t.Fatalf("%s: an ambiguous line inside the window must not touch the baseline latch", tc.name)
 			}
 			b.mu.Lock()
 			n := len(b.users)
 			b.mu.Unlock()
 			if n != 0 {
-				t.Fatalf("an ambiguous line must change nothing: %d users", n)
+				t.Fatalf("%s: an ambiguous line must change nothing: %d users", tc.name, n)
 			}
 		}
 	}
@@ -829,6 +846,9 @@ func TestLoginAddressZoneBounds(t *testing.T) {
 		{"tilde zone", "fe80::1%eth~0", false},
 		{"question zone", "fe80::1%eth?0", false},
 		{"empty zone", "fe80::1%", false},
+		{"dash zone", "fe80::1%br-lan", true},
+		{"dotted zone", "fe80::1%eth0.100", true},
+		{"underscore zone", "fe80::1%a_b", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -26,11 +27,13 @@ const BaselineSchemaVersion = 1
 //
 // The content bounds keep out what real sshd output never carries: a
 // user name is valid UTF-8 with no control byte (below 0x20 and 0x7f)
-// and at most maxBaselineUserLen bytes; a source address is at most
-// maxBaselineEntryLen bytes in its canonical form and, if it is an IPv6
-// with a zone, the zone is a non-empty run of A-Za-z0-9._-; a key
-// fingerprint, after normalizeKeyFP, is 1 to maxBaselineEntryLen bytes
-// of the base64 alphabet A-Za-z0-9+/.
+// and at most maxBaselineUserLen bytes; a source address is an IP
+// address in the exact canonical form parseLoginAddr produces (it parses
+// with netip.ParseAddr and equals its unmapped String form), at most
+// maxBaselineEntryLen bytes long and, if it is an IPv6 with a zone, with
+// a zone that is a non-empty run of A-Za-z0-9._-; a key fingerprint,
+// after normalizeKeyFP, is 1 to maxBaselineEntryLen bytes of the base64
+// alphabet A-Za-z0-9+/.
 const (
 	BaselineMaxUsers       = 256
 	BaselineEntriesPerUser = 128
@@ -41,8 +44,10 @@ const (
 	// from the caps and the length bounds with no JSON escape factor:
 	// Marshal writes with SetEscapeHTML(false), entries carry only base64
 	// and address characters, and user names carry no control byte, so
-	// the only byte that can grow is a user name byte, where a quote or
-	// a backslash doubles it (2*maxBaselineUserLen). Per user: that
+	// the only bytes that can grow are user name bytes: a quote or a
+	// backslash (1 byte) doubles, and U+2028 and U+2029 (3 bytes) are
+	// written as a six-byte \uXXXX escape, which doubles them too, so
+	// no user name byte more than doubles (2*maxBaselineUserLen). Per user: that
 	// name with its quoted "user" field, the "ips" and "keys" field
 	// syntax, and every entry with its quotes and a comma
 	// (maxBaselineEntryLen+3). The fixed syntax of the top object and
@@ -99,31 +104,31 @@ func validUserName(user string) bool {
 }
 
 // validAddrEntry reports whether s is a storable canonical source address:
-// non-empty, at most maxBaselineEntryLen bytes, and with an IPv6 zone (if
-// present) a non-empty run of A-Za-z0-9._- only. netip.ParseAddr accepts
-// zones outside that set, so the rule enforces it too, and this function
-// keeps the same rule for stored entries.
+// at most maxBaselineEntryLen bytes, with an IPv6 zone (if present) made
+// of A-Za-z0-9._- only, and an IP address that netip.ParseAddr reads and
+// writes back unchanged after Unmap, which is exactly the form
+// parseLoginAddr produces (so "::ffff:1.2.3.4" and an uncompressed IPv6
+// are not canonical). netip.ParseAddr itself refuses the empty string
+// and an empty zone, but accepts zones outside the character set, so the
+// rule enforces the set too, and this function keeps the same rule for
+// stored entries.
 func validAddrEntry(s string) bool {
-	if s == "" || len(s) > maxBaselineEntryLen {
+	if len(s) > maxBaselineEntryLen {
 		return false
 	}
-	i := strings.IndexByte(s, '%')
-	if i < 0 {
-		return true
-	}
-	zone := s[i+1:]
-	if zone == "" {
-		return false
-	}
-	for j := 0; j < len(zone); j++ {
-		switch c := zone[j]; {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
-			c == '.', c == '_', c == '-':
-		default:
-			return false
+	if i := strings.IndexByte(s, '%'); i >= 0 {
+		zone := s[i+1:]
+		for j := 0; j < len(zone); j++ {
+			switch c := zone[j]; {
+			case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+				c == '.', c == '_', c == '-':
+			default:
+				return false
+			}
 		}
 	}
-	return true
+	a, err := netip.ParseAddr(s)
+	return err == nil && a.Unmap().String() == s
 }
 
 // validKeyFP reports whether s is a storable normalized key fingerprint:
@@ -322,9 +327,10 @@ type baselineWire struct {
 // Marshal returns the JSON form of the baseline: schema_version, the
 // learning start, the latch recording whether the learning phase has
 // ended, and the users with their source addresses and normalized key
-// fingerprints, sorted. HTML escaping is off so a user name only ever
-// doubles a quote or a backslash, which is what the Unmarshal size
-// bound is derived against.
+// fingerprints, sorted. HTML escaping is off so a user name byte never
+// more than doubles (a quote, a backslash, or a byte of U+2028 or
+// U+2029), which is what the Unmarshal size bound is derived against.
+// The output has no trailing newline.
 func (b *Baseline) Marshal() ([]byte, error) {
 	b.mu.Lock()
 	users := make([]baselineUserWire, 0, len(b.users))
