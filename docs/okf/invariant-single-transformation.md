@@ -3,7 +3,7 @@ type: invariant
 title: Host text is transformed once, at the last moment
 description: Probes hand on the raw host text; exactly one transformation (redact, escape, cut) is applied, and only where the text leaves the program or is stored. Which consumers apply it, and which deliberately do not.
 tags: [redaction, output-safety, state, invariants]
-timestamp: 2026-11-12T14:30:28Z
+timestamp: 2026-11-13T18:05:41Z
 sources:
   - internal/result/result.go
   - internal/probes/run.go

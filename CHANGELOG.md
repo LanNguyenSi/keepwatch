@@ -79,20 +79,26 @@ report.
   choose inside a genuine line (a cgroup name, a command name, an ssh user
   name) does not decide which unit or address a signal names. They keep a
   capped amount of state per rule.
+- Streaming execution for long-running commands such as `journalctl --follow`:
+  stdout is delivered line by line to a callback with a per-line cap, an idle
+  and a total timeout, and cancellation; after the program exits, what it left
+  in a pipe of the default size is still delivered in full, while output that
+  a leftover process keeps writing is cut after a grace period or a pipe's
+  worth of bytes, and a stream cut short is reported as incomplete instead of
+  silently losing lines.
 - A login rule for the daemon: successful sshd logins (every `Accepted
-  <method> ... ssh2` line, whichever method sshd printed, with the same
-  sender trust gate as the brute force rule) are learned for a
-  configurable learning period as info findings that do not notify; after
-  it a login from a source address or key the rule does not know raises
-  one high notifying signal and is then added, so it alerts once. A
-  certificate publickey line is read to the user key's fingerprint (the
-  ID, serial and CA parts are ignored), and a line whose key part does
-  not parse (an MD5 fingerprint, for instance) is checked by source
-  address only. Keys from `authorized_keys.expected` are given to the
-  rule as an input and count as known from the start without entering
-  the baseline; once the learning period has elapsed the baseline records
-  that, and a clock step back does not reopen the phase. The baseline has
-  a versioned, capped JSON form so the learning can live in the state
+  <method> ... ssh2` line, whichever method sshd printed, with the same sender
+  trust gate as the brute force rule) are learned for a configurable learning
+  period as info findings that do not notify; after it a login from a source
+  address or key the rule does not know raises one high notifying signal and
+  is then added, so it alerts once. A certificate publickey line is read to
+  the user key's fingerprint (the ID, serial and CA parts are ignored), and a
+  line whose key part does not parse (an MD5 fingerprint, for instance) is
+  checked by source address only. Keys from `authorized_keys.expected` are
+  given to the rule as an input and count as known from the start without
+  entering the baseline; once the learning period has elapsed the baseline
+  records that, and a clock step back does not reopen the phase. The baseline
+  has a versioned, capped JSON form so the learning can live in the state
   directory, and its fingerprint comparison treats the config and log
   spellings of a `SHA256:` fingerprint as equal.
 

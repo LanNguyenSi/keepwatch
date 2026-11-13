@@ -4,6 +4,17 @@
 
 ## 2026-11-13
 
+- Re-verified `module-execx.md` and `limit-known-limits.md` after the line
+  reader buffer size in `stream.go` became a named constant; no cited line
+  moved and no claim changed.
+- Re-verified `module-execx.md`, `limit-known-limits.md`,
+  `invariant-single-transformation.md` and `overview-run.md` after
+  `internal/execx` gained `Stream`: line-by-line delivery with a per-line cap,
+  idle and total timeouts, a post-exit budget that counts only bytes read
+  after the exit was seen (bounded by a pipe's worth, 16 pages) and only time
+  outside the callback, and a single process-group signal. The cited lines
+  in `stream.go` and `execx.go` were checked against the code; the new pipe
+  size limit is recorded in the known limits.
 - Re-verified `invariant-config-trust-walk.md` after `internal/config` gained
   the strictly validated `watch:` section and `docs/configuration.md` its
   reference. The section has no path keys, so the trust walk is unchanged;

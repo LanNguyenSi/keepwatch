@@ -3,7 +3,7 @@ type: limit
 title: What the guarantees do not cover
 description: The known limits of the trust, redaction and coordination machinery, collected with the code or reference line that states each, so a reviewer can tell a gap from a promise.
 tags: [limits, trust, redaction, concurrency]
-timestamp: 2026-11-12T14:30:28Z
+timestamp: 2026-11-13T18:21:13Z
 sources:
   - internal/cli/report.go
   - internal/config/walk.go
@@ -14,6 +14,7 @@ sources:
   - internal/probes/sshd.go
   - internal/probes/listeners.go
   - internal/execx/real.go
+  - internal/execx/stream.go
   - internal/doctor/doctor.go
   - internal/history/history.go
   - docs/running.md
@@ -95,6 +96,32 @@ adjacent ones stop short.
   directories being root-owned; Go has no `fexecve`, so anyone who could
   write into those directories still races the final exec
   (`internal/execx/real.go:162-163#"Go has no fexecve"`).
+- **The process-group kill does not reach a new session.** `Run` and `Stream`
+  SIGKILL the child's process group when they return
+  (`internal/execx/stream.go:179#"cleanup := func() {"`), which covers
+  everything the child left in that group. A grandchild that starts a new
+  session (`setsid`) and ignores SIGPIPE is outside the group, survives the
+  call and keeps holding stdout and stderr. A silent holder makes both return
+  after their grace period with `IOIncomplete` set instead of waiting for it;
+  a holder that keeps writing is cut by `Stream`'s post-exit budget or by its
+  byte bound (a volume, not a time: behind a slow callback a flood of short
+  lines lasts for as many calls as the bound has lines, unless the caller set
+  a `Timeout`), and `Run` stops at its grace period whatever the holder
+  writes. The process itself keeps running until it ends on its own. Pinned
+  for `Stream` by `TestStreamEscapeeHoldingPipesIsBounded` and
+  `TestStreamChattyEscapeeAfterExitIsBounded`.
+- **A fork can outlive the group kill on non-linux hosts.** The group is
+  signalled once, with no second signal afterwards, so a child that forks at
+  the moment of the kill can leave a member of the group behind. This has
+  been observed on darwin under load and not on linux. The product targets
+  linux; development hosts on darwin can see an orphan after a cancelled
+  stream.
+- **A stream's backlog bound assumes a pipe of the default size.** After a
+  streamed program exited, `Stream` reads at most 16 pages from its stdout
+  (`internal/execx/stream.go:28#"var postExitMaxBytes"`), which is what such
+  a pipe can still hold. A program that enlarged its own stdout pipe and
+  exits with more than that unread loses the rest; the stream is then
+  flagged `IOIncomplete`, never silently short.
 - **Drop-ins are counted, not read.** `doctor` judges a drop-in's existence
   and location, never its content, and says so in the finding
   (`docs/install.md:371#"judged by its existence"`,

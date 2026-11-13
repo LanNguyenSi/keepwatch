@@ -70,3 +70,80 @@ type Opts struct {
 	Env []string
 	Dir string
 }
+
+// DefaultMaxLine is the longest stdout line, in bytes and without its
+// newline, that Stream delivers when StreamOpts.MaxLine is zero.
+const DefaultMaxLine = 64 << 10
+
+// ErrIdleTimeout means a Stream produced no stdout line for
+// StreamOpts.IdleTimeout. It is opt-in: no default idle limit exists.
+var ErrIdleTimeout = errors.New("execx: no output within the idle timeout")
+
+// Streamer runs one long-lived program and hands its stdout to the caller
+// line by line while it runs. Run-to-completion callers use Runner instead.
+//
+// Stream returns when the program has exited and its stdout is drained, when
+// ctx ends (it then returns ctx.Err()), when onLine returns an error (that
+// error is returned), or when an opt-in timeout fires. Unless the program
+// ended by itself, it is killed first. A non-zero exit status is not an
+// error; it is reported in StreamResult.ExitCode.
+//
+// onLine runs on the goroutine that called Stream, one line at a time, in
+// order. The slice it receives is its own copy. While onLine runs, ctx
+// cancellation and timeouts cannot interrupt it, so it must not block.
+type Streamer interface {
+	Stream(ctx context.Context, argv []string, opts StreamOpts, onLine func([]byte) error) (StreamResult, error)
+}
+
+// StreamOpts tunes a single stream. Zero values select the defaults. Unlike
+// Opts there is no default Timeout: a follow stream is meant to run until the
+// caller cancels it.
+type StreamOpts struct {
+	// MaxLine is the longest line (without its newline) that is delivered.
+	// A longer line is not delivered at all, not even cut: it is dropped,
+	// counted in StreamResult.DroppedLines, and the stream continues with
+	// the next line. Zero selects DefaultMaxLine.
+	MaxLine int
+	// MaxStderr caps the stderr kept in StreamResult; the rest is read and
+	// discarded so the child never blocks on a full pipe. Zero selects
+	// DefaultMaxOutput.
+	MaxStderr int64
+	// Timeout, when positive, bounds the whole stream and ends it with
+	// ErrTimeout. Zero means no limit.
+	Timeout time.Duration
+	// IdleTimeout, when positive, ends the stream with ErrIdleTimeout if no
+	// stdout line arrives for that long (dropped lines count as arrivals).
+	// It measures time spent waiting for the program, not time spent inside
+	// onLine, and it stays armed until the program has exited, also after
+	// its stdout was closed. Zero means no limit.
+	IdleTimeout time.Duration
+	// Env and Dir behave as in Opts.
+	Env []string
+	Dir string
+}
+
+// StreamResult is the outcome of a stream.
+type StreamResult struct {
+	// ExitCode is the exit status; -1 when the program was killed by a
+	// signal (see Signaled) or the stream ended before it exited.
+	ExitCode int
+	Signaled bool
+	// Stderr holds at most StreamOpts.MaxStderr bytes of the program's stderr.
+	Stderr          []byte
+	StderrTruncated bool
+	// DroppedLines counts stdout lines longer than StreamOpts.MaxLine that
+	// were not delivered.
+	DroppedLines int
+	// IOIncomplete is set when the program exited but the output pipes were
+	// still open (a leftover child held them) and had to be cut: lines or
+	// stderr may be missing. The cut happens when the wall time since the
+	// exit, minus the time spent inside onLine since then, reaches the grace
+	// period Run uses, or when more stdout than a pipe of the default size
+	// holds (16 pages, 64 KiB with 4 KiB pages) was read after the exit was
+	// seen. What the program itself left in such a pipe is delivered in
+	// full, however slow onLine is; a program that enlarged its stdout pipe
+	// can lose the rest of a larger backlog this way. A successful exit also
+	// returns ErrIOTimeout, as Run does.
+	IOIncomplete bool
+	Duration     time.Duration
+}
