@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -157,8 +158,8 @@ func TestApplyReopensClosed(t *testing.T) {
 			setState(t, s, id, StateClosed)
 			t1 := t0.Add(time.Hour)
 			r := mustApply(t, s, sig(fp(1), c.again, t1), disp)
-			if r.Outcome != Reopened || r.Notify != c.wantNotify {
-				t.Fatalf("outcome %v notify %v", r.Outcome, r.Notify)
+			if r.Outcome != Reopened || r.Notify != c.wantNotify || r.Pending {
+				t.Fatalf("outcome %v notify %v pending %v", r.Outcome, r.Notify, r.Pending)
 			}
 			in := r.Incident
 			if in.State != StateOpen || in.ReopenCount != 1 || in.Count != 2 || !in.LastSeen.Equal(t1) ||
@@ -168,7 +169,7 @@ func TestApplyReopensClosed(t *testing.T) {
 			// A second round counts again.
 			setState(t, s, id, StateClosed)
 			r = mustApply(t, s, sig(fp(1), c.again, t1.Add(time.Hour)), disp)
-			if r.Outcome != Reopened || r.Incident.ReopenCount != 2 {
+			if r.Outcome != Reopened || r.Incident.ReopenCount != 2 || r.Pending {
 				t.Fatalf("second reopen: %v %+v", r.Outcome, r.Incident)
 			}
 		})
@@ -188,7 +189,7 @@ func TestNotifyOnlyForOpenedAndReopened(t *testing.T) {
 		t.Fatal("update of an acked incident notified")
 	}
 	setState(t, s, id, StateClosed)
-	if r := mustApply(t, s, sig(fp(1), true, t0), disp); !r.Notify || r.Outcome != Reopened {
+	if r := mustApply(t, s, sig(fp(1), true, t0), disp); !r.Notify || r.Outcome != Reopened || r.Pending {
 		t.Fatalf("reopen: %+v", r)
 	}
 }
@@ -768,6 +769,40 @@ func TestCapFloodOfCriticalOpenRefusesLow(t *testing.T) {
 	}
 }
 
+func TestCapFullOfOpenHighRefusesMedium(t *testing.T) {
+	// Intended behaviour: a full store of open high incidents refuses a
+	// medium signal even when it asks for notification; the daemon handles
+	// the refused signal later.
+	d, p := openDir(t)
+	seedFn(t, p, func(i int) wireItem {
+		return sev(item(fmt.Sprintf("seed%03d", i), fp(i+1), StateOpen, t0), result.High, StateOpen, false, t0.Add(time.Duration(i)*time.Second))
+	})
+	s, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(p, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeList := s.List()
+	r, err := s.Apply(sig(fp(10000), true, t0), disp) // medium, notify
+	if !errors.Is(err, ErrFull) || r.Outcome != Refused || !r.Incident.Notify ||
+		r.Incident.Severity != result.Medium || r.Incident.Fingerprint != fp(10000) || len(r.Evicted) != 0 {
+		t.Fatalf("result = %+v, err = %v", r, err)
+	}
+	after, err := os.ReadFile(filepath.Join(p, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a refused signal changed the file")
+	}
+	if len(s.List()) != MaxIncidents || !reflect.DeepEqual(s.List(), beforeList) || len(s.retired) != 0 {
+		t.Fatal("a refused signal changed the store")
+	}
+}
+
 func TestCapEvictionPriority(t *testing.T) {
 	// Index: severity, state, notify, last-seen offset (minutes).
 	type spec struct {
@@ -871,14 +906,17 @@ func TestIdleCloseBoundaryAndStates(t *testing.T) {
 			t.Fatalf("%s is %s", id, in.State)
 		}
 	}
-	// A second sweep finds nothing and a zero time closes nothing.
+	// A second sweep finds nothing and a zero time is refused.
 	if got, err := s.Sweep(t0.Add(365 * 24 * time.Hour)); err != nil || len(got) != 0 {
 		t.Fatalf("second sweep: %v %v", got, err)
 	}
 	s3, _, _ := newStore(t)
-	mustApply(t, s3, sig(fp(1), false, t0), disp)
-	if got, err := s3.Sweep(time.Time{}); err != nil || len(got) != 0 {
+	id3 := mustApply(t, s3, sig(fp(1), false, t0), disp).Incident.ID
+	if got, err := s3.Sweep(time.Time{}); !errors.Is(err, ErrInvalidSignal) || len(got) != 0 {
 		t.Fatalf("zero now: %v %v", got, err)
+	}
+	if in, _ := s3.Get(id3); in.State != StateOpen {
+		t.Fatalf("a refused sweep changed the store: %+v", in)
 	}
 }
 
@@ -941,7 +979,7 @@ func TestApplyIdleClosesBeforeLookupSoTheSameIncidentReopens(t *testing.T) {
 	s, _, _ := newStore(t)
 	id := mustApply(t, s, sig(fp(1), true, t0), disp).Incident.ID
 	r := mustApply(t, s, sig(fp(1), true, t0.Add(DefaultIdleClose+time.Hour)), disp)
-	if r.Outcome != Reopened || !r.Notify || len(r.AutoClosed) != 1 || r.AutoClosed[0].ID != id || r.Incident.ReopenCount != 1 {
+	if r.Outcome != Reopened || !r.Notify || r.Pending || len(r.AutoClosed) != 1 || r.AutoClosed[0].ID != id || r.Incident.ReopenCount != 1 {
 		t.Fatalf("result = %+v", r)
 	}
 	// A signal inside the period does not close or reopen.
@@ -1017,7 +1055,7 @@ func TestReopenClearsNotifiedAt(t *testing.T) {
 	}
 	setState(t, s, id, StateClosed)
 	r := mustApply(t, s, sig(fp(1), true, t0.Add(time.Hour)), disp)
-	if r.Outcome != Reopened || !r.Incident.NotifiedAt.IsZero() {
+	if r.Outcome != Reopened || !r.Incident.NotifiedAt.IsZero() || r.Pending {
 		t.Fatalf("reopen = %+v", r)
 	}
 	// The reopen notification is lost too: the replay is pending.
@@ -1102,6 +1140,51 @@ func TestRetiredIDsAreNotReused(t *testing.T) {
 	}
 }
 
+func TestIDOfSameApplyEvictionIsNotReused(t *testing.T) {
+	// A full store whose eviction victim has a known id whose hex prefix is
+	// "deadbeef"; the new fingerprint shares that prefix. The id just
+	// retired by this very Apply must not be handed to the new incident.
+	d, p := openDir(t)
+	victim := event.Fingerprint("deadbeef0" + strings.Repeat("0", 55))
+	seedFn(t, p, func(i int) wireItem {
+		it := sev(item(fmt.Sprintf("seed%03d", i), fp(i+1), StateClosed, t0), result.Medium, StateClosed, false, t0)
+		if i == MaxIncidents-1 {
+			// The oldest closed one: the eviction victim, id "deadbeef".
+			it = sev(item("deadbeef", victim, StateClosed, t0), result.Medium, StateClosed, false, t0.Add(-time.Hour))
+		}
+		return it
+	})
+	s, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := mustApply(t, s, sig(event.Fingerprint("deadbeef1"+strings.Repeat("0", 55)), false, t0), disp)
+	if r.Outcome != Opened || len(r.Evicted) != 1 || r.Evicted[0].ID != "deadbeef" {
+		t.Fatalf("result = %+v", r)
+	}
+	if r.Incident.ID == "deadbeef" || len(r.Incident.ID) <= len("deadbeef") {
+		t.Fatalf("the new incident took the id evicted in this Apply: %q", r.Incident.ID)
+	}
+	retired := false
+	for _, id := range s.retired {
+		if id == "deadbeef" {
+			retired = true
+		}
+	}
+	if !retired {
+		t.Fatalf("the evicted id is not in the retired list: %v", s.retired)
+	}
+	// The written file is valid: Open refuses a retired id that is in use,
+	// so a successful reload proves the evicted id was not handed out.
+	s2, err := Open(d)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := s2.Get("deadbeef"); ok {
+		t.Fatal("the evicted incident came back under the new fingerprint")
+	}
+}
+
 func TestRetiredIDsAreBounded(t *testing.T) {
 	r := []string{}
 	for i := 0; i < MaxRetiredIDs+5; i++ {
@@ -1133,6 +1216,114 @@ func TestApplyRejectsUnknownSeverity(t *testing.T) {
 	for _, sv := range result.Severities {
 		if _, err := s.Apply(sigSev(fp(2), sv, false, t0), disp); err != nil {
 			t.Fatalf("%q: %v", sv, err)
+		}
+	}
+}
+
+func TestApplyRejectsUnusableTime(t *testing.T) {
+	cases := []struct {
+		name string
+		at   time.Time
+		ok   bool // true: the time must be accepted
+	}{
+		{"zero", time.Time{}, false},
+		{"year 10000", time.Date(10000, 1, 2, 3, 4, 5, 0, time.UTC), false},
+		{"year 0", time.Date(0, 1, 2, 3, 4, 5, 0, time.UTC), false},
+		{"year 1, not zero", time.Date(1, 6, 15, 12, 0, 0, 0, time.UTC), true},
+		{"year 9999", time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, d, p := newStore(t)
+			id := mustApply(t, s, sig(fp(1), false, t0), disp).Incident.ID
+			before, err := os.ReadFile(filepath.Join(p, FileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeList := s.List()
+			// A new and a known fingerprint both judge the time first.
+			for _, f := range []event.Fingerprint{fp(2), fp(1)} {
+				_, err := s.Apply(sig(f, false, c.at), disp)
+				if c.ok {
+					if err != nil {
+						t.Fatalf("%s: Apply: %v", f, err)
+					}
+					continue
+				}
+				if !errors.Is(err, ErrInvalidSignal) {
+					t.Fatalf("%s: err = %v, want ErrInvalidSignal", f, err)
+				}
+			}
+			if !c.ok {
+				after, err := os.ReadFile(filepath.Join(p, FileName))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) {
+					t.Fatal("a rejected time changed the file")
+				}
+				if !reflect.DeepEqual(s.List(), beforeList) {
+					t.Fatalf("a rejected time changed the store: %+v", s.List())
+				}
+			} else if _, ok := s.Get(id); !ok {
+				t.Fatal("the incident of the usable time is missing")
+			}
+			if s2, err := Open(d); err != nil {
+				t.Fatalf("reload: %v", err)
+			} else if _, ok := s2.Get(id); !ok {
+				t.Fatal("the incident is not persisted")
+			}
+		})
+	}
+}
+
+func TestMarkNotifiedRejectsUnusableTime(t *testing.T) {
+	for _, at := range []time.Time{time.Time{}, time.Date(10000, 1, 2, 3, 4, 5, 0, time.UTC), time.Date(0, 1, 2, 3, 4, 5, 0, time.UTC)} {
+		s, d, p := newStore(t)
+		id := mustApply(t, s, sig(fp(1), true, t0), disp).Incident.ID
+		before, err := os.ReadFile(filepath.Join(p, FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.MarkNotified(id, at); !errors.Is(err, ErrInvalidSignal) {
+			t.Fatalf("MarkNotified(%v): err = %v, want ErrInvalidSignal", at, err)
+		}
+		after, err := os.ReadFile(filepath.Join(p, FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("MarkNotified(%v) changed the file", at)
+		}
+		if in, _ := s.Get(id); !in.NotifiedAt.IsZero() {
+			t.Fatalf("MarkNotified(%v) changed the store: %+v", at, in)
+		}
+		d.Close()
+	}
+}
+
+func TestSweepRejectsUnusableTime(t *testing.T) {
+	for _, now := range []time.Time{time.Time{}, time.Date(10000, 1, 2, 3, 4, 5, 0, time.UTC), time.Date(0, 1, 2, 3, 4, 5, 0, time.UTC)} {
+		s, _, p := newStore(t)
+		id := mustApply(t, s, sig(fp(1), false, t0), disp).Incident.ID
+		before, err := os.ReadFile(filepath.Join(p, FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The time is judged before any incident is looked at: even the
+		// zero time, which would close nothing anyway, is refused.
+		if got, err := s.Sweep(now); err == nil || !errors.Is(err, ErrInvalidSignal) || len(got) != 0 {
+			t.Fatalf("Sweep(%v) = %v, %v; want ErrInvalidSignal", now, got, err)
+		}
+		after, err := os.ReadFile(filepath.Join(p, FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("Sweep(%v) changed the file", now)
+		}
+		if in, _ := s.Get(id); in.State != StateOpen {
+			t.Fatalf("Sweep(%v) changed the store: %+v", now, in)
 		}
 	}
 }

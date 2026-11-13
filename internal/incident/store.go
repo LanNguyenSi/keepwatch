@@ -17,10 +17,10 @@ import (
 // FileName is the name of the incident file inside the state directory.
 const FileName = "incidents.json"
 
-// SchemaVersion is the version of the file format. Version 2 added the
-// retired id list and gave NotifiedAt a meaning for pending notifications;
-// a version 1 file is refused with ErrSchema (the file is left as it is), as
-// is any other version.
+// SchemaVersion is the version of the file format: incidents with their
+// state, counts and times, plus the retired id list, and NotifiedAt as the
+// time the notification of an incident was taken over. A file with another
+// schema_version is refused with ErrSchema (the file is left as it is).
 const SchemaVersion = 2
 
 // Limits.
@@ -61,7 +61,9 @@ var (
 	// returned with it has Outcome Refused; nothing was stored.
 	ErrFull = errors.New("incident store is full of more severe incidents")
 	// ErrInvalidSignal is returned by Apply for a signal without a usable
-	// fingerprint or with a severity that is not a known one.
+	// fingerprint, with a severity that is not a known one or with a time
+	// that cannot be recorded (see usableTime). MarkNotified and Sweep
+	// return it for such a time of their own.
 	ErrInvalidSignal = errors.New("invalid signal")
 	// ErrCorrupt is returned by Open for a file that is not valid incident
 	// data. The file is left as it is.
@@ -102,8 +104,9 @@ const (
 	Updated
 	// Reopened: a closed incident was opened again.
 	Reopened
-	// Refused: the store was full of incidents at least as severe as the
-	// signal's, so nothing was stored (returned together with ErrFull).
+	// Refused: the store was at MaxIncidents and every kept incident is
+	// more severe than the signal's, so nothing was stored (returned
+	// together with ErrFull).
 	Refused
 )
 
@@ -129,7 +132,10 @@ type Removed struct {
 	State State
 }
 
-// Result is what Apply returns.
+// Result is what Apply returns. Evicted and AutoClosed are reported only in
+// the result of the call that produced them: the change is saved before the
+// result is returned, so a caller that crashes before recording them loses
+// that report (the stored incidents themselves are not affected).
 type Result struct {
 	Outcome Outcome
 	// Incident is the incident after the change. With Outcome Refused it is
@@ -370,6 +376,18 @@ func validFingerprint(f event.Fingerprint) bool {
 	return true
 }
 
+// usableTime reports whether t is a time the store may record: not the zero
+// time, and with a year between 1 and 9999. Apply, MarkNotified and Sweep
+// reject any other time with ErrInvalidSignal rather than storing a time the
+// file format cannot round-trip.
+func usableTime(t time.Time) bool {
+	if t.IsZero() {
+		return false
+	}
+	y := t.Year()
+	return y >= 1 && y <= 9999
+}
+
 // idPrefix is the shortest id length tried.
 const idPrefix = 8
 
@@ -453,7 +471,8 @@ func victimBefore(a, b Incident) bool {
 
 // sweepList closes the open and acked incidents of list that have been idle
 // longer than idle at now, in place, and returns them. A non-positive idle
-// closes nothing, and neither does a zero now (it is before every LastSeen).
+// closes nothing. Its caller passes a usable time (see usableTime), so a
+// zero now cannot reach it.
 func sweepList(list []Incident, now time.Time, idle time.Duration) []Incident {
 	if idle <= 0 {
 		return nil
@@ -479,8 +498,12 @@ func addRetired(retired []string, id string) []string {
 // Sweep closes the open and acked incidents that have been idle longer than
 // the idle-close period at now (see WithIdleClose) and returns them, closed,
 // so that the caller can audit them. Apply does the same with the signal's
-// time; Sweep is for the daemon's idle moments.
+// time; Sweep is for the daemon's idle moments. A time that cannot be
+// recorded (see usableTime) is ErrInvalidSignal and closes nothing.
 func (s *Store) Sweep(now time.Time) ([]Incident, error) {
+	if !usableTime(now) {
+		return nil, fmt.Errorf("%w: sweep time %v is zero or outside the years 1 to 9999", ErrInvalidSignal, now)
+	}
 	list := append([]Incident(nil), s.list...)
 	closed := sweepList(list, now, s.idleClose)
 	if len(closed) == 0 {
@@ -516,13 +539,17 @@ func (s *Store) Sweep(now time.Time) ([]Incident, error) {
 // Result.Pending covers a notification that was not marked (see Pending). The
 // incident's Notify flag takes the signal's value when it is opened or
 // reopened and is left alone on an update. LastSeen never moves backwards.
-// A severity that is not one of result.Severities is ErrInvalidSignal.
+// A severity that is not one of result.Severities is ErrInvalidSignal, as is
+// a signal time that cannot be recorded (see usableTime).
 func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 	if !validFingerprint(sig.Fingerprint) {
 		return Result{}, fmt.Errorf("%w: fingerprint %q", ErrInvalidSignal, sig.Fingerprint)
 	}
 	if rank(sig.Severity) < 0 {
 		return Result{}, fmt.Errorf("%w: severity %q", ErrInvalidSignal, sig.Severity)
+	}
+	if !usableTime(sig.Time) {
+		return Result{}, fmt.Errorf("%w: signal time %v is zero or outside the years 1 to 9999", ErrInvalidSignal, sig.Time)
 	}
 	title := cut(display.Title, MaxTitleRunes)
 	summary := cut(display.Summary, MaxSummaryRunes)
@@ -596,10 +623,11 @@ func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 
 // MarkNotified records that the notification of the incident was taken over
 // at the given time (NotifiedAt), so that later updates are no longer
-// Pending. It is written like a transition.
+// Pending. It is written like a transition. A time that cannot be recorded
+// (see usableTime) is ErrInvalidSignal and changes nothing.
 func (s *Store) MarkNotified(id string, at time.Time) (Incident, error) {
-	if at.IsZero() {
-		return Incident{}, fmt.Errorf("%w: zero notification time", ErrInvalidSignal)
+	if !usableTime(at) {
+		return Incident{}, fmt.Errorf("%w: notification time %v is zero or outside the years 1 to 9999", ErrInvalidSignal, at)
 	}
 	for i, in := range s.list {
 		if in.ID != id {

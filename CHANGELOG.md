@@ -40,9 +40,10 @@ report.
   stays pending until it is marked as sent. Incidents live in `incidents.json`
   in the state directory (versioned, written atomically, at most 500). Open or
   acked incidents idle for 7 days are closed, and when the store is full the
-  least severe incident is evicted for a more severe signal, so a flood of
-  low-severity incidents cannot blind the daemon. A file that is corrupt or of
-  another version is reported and left as it is.
+  least severe incident is evicted for a signal that is at least as severe
+  (closed incidents go first), so a flood of low-severity incidents cannot
+  blind the daemon. A file that is corrupt or of another version is reported
+  and left as it is.
 
 ### Security
 
