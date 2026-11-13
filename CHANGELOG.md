@@ -8,6 +8,14 @@ report.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
+Groundwork for the watch daemon (stage 1): the parts it is built from, each
+tested on its own. `keepwatch watch` itself is not in this release: the
+`watch` configuration section is checked but has no effect yet, and
+`keepwatch install` writes the same units as before. Stage 0 behaviour
+changes only as listed under Security, Changed and Fixed.
+
 ### Added
 
 - Configuration: a `watch` section for the watch daemon and its install:
@@ -191,5 +199,6 @@ reports of what changed, notifications and a scheduled install.
 - Release archives for linux/amd64 and linux/arm64 with SHA-256 checksums and
   a build-provenance attestation.
 
-[Unreleased]: https://github.com/LanNguyenSi/keepwatch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LanNguyenSi/keepwatch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LanNguyenSi/keepwatch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LanNguyenSi/keepwatch/releases/tag/v0.1.0

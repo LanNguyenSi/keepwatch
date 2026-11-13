@@ -3,7 +3,7 @@ type: invariant
 title: One list, one rule for where the scheduled run's paths may lie
 description: install and doctor share a single manifest of paths and a single placement check, and two tests pin the sandbox table that check uses to both the unit hardening and a measured real sandbox.
 tags: [install, doctor, sandbox, systemd, invariants]
-timestamp: 2026-11-13T13:05:06Z
+timestamp: 2026-11-13T20:55:21Z
 sources:
   - internal/install/placement.go
   - internal/install/trustedpath.go

@@ -27,7 +27,7 @@ download, are in [docs/install.md](docs/install.md)), then:
 ```sh
 # download the archive and checksums.txt from the releases page, then:
 sha256sum -c checksums.txt --ignore-missing
-tar -xzf keepwatch_0.1.0_linux_amd64.tar.gz keepwatch
+tar -xzf keepwatch_0.2.0_linux_amd64.tar.gz keepwatch
 sudo install -o root -g root -m 0755 keepwatch /usr/local/bin/keepwatch
 sudo keepwatch init                 # write an example configuration
 sudoedit /etc/keepwatch/keepwatch.yaml  # set notify.ntfy (or remove it), listeners, ...
