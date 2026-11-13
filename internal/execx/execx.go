@@ -138,10 +138,13 @@ type StreamResult struct {
 	// still open (a leftover child held them) and had to be cut: lines or
 	// stderr may be missing. The cut happens when the wall time since the
 	// exit, minus the time spent inside onLine since then, reaches the grace
-	// period Run uses, or when more than a pipe's worth of stdout (about
-	// 1 MiB) arrived after the exit. A backlog the program itself left in
-	// the pipe is delivered in full, however slow onLine is. A successful
-	// exit also returns ErrIOTimeout, as Run does.
+	// period Run uses, or when more stdout than a pipe of the default size
+	// holds (16 pages plus one read, about 68 KiB with 4 KiB pages) was read
+	// after the exit was seen. What the program itself left in such a pipe
+	// stays below that and is delivered in full, however slow onLine is; a
+	// program that enlarged its stdout pipe can lose the rest of a larger
+	// backlog this way. A successful exit also returns ErrIOTimeout, as Run
+	// does.
 	IOIncomplete bool
 	Duration     time.Duration
 }

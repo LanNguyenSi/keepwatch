@@ -78,9 +78,9 @@ the skip rule is the package comment of `internal/probes/probes.go`).
 long-lived program's stdout line by line, on the caller's goroutine, while
 `Run` and `Runner` stay as they were. `Real.Stream` goes through the same
 `resolve` as `Run`, so the allowlist, the trusted directories and the typed
-errors are identical (`internal/execx/stream.go:78#"r.resolve(argv[0])"`),
+errors are identical (`internal/execx/stream.go:97#"r.resolve(argv[0])"`),
 and it uses the same minimal environment, its own pipes and the same
-process-group setup (`internal/execx/stream.go:107#"configureKill(cmd)"`). It
+process-group setup (`internal/execx/stream.go:126#"configureKill(cmd)"`). It
 is not a way around the allowlist: a program that is not in the table cannot
 be streamed either. What differs is the bound. There is no default timeout,
 because a follow stream is meant to run until the caller cancels it; a total
@@ -91,31 +91,41 @@ callback, and it stays armed until the program has exited, also after it
 closed its stdout. Memory is bounded per line, not per run: a line longer than
 `MaxLine` (`DefaultMaxLine`, 64 KiB) is never delivered, not even cut, it is
 dropped and counted in `StreamResult.DroppedLines` and the stream goes on
-(`internal/execx/stream.go:351#"if len(acc)+len(data) > max"`). stderr is
+(`internal/execx/stream.go:394#"if len(acc)+len(data) > max"`). stderr is
 drained concurrently into a buffer capped like `Run`'s output, so a chatty
 child cannot block on a full pipe
-(`internal/execx/stream.go:141#"errC := startCopy(errR, &stderr)"`).
+(`internal/execx/stream.go:160#"errC := startCopy(errR, &stderr)"`).
 The stream ends when the context ends (the context's error is returned, never
 `ErrTimeout`), when the callback returns an error (that error is returned),
 on an opt-in timeout, or after the program exited by itself. One deferred
 cleanup then SIGKILLs the process group, once, and joins the reader, the
 waiter and the stderr copy, also when the callback panics and the caller
-recovers (`internal/execx/stream.go:157#"cleanup := func() {"`). Cancelling
-kills only the direct child (`internal/execx/stream.go:110#"cmd.Cancel = func() error"`),
-so the cleanup's signal is the only group signal; on an abort the child is
-still unreaped when it is sent, on the self-exit path it is already reaped, as
-in `Run`. The kill reaches everything left in the child's process group; a
+recovers (`internal/execx/stream.go:184#"cleanup := func() {"`). Cancelling
+kills only the direct child (`internal/execx/stream.go:129#"cmd.Cancel = func() error"`),
+so the cleanup's signal is the only group signal. On an abort before the exit
+was seen it is sent before the cleanup waits for the child, which as a rule is
+not reaped yet; once the exit was seen, on the self-exit path and on an abort
+that comes after it, the child is already reaped, as in `Run`. The kill reaches everything left in the child's process group; a
 grandchild that started a new session is outside it (see the known limit).
 After the program exited, the stream keeps reading stdout while a leftover
 child holds the pipe, but only inside a budget: it ends with
 `StreamResult.IOIncomplete` (and `ErrIOTimeout` after a successful exit) when
 the wall time since the exit minus the time spent inside the callback since
 then reaches the grace period of `Run`, the same variable
-(`internal/execx/stream.go:239#"left := waitDelay"`), or when more than
-`postExitMaxBytes` (1 MiB, a pipe's worth plus the reader's buffers, dropped
-lines included) were read since the exit. Lines do not restart the budget, so
-a leftover that keeps writing cannot keep the stream alive, while a backlog
-the program left in the pipe still reaches even a slow callback in full.
+(`internal/execx/stream.go:270#"left := waitDelay"`), or when more than
+`postExitMaxBytes` bytes were read from the pipe after the exit was seen
+(`internal/execx/stream.go:247#"if post > postExitMaxBytes"`). That bound is
+what a pipe of the default size holds, 16 pages, plus one read, about 68 KiB
+with 4 KiB pages (`internal/execx/stream.go:33#"var postExitMaxBytes"`). Only
+bytes read after the exit count, so a long line that was read while the
+program ran never does, however late the loop gets to it. Lines do not
+restart the budget. What the program itself left in such a pipe stays below
+the bound and still reaches even a slow callback in full; a program that
+enlarged its own stdout pipe can lose the rest of a larger backlog, flagged
+the same way. The byte bound is a volume, not a time: a leftover that floods
+stdout with short lines is cut after that many bytes, and a slow callback is
+still called once for every line in them, so a caller that needs a time bound
+sets `Timeout`.
 Callers of a stream that ended by an error other
 than their own must treat the lines they got as a prefix, not as a complete
 log. Nothing in the engine or the probes streams yet: the check allowlist from

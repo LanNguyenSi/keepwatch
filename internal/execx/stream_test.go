@@ -3,6 +3,7 @@ package execx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -952,4 +953,234 @@ func TestStreamCancelDoesNotSignalTheGroup(t *testing.T) {
 		t.Fatal("the group was already signalled before cleanup: cancelling must kill the direct child only")
 	}
 	mustBeGone(t, grandchild)
+}
+
+// setGrace sets the grace period for one test.
+func setGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := waitDelay
+	waitDelay = d
+	t.Cleanup(func() { waitDelay = old })
+}
+
+// defaultPipeBound is the documented value of postExitMaxBytes, written out so
+// that the tests below pin it: the default pipe capacity plus one read.
+func defaultPipeBound() int {
+	return 16*os.Getpagesize() + 4096
+}
+
+// A dropped line far longer than the post-exit bound, read while the program
+// still ran, does not count against that bound when its notice reaches the
+// loop after the exit: the short lines behind it arrive and the stream ends
+// clean. The first callback stalls, so the program has exited and the reader
+// is past the long line before the loop looks again.
+func TestStreamHugeDroppedLineBeforeExitLosesNothing(t *testing.T) {
+	const size = 3000000
+	huge := "head -c " + strconv.Itoa(size) + " /dev/zero | tr '\\0' a"
+	if size < 2*postExitMaxBytes {
+		t.Fatalf("the long line (%d bytes) is not far above the post-exit bound (%d)", size, postExitMaxBytes)
+	}
+	r := realRunner(t, "sh", "head", "tr")
+	const runs, atOnce = 20, 4
+	for i := 0; i < runs; i += atOnce {
+		var wg sync.WaitGroup
+		for j := 0; j < atOnce; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var got []string
+				res, err := r.Stream(bg, []string{"sh", "-c", "echo first; " + huge + "; echo; echo a; echo b; echo c"}, StreamOpts{}, func(l []byte) error {
+					got = append(got, string(l))
+					if len(got) == 1 {
+						time.Sleep(400 * time.Millisecond)
+					}
+					return nil
+				})
+				if err != nil || res.IOIncomplete || res.DroppedLines != 1 || res.ExitCode != 0 || strings.Join(got, "|") != "first|a|b|c" {
+					t.Errorf("slow first callback: lines=%q err=%v res=%+v", got, err, res)
+				}
+			}()
+		}
+		within(t, 30*time.Second, "streams with a long dropped line", wg.Wait)
+	}
+	// The long line is the last one and has no newline; the consumer is fast.
+	for i := 0; i < runs; i++ {
+		n := 0
+		res, err := callStream(t, r, bg, []string{"sh", "-c", huge}, StreamOpts{}, func([]byte) error { n++; return nil })
+		if err != nil || res.IOIncomplete || res.DroppedLines != 1 || res.ExitCode != 0 || n != 0 {
+			t.Fatalf("unterminated run %d: delivered=%d err=%v res=%+v", i, n, err, res)
+		}
+	}
+}
+
+// Nothing read while the program ran counts against the post-exit bound: a
+// program that streams many times the bound and then exits loses no line. One
+// late callback stalls, so the program exits with its last lines unread and
+// the loop sees the exit with lines still to come.
+func TestStreamVolumeBeforeExitIsNotCut(t *testing.T) {
+	const lines, width, tail = 21000, 100, 100
+	if lines*(width+1) < 2*int(postExitMaxBytes) {
+		t.Fatalf("%d bytes are not far above the post-exit bound (%d)", lines*(width+1), postExitMaxBytes)
+	}
+	script := "i=0; while [ $i -lt " + strconv.Itoa(lines) + " ]; do printf '%0" + strconv.Itoa(width) + "d\\n' $i; i=$((i+1)); done"
+	n, wrong := 0, ""
+	res, err := callStream(t, realRunner(t, "sh"), bg, []string{"sh", "-c", script}, StreamOpts{}, func(l []byte) error {
+		if want := fmt.Sprintf("%0*d", width, n); string(l) != want && wrong == "" {
+			wrong = fmt.Sprintf("line %d = %q", n, l)
+		}
+		n++
+		if n == lines-tail {
+			time.Sleep(400 * time.Millisecond)
+		}
+		return nil
+	})
+	if err != nil || res.IOIncomplete || res.ExitCode != 0 || n != lines || wrong != "" {
+		t.Fatalf("delivered %d/%d %s err=%v res=%+v", n, lines, wrong, err, res)
+	}
+}
+
+// What a program left in a nearly full pipe when it exited is delivered in
+// full, also to a consumer that takes longer than the grace period.
+func TestStreamNearlyFullPipeBacklogIsDelivered(t *testing.T) {
+	setGrace(t, 300*time.Millisecond)
+	const lines, width, long = 560, 100, 20000
+	// The long line is one write above 16 KiB, which makes darwin grow the
+	// pipe to the 64 KiB a linux pipe has from the start.
+	script := "B=$(head -c " + strconv.Itoa(long) + " /dev/zero | tr '\\0' b); echo first; echo $B; " +
+		"i=0; while [ $i -lt " + strconv.Itoa(lines) + " ]; do printf '%0" + strconv.Itoa(width-1) + "d\\n' $i; i=$((i+1)); done"
+	n, wrong := 0, ""
+	start := time.Now()
+	res, err := callStream(t, realRunner(t, "sh", "head", "tr"), bg, []string{"sh", "-c", script}, StreamOpts{}, func(l []byte) error {
+		n++
+		switch {
+		case n == 1:
+			time.Sleep(400 * time.Millisecond)
+		case n == 2:
+			if len(l) != long {
+				wrong = fmt.Sprintf("long line has %d bytes", len(l))
+			}
+		default:
+			if want := fmt.Sprintf("%0*d", width-1, n-3); string(l) != want && wrong == "" {
+				wrong = fmt.Sprintf("line %d = %q", n, l)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return nil
+	})
+	if time.Since(start) < 2*waitDelay {
+		t.Fatalf("consumer took %s, not longer than the grace period; the test proves nothing", time.Since(start))
+	}
+	if err != nil || res.IOIncomplete || res.ExitCode != 0 || n != lines+2 || wrong != "" {
+		t.Fatalf("delivered %d/%d %s err=%v res=%+v", n, lines+2, wrong, err, res)
+	}
+}
+
+// The post-exit bound is a byte volume: a leftover that floods stdout with
+// short lines behind a slow onLine is cut once that many bytes were read,
+// and onLine has been called for the lines in them. The grace period is far
+// above the test's own limit, so only the byte bound can end this stream.
+func TestStreamFloodOfShortLinesAfterExitEndsAtTheByteBound(t *testing.T) {
+	setGrace(t, 20*time.Second)
+	const width = 128 // bytes per line, newline included
+	bound := defaultPipeBound()
+	n := 0
+	res, err := callStream(t, realRunner(t, "sh", "yes"), bg, []string{"sh", "-c", "yes " + strings.Repeat("y", width-1) + " & exit 0"}, StreamOpts{}, func(l []byte) error {
+		n++
+		time.Sleep(200 * time.Microsecond)
+		return nil
+	})
+	if !errors.Is(err, ErrIOTimeout) || !res.IOIncomplete || res.ExitCode != 0 {
+		t.Fatalf("err=%v res=%+v after %d lines", err, res, n)
+	}
+	// The reader runs ahead of the delivered lines by at most its buffer and
+	// one line, in both directions: what it held when the exit was seen is
+	// delivered on top of the bound, and what it holds when the bound is
+	// passed is not delivered. A few lines may come before the exit is seen.
+	const readAhead = 4096 + 2*width
+	lo, hi := (bound-readAhead)/width, (bound+readAhead)/width+64
+	if n < lo || n > hi {
+		t.Fatalf("%d lines of %d bytes delivered, want %d to %d for a bound of %d bytes", n, width, lo, hi, bound)
+	}
+}
+
+// Time spent inside onLine before the program exited is not credited to the
+// post-exit budget: after slow callbacks during the run, a ticking leftover
+// is cut about one grace period after the exit, not that time later.
+func TestStreamCallbackTimeBeforeExitDoesNotExtendTheBudget(t *testing.T) {
+	setGrace(t, 300*time.Millisecond)
+	const slow = 500 * time.Millisecond
+	script := "echo 1; echo 2; echo 3; sleep 2; (while :; do echo tick; sleep 0.1; done) & exit 0"
+	n := 0
+	var firstTick time.Time
+	res, err := callStream(t, realRunner(t, "sh", "sleep"), bg, []string{"sh", "-c", script}, StreamOpts{}, func(l []byte) error {
+		n++
+		if n <= 3 {
+			time.Sleep(slow)
+		} else if firstTick.IsZero() {
+			firstTick = time.Now()
+		}
+		return nil
+	})
+	if !errors.Is(err, ErrIOTimeout) || !res.IOIncomplete {
+		t.Fatalf("err=%v res=%+v after %d lines", err, res, n)
+	}
+	if firstTick.IsZero() {
+		t.Fatalf("no line from the leftover, %d lines", n)
+	}
+	// With the 1.5 s of earlier callback time credited, the stream would
+	// last that much longer.
+	if d := time.Since(firstTick); d > 3*waitDelay {
+		t.Fatalf("the stream ended %s after the leftover's first line, want within %s", d, 3*waitDelay)
+	}
+}
+
+// Cleanup waits for the child on every abort path. The hook holds the reaping
+// back until well after the abort, so a Stream that did not wait would return
+// while the child is still a zombie.
+func TestStreamAbortWaitsForAHeldBackReap(t *testing.T) {
+	const held = 300 * time.Millisecond
+	var gate chan struct{}
+	var hooked atomic.Int32
+	streamWaitHook = func() { hooked.Add(1); <-gate }
+	t.Cleanup(func() { streamWaitHook = nil })
+	r := realRunner(t, "sh", "sleep")
+	paths := []struct {
+		name string
+		opts StreamOpts
+		stop func(cancel func()) error
+	}{
+		{"cancel", StreamOpts{}, func(cancel func()) error { cancel(); return nil }},
+		{"callback error", StreamOpts{}, func(func()) error { return errors.New("stop") }},
+		{"timeout", StreamOpts{Timeout: 50 * time.Millisecond}, func(func()) error { return nil }},
+		{"idle timeout", StreamOpts{IdleTimeout: 50 * time.Millisecond}, func(func()) error { return nil }},
+	}
+	for i, p := range paths {
+		gate = make(chan struct{})
+		release := gate
+		ctx, cancel := context.WithCancel(bg)
+		pid := 0
+		var aborted time.Time
+		_, err := callStream(t, r, ctx, []string{"sh", "-c", "echo $$; exec sleep 30"}, p.opts, func(l []byte) error {
+			pid, _ = strconv.Atoi(string(l))
+			aborted = time.Now()
+			time.AfterFunc(held, func() { close(release) })
+			return p.stop(cancel)
+		})
+		waited := time.Since(aborted)
+		zombie := pid != 0 && syscall.Kill(pid, 0) == nil
+		cancel()
+		if err == nil || pid == 0 {
+			t.Fatalf("%s: pid=%d err=%v", p.name, pid, err)
+		}
+		if zombie {
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("%s: the child %d was not reaped when Stream returned", p.name, pid)
+		}
+		if waited < held {
+			t.Fatalf("%s: Stream returned %s after the abort, before the reap was released after %s", p.name, waited, held)
+		}
+		if int(hooked.Load()) != i+1 {
+			t.Fatalf("%s: the wait hook ran %d times, want %d", p.name, hooked.Load(), i+1)
+		}
+	}
 }
