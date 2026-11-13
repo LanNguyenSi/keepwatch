@@ -133,7 +133,9 @@ const (
 	// TempClockSkew is how far ahead of the clock the modification time of a
 	// temporary file may be before SweepTemp treats it as stale. A Submit sets
 	// no time itself, so a time further ahead than clock steps and file system
-	// rounding explain was set by somebody.
+	// rounding explain was set by somebody. After a backward clock step larger
+	// than TempClockSkew, a sweep can remove the temporary file of a Submit in
+	// progress; that Submit then returns an error.
 	TempClockSkew = 5 * time.Minute
 )
 
