@@ -28,13 +28,49 @@ const (
 // client and may contain spaces, newlines and the text "from 1.2.3.4 port
 // 5", so the pattern is anchored at both ends and the greedy user makes
 // the address the last one before " port <n>": the part sshd itself
-// appends after the name. Every method sshd can print (publickey,
+// appends after the name. That greedy choice is only sound when the line
+// admits exactly one such split; a certificate ID is free text and can
+// carry a " from <addr> port <n> ssh2: ..." fragment of its own, and then
+// no split can be trusted (see parseLoginAccepted and the ambiguous
+// branch of Evaluate). Every method sshd can print (publickey,
 // password, keyboard-interactive, keyboard-interactive/pam, none,
 // hostbased, gssapi-with-mic) is accepted; the key is checked only when
 // the tail parses (see parseLoginKey). A line that does not match yields
 // nothing; an address that is not an address drops the line, since there
 // is then nothing to check.
 var loginAcceptedRE = regexp.MustCompile(`(?s)\AAccepted (\S+) for (.+) from (\S+) port [0-9]+ ssh2(?:: (.*)\z)?\z`)
+
+// loginSplitTailRE matches one candidate user/address split of an
+// Accepted line from its " from " on: an address token with no blank,
+// the port, and the line end or the ": <key info>" tail. Each " from "
+// occurrence whose suffix matches is a split the line admits; the
+// greedy group of loginAcceptedRE picks the last one.
+var loginSplitTailRE = regexp.MustCompile(`(?s)\A from \S+ port [0-9]+ ssh2(: .*)?\z`)
+
+// countLoginSplits counts the user/address/port splits of msg, a line
+// that loginAcceptedRE matched: every " from <addr> port <n> ssh2" at or
+// after userStart (the start of the user group, so the user is
+// non-empty) whose suffix ends the line or starts its ": " key info. The
+// greedy match itself is always one of them, so a line that matched
+// counts at least one; a count above one means the line is ambiguous.
+func countLoginSplits(msg string, userStart int) int {
+	n := 0
+	for off := userStart; off < len(msg); {
+		i := strings.Index(msg[off:], " from ")
+		if i < 0 {
+			return n
+		}
+		i += off
+		if i > userStart && loginSplitTailRE.MatchString(msg[i:]) {
+			n++
+			if n > 1 {
+				return n
+			}
+		}
+		off = i + 1
+	}
+	return n
+}
 
 // parseLoginKey parses the key info an sshd publickey line appends after
 // "ssh2: ". The first blank-delimited word is the key type; the user key
@@ -43,8 +79,9 @@ var loginAcceptedRE = regexp.MustCompile(`(?s)\AAccepted (\S+) for (.+) from (\S
 // SHA256:... ID <comment> (serial N) CA <type> SHA256:...") is the
 // certificate's own fingerprint, with the ID, serial and CA parts
 // ignored. A key part with no usable "SHA256:" fingerprint (an MD5
-// fingerprint, a missing or empty one, one oversized beyond the baseline
-// entry bound) does not parse: the login is then checked by address only.
+// fingerprint, a missing or empty one, one that does not normalize to a
+// valid stored fingerprint, see validKeyFP) does not parse: the login is
+// then checked by address only.
 func parseLoginKey(info string) (fp, keyType string, ok bool) {
 	typ, rest, found := strings.Cut(info, " ")
 	if !found || typ == "" {
@@ -54,7 +91,7 @@ func parseLoginKey(info string) (fp, keyType string, ok bool) {
 		if !strings.HasPrefix(w, "SHA256:") {
 			continue
 		}
-		if norm := normalizeKeyFP(w); norm != "" && len(norm) <= maxBaselineEntryLen {
+		if validKeyFP(normalizeKeyFP(w)) {
 			return w, typ, true
 		}
 		return "", "", false
@@ -80,9 +117,10 @@ type LoginParams struct {
 	// of them is known-key even if the baseline never saw it. They are
 	// never written into the baseline and never count against its caps,
 	// so a key removed from this input is unknown again on the next
-	// construction unless it was learned on its own. Entries that
-	// normalize to empty or exceed the baseline entry length bound, and
-	// user names over the baseline user length bound, are dropped.
+	// construction unless it was learned on its own. Entries that do
+	// not normalize to a valid stored fingerprint (see validKeyFP), and
+	// user names that are not valid baseline user names (see
+	// validUserName), are dropped.
 	KnownKeys map[string][]string
 }
 
@@ -113,7 +151,12 @@ func (p LoginParams) validate() error {
 // Every "Accepted <method> for <user> from <addr> port <n> ssh2" line is
 // consulted, whichever method sshd printed; the key is checked only when
 // the line's key info parses (see parseLoginKey), otherwise the login is
-// checked by address only. Consultation uses the trust gate of the brute
+// checked by address only. A line that admits more than one
+// user/address/port split (a free-text certificate ID can carry a " from
+// <addr> port <n> ssh2: ..." fragment of its own) cannot be trusted for
+// any split: it raises one high notifying signal saying it was
+// ambiguous, and nothing is learned from it (see parseLoginAccepted).
+// Consultation uses the trust gate of the brute
 // force rule: journald-set unit ssh.service, sshd.service or an ssh@ /
 // sshd@ instance, and UID 0. The signal fingerprint is built from the
 // rule id and the RAW user with the RAW address (when the address is what
@@ -155,12 +198,12 @@ func NewLoginAnomaly(p LoginParams, b *Baseline) (*LoginAnomaly, error) {
 	}
 	known := make(map[string]map[string]bool, len(p.KnownKeys))
 	for user, fps := range p.KnownKeys {
-		if user == "" || len(user) > maxBaselineUserLen {
+		if !validUserName(user) {
 			continue
 		}
 		for _, fp := range fps {
 			norm := normalizeKeyFP(fp)
-			if norm == "" || len(norm) > maxBaselineEntryLen {
+			if !validKeyFP(norm) {
 				continue
 			}
 			set := known[user]
@@ -180,33 +223,55 @@ func (r *LoginAnomaly) ID() string { return IDLoginAnomaly }
 // parseLoginAddr validates a source address sshd logged and returns its
 // canonical form: IPv4-mapped IPv6 becomes the IPv4, everything else keeps
 // its full form (an IPv6 is not shortened to a prefix here). A token that
-// is not an address is not a login line.
+// is not an address is not a login line, and an address whose canonical
+// form fails validAddrEntry (over the length bound, or an IPv6 zone using
+// characters outside the allowed set; netip accepts zones keepwatch will
+// not store) yields no signal and no baseline change.
 func parseLoginAddr(raw string) (string, bool) {
 	a, err := netip.ParseAddr(raw)
 	if err != nil {
 		return "", false
 	}
-	return a.Unmap().String(), true
+	ip := a.Unmap().String()
+	if !validAddrEntry(ip) {
+		return "", false
+	}
+	return ip, true
 }
 
-// parseLoginAccepted returns the raw user and raw address of an accepted
-// login line, and the raw key fingerprint with its key type when the
-// line's key info parses (both empty otherwise), or ok = false. Oversized
-// parsed fields are refused: a user or address longer than the baseline's
-// length bound is not real, and refusing it cannot drop an alert a
-// genuine line would raise; an oversized or degenerate fingerprint merely
-// leaves the key unparseable, which downgrades the check to the address.
-func parseLoginAccepted(msg string) (user, ip, key, keyType string, ok bool) {
-	m := loginAcceptedRE.FindStringSubmatch(msg)
+// parseLoginAccepted splits an accepted login line into its raw user and
+// raw address, and the raw key fingerprint with its key type when the
+// line's key info parses (both empty otherwise), or ok = false. It also
+// reports the number of user/address/port splits the line admits (see
+// countLoginSplits): a certificate ID is free text and may carry a " from
+// <addr> port <n> ssh2: ..." fragment of its own, so when more than one
+// split is possible the greedy regex would take the wrong one (and an
+// oversized greedy user would even drop the line); the line is then
+// reported through the ambiguous branch of Evaluate and none of its
+// fields are returned. A unique split with a user over the baseline's
+// length bound is refused: such a user is not real, and refusing it
+// cannot drop an alert a genuine line would raise; an oversized or
+// degenerate fingerprint merely leaves the key unparseable, which
+// downgrades the check to the address.
+func parseLoginAccepted(msg string) (user, ip, key, keyType string, splits int, ok bool) {
+	m := loginAcceptedRE.FindStringSubmatchIndex(msg)
 	if m == nil {
-		return "", "", "", "", false
+		return "", "", "", "", 0, false
 	}
-	user, ip = m[2], m[3]
-	if len(user) > maxBaselineUserLen || len(ip) > maxBaselineEntryLen {
-		return "", "", "", "", false
+	splits = countLoginSplits(msg, m[4])
+	if splits > 1 {
+		return "", "", "", "", splits, true
 	}
-	key, keyType, _ = parseLoginKey(m[4])
-	return user, ip, key, keyType, true
+	user, ip = msg[m[4]:m[5]], msg[m[6]:m[7]]
+	if len(user) > maxBaselineUserLen {
+		return "", "", "", "", splits, false
+	}
+	info := ""
+	if m[8] >= 0 {
+		info = msg[m[8]:m[9]]
+	}
+	key, keyType, _ = parseLoginKey(info)
+	return user, ip, key, keyType, splits, true
 }
 
 // Evaluate implements Rule.
@@ -217,11 +282,7 @@ func (r *LoginAnomaly) Evaluate(ev event.Event, now time.Time) []event.Signal {
 	if ev.Kind != event.KindJournal || !sshUnit(ev.SystemdUnit) || !isRoot(ev) {
 		return nil
 	}
-	user, rawIP, rawKey, keyType, ok := parseLoginAccepted(ev.Message)
-	if !ok {
-		return nil
-	}
-	ip, ok := parseLoginAddr(rawIP)
+	user, rawIP, rawKey, keyType, splits, ok := parseLoginAccepted(ev.Message)
 	if !ok {
 		return nil
 	}
@@ -238,6 +299,30 @@ func (r *LoginAnomaly) Evaluate(ev event.Event, now time.Time) []event.Signal {
 	if !done && !at.Before(end) {
 		r.b.MarkLearningDone()
 		done = true
+	}
+
+	if splits > 1 {
+		// An ambiguous line: more than one " from <addr> port <n>
+		// ssh2" could be the split sshd wrote (the user name and a
+		// certificate ID are free text), so no field of it can be
+		// trusted. One high notifying signal names the line as
+		// ambiguous, whatever the learning phase says, and nothing is
+		// learned from it: the baseline is left exactly as it was.
+		return []event.Signal{{
+			RuleID:      IDLoginAnomaly,
+			Fingerprint: event.FingerprintOf(IDLoginAnomaly, ev.Message),
+			Severity:    SeverityLoginAnomaly,
+			Time:        at,
+			Notify:      true,
+			Subject:     ev.Message,
+			Summary: fmt.Sprintf("accepted login line with %d possible user/address/port splits is ambiguous, nothing learned: %s",
+				splits, ev.Message),
+		}}
+	}
+
+	ip, ok := parseLoginAddr(rawIP)
+	if !ok {
+		return nil
 	}
 
 	ipKnown := r.b.KnownIP(user, ip)

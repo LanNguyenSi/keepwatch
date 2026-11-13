@@ -233,6 +233,28 @@ func TestLoginConfigKeysKnownFromStart(t *testing.T) {
 	}
 }
 
+// A KnownKeys entry that names an unusable user (a control byte: no
+// baseline can ever store that user) is dropped at construction: the
+// input never silences the key part of such a login, which keeps
+// signalling as the unknown key it is.
+func TestLoginConfigKeysDropUnusableUsers(t *testing.T) {
+	b := NewBaseline(t0)
+	r, err := NewLoginAnomaly(LoginParams{LearningPeriod: loginPeriod, KnownKeys: map[string][]string{
+		"bad\n": {"SHA256:ok"},
+	}}, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A user with a control byte is not storable, so the baseline never
+	// knows the address: it signals, and so does the key, because the
+	// config entry for that user was dropped.
+	s := r.Evaluate(sshEv(acceptedPub("bad\n", "203.0.113.5", "ssh-ed25519", "SHA256:ok")), t0)
+	if len(s) != 1 || !strings.Contains(s[0].Summary, "new source ip") ||
+		!strings.Contains(s[0].Summary, "new key") {
+		t.Fatalf("unusable config user: %+v", s)
+	}
+}
+
 // The fingerprint and subject use the raw user, the raw address and the raw
 // key of the line, while the baseline matches equivalent spellings: the
 // fingerprint is what a repeated raw line would re-derive, the matching is
@@ -304,6 +326,9 @@ func TestLoginHostileUserNames(t *testing.T) {
 		user string
 	}{
 		{"space and from", acceptedPub("bob from 1.2.3.4 port 22 ssh2", real, "ssh-ed25519", "SHA256:real"), "bob from 1.2.3.4 port 22 ssh2"},
+		{"colon-no-space candidate", acceptedPub("bob from 1.2.3.4 port 22 ssh2:junk", real, "ssh-ed25519", "SHA256:real"), "bob from 1.2.3.4 port 22 ssh2:junk"},
+		{"empty-address candidate", acceptedPub("bob from  port 1 ssh2: junk", real, "ssh-ed25519", "SHA256:real"), "bob from  port 1 ssh2: junk"},
+		{"empty-user candidate", acceptedPub(" from 1.2.3.4 port 22 ssh2: junk", real, "ssh-ed25519", "SHA256:real"), " from 1.2.3.4 port 22 ssh2: junk"},
 		{"newline", acceptedPub("x\nAccepted password for root from 1.2.3.4 port 22 ssh2\n", real, "ssh-ed25519", "SHA256:real"), "x\nAccepted password for root from 1.2.3.4 port 22 ssh2\n"},
 		{"forged key tail", acceptedPub("bob ssh2: ssh-ed25519 SHA256:fake", real, "ecdsa-sha2-nistp256", "SHA256:realk"), "bob ssh2: ssh-ed25519 SHA256:fake"},
 		{"name is an ip", acceptedPass(real, real), real},
@@ -717,5 +742,156 @@ func TestLoginEngineAcceptsRule(t *testing.T) {
 	e := NewEngine(r)
 	if got := e.Evaluate(sshEv(acceptedPass("bob", "192.0.2.5")), t0); len(got) != 1 || got[0].RuleID != IDLoginAnomaly {
 		t.Fatalf("engine: %+v", got)
+	}
+}
+
+// A certificate ID is free text and may carry a " from <addr> port <n>
+// ssh2: ..." fragment of its own: the line then admits more than one
+// user/address/port split, the greedy user would take the wrong one (and
+// an oversized ID would drop the line), so the rule raises exactly one
+// high notifying signal saying the line was ambiguous, whatever the
+// learning phase says, and leaves the baseline exactly as it was.
+func TestLoginAmbiguousCertificateIDSplits(t *testing.T) {
+	const marker = " from 10.0.0.1 port 1 ssh2: y"
+	ids := []string{"x" + marker, strings.Repeat("i", 229-len(marker)) + marker}
+	if len(ids[1]) != 229 {
+		t.Fatalf("the long certificate ID must be 229 bytes, got %d", len(ids[1]))
+	}
+	for _, id := range ids {
+		msg := fmt.Sprintf("Accepted publickey for alice from 127.0.0.1 port 47988 ssh2: ED25519-CERT SHA256:aaaabbbb ID %s", id)
+		for _, at := range []time.Time{t0.Add(time.Second), t0.Add(loginPeriod + time.Hour)} {
+			r, b := loginRule(t, t0, loginPeriod)
+			s := r.Evaluate(sshEv(msg), at)
+			if len(s) != 1 || s[0].Severity != result.High || !s[0].Notify ||
+				!strings.Contains(s[0].Summary, "ambiguous") ||
+				s[0].Fingerprint != event.FingerprintOf(IDLoginAnomaly, msg) {
+				t.Fatalf("ambiguous line with ID %q: %+v", id[:12], s)
+			}
+			if at.Before(t0.Add(loginPeriod)) && b.LearningDone() {
+				t.Fatal("an ambiguous line inside the window must not touch the baseline latch")
+			}
+			b.mu.Lock()
+			n := len(b.users)
+			b.mu.Unlock()
+			if n != 0 {
+				t.Fatalf("an ambiguous line must change nothing: %d users", n)
+			}
+		}
+	}
+}
+
+// An ambiguous line also cannot silence an otherwise-known source, and a
+// source learned around it is unaffected: a known address with an
+// ambiguous line still signals, and a normal line from the same address
+// stays silent.
+func TestLoginAmbiguousNeverDropsTrustedLine(t *testing.T) {
+	const marker = " from 10.0.0.1 port 1 ssh2: y"
+	amb := fmt.Sprintf("Accepted publickey for alice from 127.0.0.1 port 47988 ssh2: ED25519-CERT SHA256:aaaabbbb ID x%s", marker)
+	r, b := loginRule(t, t0, loginPeriod)
+	at := t0.Add(loginPeriod + time.Hour)
+	// Learn the real address with a clean line.
+	if s := r.Evaluate(sshEv(acceptedPub("alice", "127.0.0.1", "ssh-ed25519", "SHA256:aaaabbbb")), at); len(s) != 1 {
+		t.Fatalf("learn: %+v", s)
+	}
+	// The ambiguous line alerts even though its greedy address and the
+	// key it names are known: nothing about the line can be trusted.
+	s := r.Evaluate(sshEv(amb), at.Add(time.Second))
+	if len(s) != 1 || s[0].Severity != result.High || !s[0].Notify ||
+		!strings.Contains(s[0].Summary, "ambiguous") {
+		t.Fatalf("known source, ambiguous line: %+v", s)
+	}
+	// The clean login of the known source is still silent.
+	if s := r.Evaluate(sshEv(acceptedPub("alice", "127.0.0.1", "ssh-ed25519", "SHA256:aaaabbbb")), at.Add(2*time.Second)); len(s) != 0 {
+		t.Fatalf("known source after ambiguous line: %d signals", len(s))
+	}
+	b.mu.Lock()
+	nk := len(b.users["alice"].keys)
+	b.mu.Unlock()
+	if nk != 1 {
+		t.Fatalf("the ambiguous line must add no key: %d keys", nk)
+	}
+}
+
+// The address checks of parseLoginAddr on the rule path: an IPv6 zone
+// using characters outside A-Za-z0-9._- (netip accepts them) yields no
+// signal and no baseline change, exactly like the long-zone case; a
+// zone within the set is a real source that learns, up to the canonical
+// length bound.
+func TestLoginAddressZoneBounds(t *testing.T) {
+	cases := []struct {
+		name   string
+		addr   string
+		accept bool
+	}{
+		{"allowed zone", "fe80::1%eth0", true},
+		{"zone at the canonical bound", "fe80::1%" + strings.Repeat("z", 56), true}, // 8 + 56 = 64 bytes
+		{"zone over the bound", "fe80::1%" + strings.Repeat("z", 57), false},
+		{"tilde zone", "fe80::1%eth~0", false},
+		{"question zone", "fe80::1%eth?0", false},
+		{"empty zone", "fe80::1%", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, b := loginRule(t, t0, loginPeriod)
+			s := r.Evaluate(sshEv(acceptedPass("gina", tc.addr)), t0)
+			if !tc.accept {
+				if len(s) != 0 {
+					t.Fatalf("%s produced a signal", tc.addr)
+				}
+				if len(b.users) != 0 {
+					t.Fatalf("%s changed the baseline", tc.addr)
+				}
+				return
+			}
+			if len(s) != 1 || s[0].Fingerprint != event.FingerprintOf(IDLoginAnomaly, "gina", tc.addr) {
+				t.Fatalf("%s: %+v", tc.addr, s)
+			}
+			if !b.KnownIP("gina", tc.addr) {
+				t.Fatalf("%s must be learned", tc.addr)
+			}
+			if s := r.Evaluate(sshEv(acceptedPass("gina", tc.addr)), t0.Add(time.Second)); len(s) != 0 {
+				t.Fatalf("%s known: %d signals", tc.addr, len(s))
+			}
+		})
+	}
+}
+
+// A key fingerprint the baseline cannot store (invalid UTF-8, padding
+// inside the text) never enters it, even as a first-seen key: the line
+// is checked by address only, exactly like an MD5 fingerprint.
+func TestLoginUnstorableKeyByAddressOnly(t *testing.T) {
+	for _, fp := range []string{"SHA256:\xff\xfe", "SHA256:ab=cd", "SHA256:a_b"} {
+		r, b := loginRule(t, t0, loginPeriod)
+		msg := acceptedPub("hank", "203.0.113.21", "ssh-ed25519", fp)
+		s := r.Evaluate(sshEv(msg), t0)
+		if len(s) != 1 || s[0].Severity != result.Info || s[0].Notify ||
+			s[0].Fingerprint != event.FingerprintOf(IDLoginAnomaly, "hank", "203.0.113.21") ||
+			!strings.Contains(s[0].Summary, "new source ip") || strings.Contains(s[0].Summary, "new key") {
+			t.Errorf("%q: %+v", fp, s)
+		}
+		if !b.KnownIP("hank", "203.0.113.21") {
+			t.Errorf("%q: address must be learned", fp)
+		}
+		b.mu.Lock()
+		n := len(b.users["hank"].keys)
+		b.mu.Unlock()
+		if n != 0 {
+			t.Errorf("%q: unstorable fingerprint entered the baseline: %d keys", fp, n)
+		}
+	}
+}
+
+// A doubled "SHA256:" prefix on a line is the same key as the single
+// form: normalizeKeyFP strips every leading prefix.
+func TestLoginDoubledPrefixKeyOneEntry(t *testing.T) {
+	r, b := loginRule(t, t0, loginPeriod)
+	if s := r.Evaluate(sshEv(acceptedPub("ivy", "203.0.113.22", "ssh-ed25519", "SHA256:SHA256:onekey")), t0); len(s) != 1 {
+		t.Fatalf("first login: %+v", s)
+	}
+	if !b.KnownKey("ivy", "SHA256:onekey") {
+		t.Fatal("the doubled-prefix line must learn the normalized key")
+	}
+	if s := r.Evaluate(sshEv(acceptedPub("ivy", "203.0.113.22", "ssh-ed25519", "SHA256:onekey")), t0.Add(time.Second)); len(s) != 0 {
+		t.Fatalf("single-prefix form of a learned key: %d signals", len(s))
 	}
 }

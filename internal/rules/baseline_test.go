@@ -21,14 +21,22 @@ func TestNormalizeKeyFPTable(t *testing.T) {
 		"SHA256:AAAABBBB",  // log form, as sshd and ssh-keygen print it
 		"SHA256:AAAABBBB=", // config form with padding
 		"SHA256:AAAABBBB==",
-		"AAAABBBB",  // prefixless config form
-		"AAAABBBB=", // prefixless with padding
+		"AAAABBBB",               // prefixless config form
+		"AAAABBBB=",              // prefixless with padding
+		"SHA256:SHA256:AAAABBBB", // doubled prefix: the same entry
 	}
 	for _, a := range forms {
 		for _, b := range forms {
 			if normalizeKeyFP(a) != normalizeKeyFP(b) {
 				t.Errorf("%q and %q normalize differently", a, b)
 			}
+		}
+	}
+	// Every leading prefix is stripped, not just one, so the result
+	// never carries the prefix again: the normalization is idempotent.
+	for _, s := range append(forms, "SHA256:") {
+		if normalizeKeyFP(normalizeKeyFP(s)) != normalizeKeyFP(s) {
+			t.Errorf("normalizeKeyFP is not idempotent on %q", s)
 		}
 	}
 	if got := normalizeKeyFP("AAA=ABBB"); got != "AAA=ABBB" {
@@ -71,6 +79,44 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	if b.AddKey("bob", "SHA256:") || b.KnownKey("bob", "SHA256:") {
 		t.Error("empty fingerprint must be refused")
 	}
+	// The content bounds: a user name with a control byte, and a key
+	// fingerprint or a source address outside their allowed content, are
+	// refused everywhere (not stored, not found).
+	for _, bad := range []string{"bob\nbob", "bob\x7f", "bob\x01"} {
+		if b.AddIP(bad, "9.9.9.9") || b.AddKey(bad, "SHA256:x") {
+			t.Errorf("user name %q with a control byte must be refused", bad)
+		}
+		if _, exists := b.users[bad]; exists {
+			t.Errorf("user name %q must not be created", bad)
+		}
+	}
+	if b.AddKey("bob", "SHA256:a=b") || b.KnownKey("bob", "a=b") {
+		t.Error("padding inside a fingerprint must be refused")
+	}
+	if b.AddKey("bob", "SHA256:a b") || b.KnownKey("bob", "a b") {
+		t.Error("a fingerprint with a blank must be refused")
+	}
+	if b.AddKey("bob", "SHA256:\xff\xfe") || b.KnownKey("bob", "\xff\xfe") {
+		t.Error("a fingerprint that is not valid UTF-8 must be refused")
+	}
+	if !b.AddKey("bob", "SHA256:a+b/c") || !b.KnownKey("bob", "a+b/c") {
+		t.Error("the base64 punctuation + and / must be storable in a fingerprint")
+	}
+	if b.AddIP("bob", "fe80::1%eth~0") || b.KnownIP("bob", "fe80::1%eth~0") {
+		t.Error("an IPv6 zone outside A-Za-z0-9._- must be refused")
+	}
+	if b.AddIP("bob", "fe80::1%a%b") || b.KnownIP("bob", "fe80::1%a%b") {
+		t.Error("a doubled zone separator must be refused")
+	}
+	if b.AddIP("bob", "fe80::1%") || b.KnownIP("bob", "fe80::1%") {
+		t.Error("an empty IPv6 zone must be refused")
+	}
+	if !b.AddIP("bob", "fe80::1%eth0") || !b.KnownIP("bob", "fe80::1%eth0") {
+		t.Error("a zone within the allowed set must be storable")
+	}
+	if b.users["bob"].ips["fe80::1%eth~0"] || b.users["bob"].keys["a=b"] {
+		t.Fatal("a refused entry must not be stored")
+	}
 	if b.AddIP(strings.Repeat("u", maxBaselineUserLen+1), "9.9.9.9") {
 		t.Error("user name over the length bound must be refused")
 	}
@@ -90,8 +136,29 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	if _, exists := b.users[badUser]; exists {
 		t.Error("a non-UTF-8 user must not be created")
 	}
-	if len(b.users["bob"].ips) != 1 || len(b.users["bob"].keys) != 1 {
-		t.Fatalf("a refused entry must not be stored: %+v", b.users["bob"])
+	if len(b.users["bob"].ips) != 2 || len(b.users["bob"].keys) != 2 {
+		t.Fatalf("only the accepted entries may be stored: %+v", b.users["bob"])
+	}
+}
+
+// The documented caps and content bounds: at most 256 users and 128
+// entries (addresses plus keys) per user, and 64 bytes for a user name,
+// a canonical address or a normalized fingerprint.
+func TestBaselineCapValues(t *testing.T) {
+	if BaselineMaxUsers != 256 {
+		t.Errorf("BaselineMaxUsers = %d, want 256", BaselineMaxUsers)
+	}
+	if BaselineEntriesPerUser != 128 {
+		t.Errorf("BaselineEntriesPerUser = %d, want 128", BaselineEntriesPerUser)
+	}
+	if maxBaselineUserLen != 64 {
+		t.Errorf("maxBaselineUserLen = %d, want 64", maxBaselineUserLen)
+	}
+	if maxBaselineEntryLen != 64 {
+		t.Errorf("maxBaselineEntryLen = %d, want 64", maxBaselineEntryLen)
+	}
+	if 512+BaselineMaxUsers*(2*maxBaselineUserLen+29+BaselineEntriesPerUser*(maxBaselineEntryLen+3)) != maxBaselineUnmarshalBytes {
+		t.Errorf("maxBaselineUnmarshalBytes %d is not the documented derivation of the caps", maxBaselineUnmarshalBytes)
 	}
 }
 
@@ -298,7 +365,14 @@ func TestUnmarshalSchemaAndErrors(t *testing.T) {
 		{"oversized entry", `{"schema_version":1,"users":[{"user":"bob","ips":["` + strings.Repeat("9", maxBaselineEntryLen+1) + `"]}]}`, errBaselineCorrupt},
 		{"oversized key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:` + strings.Repeat("k", maxBaselineEntryLen+1) + `"]}]}`, errBaselineCorrupt},
 		{"duplicate key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:aaa","SHA256:aaa"]}]}`, errBaselineCorrupt},
+		{"doubled-prefix duplicate key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:aaa","SHA256:SHA256:aaa"]}]}`, errBaselineCorrupt},
 		{"oversized user", `{"schema_version":1,"users":[{"user":"` + strings.Repeat("u", maxBaselineUserLen+1) + `","ips":[]}]}`, errBaselineCorrupt},
+		{"control byte user", `{"schema_version":1,"users":[{"user":"bob\u0001","ips":[]}]}`, errBaselineCorrupt},
+		{"del user name", `{"schema_version":1,"users":[{"user":"bob\u007f","ips":[]}]}`, errBaselineCorrupt},
+		{"bad zone char", `{"schema_version":1,"users":[{"user":"bob","ips":["fe80::1%eth~0"]}]}`, errBaselineCorrupt},
+		{"empty zone", `{"schema_version":1,"users":[{"user":"bob","ips":["fe80::1%"]}]}`, errBaselineCorrupt},
+		{"non-base64 key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:a=b"]}]}`, errBaselineCorrupt},
+		{"non-base64 punctuation key", `{"schema_version":1,"users":[{"user":"bob","keys":["SHA256:a_b"]}]}`, errBaselineCorrupt},
 	}
 	for _, tc := range cases {
 		b, err := Unmarshal([]byte(tc.data))
@@ -444,5 +518,99 @@ func TestUnmarshalNormalizesKeys(t *testing.T) {
 	b2, err := Unmarshal(raw)
 	if err != nil || !b2.KnownKey("carol", "xyz1234") {
 		t.Fatalf("second load: %v", err)
+	}
+}
+
+// A doubled "SHA256:" prefix is the same entry as its single-prefix form
+// (normalizeKeyFP strips every leading prefix), the pair is one stored
+// entry, and the baseline reloads from its own normalized output.
+func TestBaselineDoubledPrefixSameEntry(t *testing.T) {
+	b := NewBaseline(t0)
+	if !b.AddKey("bob", "SHA256:SHA256:aaaabbbb") {
+		t.Fatal("a doubled-prefix fingerprint must be stored")
+	}
+	if !b.AddKey("bob", "SHA256:aaaabbbb") {
+		t.Fatal("the single-prefix form must re-add the same entry")
+	}
+	b.mu.Lock()
+	n := len(b.users["bob"].keys)
+	b.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the doubled and single prefix forms made %d entries", n)
+	}
+	if !b.KnownKey("bob", "aaaabbbb") {
+		t.Fatal("the prefixless form must find the entry")
+	}
+	raw, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SHA256:") {
+		t.Errorf("Marshal must write the normalized form: %s", raw)
+	}
+	again, err := Unmarshal(raw)
+	if err != nil {
+		t.Fatalf("reload: %v\n%s", err, raw)
+	}
+	if !again.KnownKey("bob", "SHA256:SHA256:aaaabbbb") || !again.KnownKey("bob", "SHA256:aaaabbbb") {
+		t.Fatal("the reloaded baseline lost the entry")
+	}
+}
+
+// Marshal of a baseline filled to the caps with maximum-length entries
+// and maximum-length user names that mix the characters a JSON encoder
+// can inflate (an ampersand, which Marshal must not expand because it
+// writes with HTML escaping off, and quotes, which it doubles) produces
+// a document at most maxBaselineUnmarshalBytes bytes that Unmarshal
+// loads: the bound is derived from the caps and the length bounds
+// without an escape factor, counting only the exact doubling a quote or
+// a backslash undergoes.
+func TestBaselineMarshalAtCapsSizeBound(t *testing.T) {
+	b := NewBaseline(t0)
+	name := func(u int) string {
+		return strings.Repeat("&", 14) + `"` + fmt.Sprintf("%03d", u) + `"` + strings.Repeat("x", 45)
+	}
+	entry := func(e int) string {
+		return fmt.Sprintf("%0*d", maxBaselineEntryLen, e)
+	}
+	for u := 0; u < BaselineMaxUsers; u++ {
+		for e := 0; e < BaselineEntriesPerUser; e++ {
+			var ok bool
+			if e%2 == 0 {
+				ok = b.AddIP(name(u), entry(e))
+			} else {
+				ok = b.AddKey(name(u), entry(e))
+			}
+			if !ok {
+				t.Fatalf("entry %d of user %d refused below the cap", e, u)
+			}
+		}
+	}
+	if len(name(0)) != maxBaselineUserLen || len(entry(0)) != maxBaselineEntryLen {
+		t.Fatalf("test fields are not maximum length: %d %d", len(name(0)), len(entry(0)))
+	}
+	raw, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > maxBaselineUnmarshalBytes {
+		t.Fatalf("a marshal at the caps must fit the bound: %d bytes > %d", len(raw), maxBaselineUnmarshalBytes)
+	}
+	again, err := Unmarshal(raw)
+	if err != nil {
+		t.Fatalf("a marshal at the caps must load: %d bytes, %v", len(raw), err)
+	}
+	if !again.KnownIP(name(0), entry(0)) || !again.KnownKey(name(0), entry(1)) {
+		t.Fatal("first user lost")
+	}
+	if !again.KnownIP(name(BaselineMaxUsers-1), entry(BaselineEntriesPerUser-2)) ||
+		!again.KnownKey(name(BaselineMaxUsers-1), entry(BaselineEntriesPerUser-1)) {
+		t.Fatal("last user lost")
+	}
+	again.mu.Lock()
+	n := len(again.users)
+	again.mu.Unlock()
+	if n != BaselineMaxUsers {
+		t.Fatalf("%d users loaded", n)
 	}
 }

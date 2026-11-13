@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,25 +23,33 @@ const BaselineSchemaVersion = 1
 // key fingerprints of one user. A Baseline method refuses to add beyond a
 // cap (it returns false); the caller still reports the finding, so a cap
 // can make a source alert repeatedly but never go unnoticed.
+//
+// The content bounds keep out what real sshd output never carries: a
+// user name is valid UTF-8 with no control byte (below 0x20 and 0x7f)
+// and at most maxBaselineUserLen bytes; a source address is at most
+// maxBaselineEntryLen bytes in its canonical form and, if it is an IPv6
+// with a zone, the zone is a non-empty run of A-Za-z0-9._-; a key
+// fingerprint, after normalizeKeyFP, is 1 to maxBaselineEntryLen bytes
+// of the base64 alphabet A-Za-z0-9+/.
 const (
-	BaselineMaxUsers       = 1024
-	BaselineEntriesPerUser = 256
-	maxBaselineUserLen     = 256
-	maxBaselineEntryLen    = 256
+	BaselineMaxUsers       = 256
+	BaselineEntriesPerUser = 128
+	maxBaselineUserLen     = 64
+	maxBaselineEntryLen    = 64
 
 	// maxBaselineUnmarshalBytes bounds an Unmarshal input. It is derived
-	// from the caps and the length bounds so that it admits what Marshal
-	// can write at the caps: the worst case is a document whose every
-	// byte of a user name or entry is a control character, which JSON
-	// escapes as \u00xx, six bytes per byte. Per user: an escaped name
-	// with its quoted "user" field and separators, plus
-	// BaselineEntriesPerUser escaped entries with their quotes and
-	// separators across the two lists, plus the list syntax. The top
-	// object's fixed fields and the learning-start time (at most its
-	// longest RFC 3339 form) fit in the slack of the per-user roundings.
-	maxBaselineUnmarshalBytes = 1024 + BaselineMaxUsers*
-		(6*maxBaselineUserLen+6+8+1+7+8+2+2+
-			BaselineEntriesPerUser*(6*maxBaselineEntryLen+3))
+	// from the caps and the length bounds with no JSON escape factor:
+	// Marshal writes with SetEscapeHTML(false), entries carry only base64
+	// and address characters, and user names carry no control byte, so
+	// the only byte that can grow is a user name byte, where a quote or
+	// a backslash doubles it (2*maxBaselineUserLen). Per user: that
+	// name with its quoted "user" field, the "ips" and "keys" field
+	// syntax, and every entry with its quotes and a comma
+	// (maxBaselineEntryLen+3). The fixed syntax of the top object and
+	// the commas between the users fit in the 512 slack.
+	maxBaselineUnmarshalBytes = 512 + BaselineMaxUsers*
+		(2*maxBaselineUserLen+29+
+			BaselineEntriesPerUser*(maxBaselineEntryLen+3))
 )
 
 // ErrBaselineSchema is returned by Unmarshal for a baseline whose
@@ -60,13 +69,79 @@ var errBaselineCorrupt = errors.New("rules: corrupt baseline")
 //   - the fingerprint an sshd "Accepted publickey" line carries,
 //     "SHA256:<base64>" without padding.
 //
-// The comparison is on the base64 with the "SHA256:" prefix and the trailing
-// padding removed; the standard alphabet keeps any other "=" inside the
-// text, so only real padding is trimmed. The empty result (a bare
-// "SHA256:" or "=" entry) is refused by the callers, which never accept an
-// empty fingerprint.
+// The comparison is on the base64 with every leading "SHA256:" prefix and
+// the trailing padding removed; stripping every prefix, not just one, makes
+// the function idempotent, so "SHA256:SHA256:<fp>" and "SHA256:<fp>" are
+// one entry. The standard alphabet keeps any other "=" inside the text, so
+// only real padding is trimmed. A result that is not a valid fingerprint
+// (see validKeyFP) is refused by the callers, which never accept an empty
+// or degenerate fingerprint.
 func normalizeKeyFP(s string) string {
-	return strings.TrimRight(strings.TrimPrefix(s, "SHA256:"), "=")
+	for strings.HasPrefix(s, "SHA256:") {
+		s = s[len("SHA256:"):]
+	}
+	return strings.TrimRight(s, "=")
+}
+
+// validUserName reports whether user is a storable user name: non-empty,
+// valid UTF-8, no control byte (below 0x20 and 0x7f), and at most
+// maxBaselineUserLen bytes.
+func validUserName(user string) bool {
+	if user == "" || len(user) > maxBaselineUserLen || !utf8.ValidString(user) {
+		return false
+	}
+	for i := 0; i < len(user); i++ {
+		if c := user[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validAddrEntry reports whether s is a storable canonical source address:
+// non-empty, at most maxBaselineEntryLen bytes, and with an IPv6 zone (if
+// present) a non-empty run of A-Za-z0-9._- only. netip.ParseAddr accepts
+// zones outside that set, so the rule enforces it too, and this function
+// keeps the same rule for stored entries.
+func validAddrEntry(s string) bool {
+	if s == "" || len(s) > maxBaselineEntryLen {
+		return false
+	}
+	i := strings.IndexByte(s, '%')
+	if i < 0 {
+		return true
+	}
+	zone := s[i+1:]
+	if zone == "" {
+		return false
+	}
+	for j := 0; j < len(zone); j++ {
+		switch c := zone[j]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validKeyFP reports whether s is a storable normalized key fingerprint:
+// 1 to maxBaselineEntryLen bytes, each one of the base64 alphabet
+// A-Za-z0-9+/ (sshd and ssh-keygen print no other byte).
+func validKeyFP(s string) bool {
+	if s == "" || len(s) > maxBaselineEntryLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '+', c == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type baselineUser struct {
@@ -88,10 +163,11 @@ type baselineUser struct {
 // The source addresses are stored in the canonical form returned by
 // parseLoginAddr (an IPv6 keeps its full form; only an IPv4-mapped IPv6 is
 // mapped to its IPv4); the fingerprints are stored normalized by
-// normalizeKeyFP. An empty or invalid-UTF-8 user name and a user name,
-// address or fingerprint longer than maxBaselineUserLen or
-// maxBaselineEntryLen are refused (added: not stored, reported: not
-// found) because such a field is not real.
+// normalizeKeyFP. A user name that is empty, not valid UTF-8, carries a
+// control byte or exceeds maxBaselineUserLen, and an address, fingerprint
+// or zone failing the content bounds documented with the caps, are all
+// refused (added: not stored, reported: not found) because such a field
+// is not real sshd output.
 type Baseline struct {
 	mu            sync.Mutex
 	learningStart time.Time
@@ -152,13 +228,20 @@ func (b *Baseline) known(user string, toIPs bool, entry string) bool {
 }
 
 // add stores entry (already in its stored form) for user and reports
-// whether it was stored: false when the user name is empty, is not valid
-// UTF-8 or exceeds the length bound, when the user is new and the user cap
-// is reached, when the user's entry cap is reached, or when the entry
-// length bound is exceeded. An entry already known counts against no cap.
+// whether it was stored: false when the user name fails validUserName,
+// when the entry fails validAddrEntry (addresses) or validKeyFP
+// (fingerprints), when the user is new and the user cap is reached, or
+// when the user's entry cap is reached. An entry already known counts
+// against no cap.
 func (b *Baseline) add(user string, toIPs bool, entry string) bool {
-	if user == "" || !utf8.ValidString(user) || len(user) > maxBaselineUserLen ||
-		len(entry) == 0 || len(entry) > maxBaselineEntryLen {
+	if !validUserName(user) {
+		return false
+	}
+	if toIPs {
+		if !validAddrEntry(entry) {
+			return false
+		}
+	} else if !validKeyFP(entry) {
 		return false
 	}
 	b.mu.Lock()
@@ -186,10 +269,10 @@ func (b *Baseline) add(user string, toIPs bool, entry string) bool {
 }
 
 // KnownIP reports whether user has logged in from the address ip, which
-// must be in the canonical form returned by parseLoginAddr. An empty or
-// oversized address is never known.
+// must be in the canonical form returned by parseLoginAddr. An address
+// failing validAddrEntry is never known.
 func (b *Baseline) KnownIP(user, ip string) bool {
-	if ip == "" || len(ip) > maxBaselineEntryLen {
+	if !validAddrEntry(ip) {
 		return false
 	}
 	return b.known(user, true, ip)
@@ -197,10 +280,11 @@ func (b *Baseline) KnownIP(user, ip string) bool {
 
 // KnownKey reports whether user has logged in with the key whose
 // fingerprint is fp, in any of the forms normalizeKeyFP accepts. A
-// fingerprint that normalizes to empty or oversized is never known.
+// fingerprint that does not normalize to a validKeyFP value is never
+// known.
 func (b *Baseline) KnownKey(user, fp string) bool {
 	norm := normalizeKeyFP(fp)
-	if norm == "" || len(norm) > maxBaselineEntryLen {
+	if !validKeyFP(norm) {
 		return false
 	}
 	return b.known(user, false, norm)
@@ -238,7 +322,9 @@ type baselineWire struct {
 // Marshal returns the JSON form of the baseline: schema_version, the
 // learning start, the latch recording whether the learning phase has
 // ended, and the users with their source addresses and normalized key
-// fingerprints, sorted.
+// fingerprints, sorted. HTML escaping is off so a user name only ever
+// doubles a quote or a backslash, which is what the Unmarshal size
+// bound is derived against.
 func (b *Baseline) Marshal() ([]byte, error) {
 	b.mu.Lock()
 	users := make([]baselineUserWire, 0, len(b.users))
@@ -259,18 +345,26 @@ func (b *Baseline) Marshal() ([]byte, error) {
 	done := b.learningDone
 	b.mu.Unlock()
 	sort.Slice(users, func(i, j int) bool { return users[i].User < users[j].User })
-	return json.Marshal(baselineWire{SchemaVersion: BaselineSchemaVersion, LearningStart: start, LearningDone: done, Users: users})
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(baselineWire{SchemaVersion: BaselineSchemaVersion, LearningStart: start, LearningDone: done, Users: users}); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // Unmarshal returns the baseline stored in data by Marshal. A data longer
 // than maxBaselineUnmarshalBytes, another schema_version (an error wrapping
-// ErrBaselineSchema), a repeated user, a duplicate or oversized entry and a
-// count above the documented caps are all refused with an error: a baseline
-// is loaded whole or not at all. What to do when a file cannot be loaded
-// (a missing, corrupt or newer file, for instance) is the caller's
-// decision; Unmarshal only says that this data is not a baseline this
-// keepwatch can trust. Fingerprints are normalized, so a file written with
-// config-form entries reads as the keys the log lines carry.
+// ErrBaselineSchema), a repeated user, a duplicate entry, an entry or user
+// name failing the content bounds documented with the caps (so a document
+// carrying such an entry is refused) and a count above the documented caps
+// are all refused with an error: a baseline is loaded whole or not at all.
+// What to do when a file cannot be loaded (a missing, corrupt or newer
+// file, for instance) is the caller's decision; Unmarshal only says that
+// this data is not a baseline this keepwatch can trust. Fingerprints are
+// normalized, so a file written with config-form entries reads as the keys
+// the log lines carry.
 func Unmarshal(data []byte) (*Baseline, error) {
 	if len(data) > maxBaselineUnmarshalBytes {
 		return nil, fmt.Errorf("%w: %d bytes exceeds %d", errBaselineCorrupt, len(data), maxBaselineUnmarshalBytes)
@@ -287,7 +381,7 @@ func Unmarshal(data []byte) (*Baseline, error) {
 	}
 	b := &Baseline{learningStart: w.LearningStart, learningDone: w.LearningDone, users: map[string]*baselineUser{}}
 	for _, uw := range w.Users {
-		if uw.User == "" || len(uw.User) > maxBaselineUserLen {
+		if !validUserName(uw.User) {
 			return nil, fmt.Errorf("%w: unusable user name", errBaselineCorrupt)
 		}
 		if _, dup := b.users[uw.User]; dup {
@@ -298,14 +392,14 @@ func Unmarshal(data []byte) (*Baseline, error) {
 		}
 		u := &baselineUser{ips: map[string]bool{}, keys: map[string]bool{}}
 		for _, ip := range uw.IPs {
-			if ip == "" || len(ip) > maxBaselineEntryLen || u.ips[ip] {
+			if !validAddrEntry(ip) || u.ips[ip] {
 				return nil, fmt.Errorf("%w: user %q has a bad or repeated source address", errBaselineCorrupt, uw.User)
 			}
 			u.ips[ip] = true
 		}
 		for _, fp := range uw.Keys {
 			norm := normalizeKeyFP(fp)
-			if norm == "" || len(norm) > maxBaselineEntryLen || u.keys[norm] {
+			if !validKeyFP(norm) || u.keys[norm] {
 				return nil, fmt.Errorf("%w: user %q has a bad or repeated key fingerprint", errBaselineCorrupt, uw.User)
 			}
 			u.keys[norm] = true

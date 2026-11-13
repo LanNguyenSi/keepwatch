@@ -94,13 +94,24 @@ report.
   is then added, so it alerts once. A certificate publickey line is read to
   the user key's fingerprint (the ID, serial and CA parts are ignored), and a
   line whose key part does not parse (an MD5 fingerprint, for instance) is
-  checked by source address only. Keys from `authorized_keys.expected` are
+  checked by source address only. A line that admits more than one split into
+  user, address and port (a free-text certificate ID can carry a ` from
+  <addr> port <n> ssh2` fragment of its own) raises one high notifying signal
+  saying it was ambiguous and learns nothing, so no trusted Accepted line is
+  ever dropped on the split. Keys from `authorized_keys.expected` are
   given to the rule as an input and count as known from the start without
   entering the baseline; once the learning period has elapsed the baseline
   records that, and a clock step back does not reopen the phase. The baseline
   has a versioned, capped JSON form so the learning can live in the state
-  directory, and its fingerprint comparison treats the config and log
-  spellings of a `SHA256:` fingerprint as equal.
+  directory: at most 256 users and 128 source addresses and keys per user, a
+  user name of at most 64 bytes of valid UTF-8 without control bytes, a
+  canonical source address of at most 64 bytes whose IPv6 zone is
+  `A-Za-z0-9._-` only, and a key fingerprint that normalizes to 1 to 64 bytes
+  of the base64 alphabet (a leading `SHA256:` prefix, however many times it
+  is repeated, and base64 padding are equal spellings of one key); the
+  loader's size bound is derived from those caps and lengths, and a document
+  carrying a field that fails a check is refused. Its fingerprint comparison
+  treats the config and log spellings of a `SHA256:` fingerprint as equal.
 
 ### Security
 
