@@ -76,9 +76,19 @@ report.
   by unit where the unit is known, otherwise by command name). They count only
   lines whose sender journald vouches for (sshd as root in the ssh unit, PID
   1, the kernel), so a local user cannot inject lines, and a name a user can
-  choose inside a genuine line (a cgroup name, a command name, an ssh user
-  name) does not decide which unit or address a signal names. They keep a
-  capped amount of state per rule.
+   choose inside a genuine line (a cgroup name, a command name, an ssh user
+   name) does not decide which unit or address a signal names. They keep a
+   capped amount of state per rule.
+- A login rule for the daemon: successful sshd logins (`Accepted publickey`,
+  `Accepted password` and `Accepted keyboard-interactive/pam` lines, with the
+  same sender trust gate as the brute force rule) are learned for a
+  configurable learning period as info findings that do not notify; after it
+  a login from a source address or key the per-user baseline does not know
+  raises one high notifying signal and is then added, so it alerts once, and
+  keys from `authorized_keys.expected` count as known from the start. The
+  baseline has a versioned, capped JSON form so the learning can live in the
+  state directory, and its fingerprint comparison treats the config and log
+  spellings of a `SHA256:` fingerprint as equal.
 
 ### Security
 
