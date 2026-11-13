@@ -2,9 +2,12 @@ package posture
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/LanNguyenSi/keepwatch/internal/diff"
 	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 	"github.com/LanNguyenSi/keepwatch/internal/state"
@@ -206,4 +209,149 @@ func TestProblemAndErrorAreReturnedAndBaselineKept(t *testing.T) {
 	if _, err := s.Poll(t0); !errors.Is(err, boom) {
 		t.Fatalf("err %v", err)
 	}
+}
+
+func TestSignalSeverityFollowsChange(t *testing.T) {
+	for _, sv := range []result.Severity{result.Low, result.Medium} {
+		a := st(t0, chk("a", result.Pass, sv))
+		b := st(t0.Add(time.Hour), chk("a", result.Fail, sv))
+		s := seq(ok(a), ok(b))
+		_, _ = s.Poll(t0)
+		g, _ := s.Poll(t0)
+		if len(g) != 1 || g[0].Severity != sv {
+			t.Errorf("severity %s: %+v", sv, g)
+		}
+	}
+}
+
+func TestSubjectAndSummary(t *testing.T) {
+	a := st(t0, chk("c1", result.Pass, result.High), chk("c2", result.Fail, result.High))
+	b := st(t0.Add(time.Hour), chk("c1", result.Fail, result.High), chk("c2", result.Fail, result.High, item("x", "shown-x")))
+	s := seq(ok(a), ok(b))
+	_, _ = s.Poll(t0)
+	g, _ := s.Poll(t0)
+	if len(g) != 2 {
+		t.Fatalf("got %+v", g)
+	}
+	if g[0].Subject != "c1" || g[0].Summary != "c1: new_failure" {
+		t.Errorf("check change: %q %q", g[0].Subject, g[0].Summary)
+	}
+	if g[1].Subject != "c2 shown-x" || g[1].Summary != "c2: subject_new shown-x" {
+		t.Errorf("item change: %q %q", g[1].Subject, g[1].Summary)
+	}
+}
+
+func TestRawKeyUniqueAcrossCurAndPrev(t *testing.T) {
+	// cur lists l, prev lists x, both display "[r]": the change is for l,
+	// but the text is shared across the two runs, so the fallback applies.
+	a := st(t0, chk("c", result.Fail, result.High, item("raw-x", "[r]")))
+	b := st(t0.Add(time.Hour), chk("c", result.Fail, result.High, item("raw-l", "[r]")))
+	s := seq(ok(a), ok(b))
+	_, _ = s.Poll(t0)
+	g, _ := s.Poll(t0)
+	if len(g) != 1 {
+		t.Fatalf("got %+v", g)
+	}
+	if g[0].Fingerprint != event.FingerprintOf(RuleID, "c", "subject_new", "subject:[r]") {
+		t.Errorf("fingerprint %s", g[0].Fingerprint)
+	}
+}
+
+func TestRawKeyLookupFindsPrevOnly(t *testing.T) {
+	// A subject_gone is not an alert, so use diff directly through rawKey.
+	a := st(t0, chk("c", result.Fail, result.High, item("raw-x", "only-prev")))
+	b := st(t0.Add(time.Hour), chk("c", result.Fail, result.High))
+	ch := diffChange("c", "only-prev")
+	if got := rawKey(ch, a, b); got != "key:"+result.SubjectKey("raw-x") {
+		t.Errorf("prev-only key %q", got)
+	}
+	if got := rawKey(ch, b, a); got != "key:"+result.SubjectKey("raw-x") {
+		t.Errorf("cur-only key %q", got)
+	}
+	if got := rawKey(ch, b, b); got != "subject:only-prev" {
+		t.Errorf("none %q", got)
+	}
+}
+
+func TestCappedExceptionChangeUsesFallback(t *testing.T) {
+	kx, kl := result.SubjectKey("raw-x"), result.SubjectKey("raw-l")
+	keys := []string{kx, kl}
+	if keys[0] > keys[1] {
+		keys[0], keys[1] = keys[1], keys[0]
+	}
+	p := state.Check{ID: "c", Kind: "k", Status: result.Fail, Severity: result.High,
+		Items: []state.Item{{Key: kx, Subject: "[r]", Excepted: true}, {Key: kl, Subject: "other"}},
+		Total: 2, Keys: keys, Digest: "d1"}
+	c := state.Check{ID: "c", Kind: "k", Status: result.Fail, Severity: result.High,
+		Items: []state.Item{{Key: kl, Subject: "[r]"}},
+		Total: 2, Keys: keys, Digest: "d2"}
+	s := seq(ok(st(t0, p)), ok(st(t0.Add(time.Hour), c)))
+	_, _ = s.Poll(t0)
+	g, _ := s.Poll(t0)
+	if len(g) == 0 {
+		t.Fatal("no signal")
+	}
+	for _, x := range g {
+		if x.Fingerprint == event.FingerprintOf(RuleID, "c", "subject_new", "key:"+kl) {
+			t.Errorf("signal carries the key of another item: %+v", x)
+		}
+	}
+	if g[0].Fingerprint != event.FingerprintOf(RuleID, "c", "subject_new", "subject:[r]") {
+		t.Errorf("fingerprint %s", g[0].Fingerprint)
+	}
+}
+
+func TestNewReadsRealStore(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// min High: the Low failure is filtered, the High one passes.
+	s := New(store, result.High)
+	if g, err := s.Poll(t0); err != nil || g != nil {
+		t.Fatalf("missing: %v %v", g, err)
+	}
+	run1 := t0.Truncate(time.Second)
+	if err := store.Save(st(run1, chk("lo", result.Pass, result.Low), chk("hi", result.Pass, result.High))); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := s.Poll(t0); err != nil || len(g) != 0 {
+		t.Fatalf("baseline: %v %v", g, err)
+	}
+	if err := store.Save(st(run1.Add(time.Hour), chk("lo", result.Fail, result.Low), chk("hi", result.Fail, result.High))); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Poll(t0)
+	if err != nil || len(g) != 1 || g[0].Subject != "hi" || g[0].Notify {
+		t.Fatalf("second run: %+v %v", g, err)
+	}
+}
+
+func TestTransientRaceIsRetriedOnce(t *testing.T) {
+	a := st(t0, chk("a", result.Pass, result.High))
+	b := st(t0.Add(time.Hour), chk("a", result.Fail, result.High))
+	race := state.LoadResult{Problem: "/x/state.json changed while it was being opened"}
+
+	s := seq(ok(a), race, ok(b))
+	_, _ = s.Poll(t0)
+	if g, err := s.Poll(t0); err != nil || len(g) != 1 {
+		t.Fatalf("one race: %v %v", g, err)
+	}
+
+	calls := 0
+	s = &Source{load: func() (state.LoadResult, error) { calls++; return race, nil }}
+	if _, err := s.Poll(t0); err == nil {
+		t.Fatal("persisting race must be an error")
+	}
+	if calls != 2 {
+		t.Errorf("loads: %d, want 2", calls)
+	}
+}
+
+func diffChange(check, subject string) diff.Change {
+	return diff.Change{Kind: diff.SubjectNew, CheckID: check, Subject: subject}
 }

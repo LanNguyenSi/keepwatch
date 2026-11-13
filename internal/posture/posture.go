@@ -13,6 +13,7 @@ package posture
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/diff"
@@ -39,12 +40,17 @@ func New(store *state.Store, min result.Severity) *Source {
 }
 
 // Poll loads the state and returns the Signals of the changes since the last
-// run it saw. A missing state file is not an error and yields nothing. A state
-// directory that cannot be trusted, or a file that cannot be used (unreadable,
+// run it saw. A load that races with a save is tried once more. A missing
+// state file is not an error and yields nothing. A state directory that cannot be trusted, or a file that cannot be used (unreadable,
 // foreign schema version), is returned as an error; the baseline is kept, so
 // the next good load is compared with it.
 func (s *Source) Poll(now time.Time) ([]event.Signal, error) {
 	lr, err := s.load()
+	if err == nil && transient(lr.Problem) {
+		// A timer run replaced the file while it was being opened. The new
+		// file is complete, so one more try reads it.
+		lr, err = s.load()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("posture: %w", err)
 	}
@@ -70,6 +76,11 @@ func (s *Source) Poll(now time.Time) ([]event.Signal, error) {
 	return out, nil
 }
 
+// transient reports whether a load problem is the race with a concurrent save.
+func transient(problem string) bool {
+	return strings.Contains(problem, "while it was being opened")
+}
+
 func signalOf(ch diff.Change, prev, cur *state.State, now time.Time) event.Signal {
 	subject := ch.CheckID
 	summary := fmt.Sprintf("%s: %s", ch.CheckID, ch.Kind)
@@ -90,10 +101,12 @@ func signalOf(ch diff.Change, prev, cur *state.State, now time.Time) event.Signa
 
 // rawKey returns the raw subject key of an item change, read from the state
 // item the display subject belongs to. diff.Change carries only the display
-// subject, which is cleaned and may be the same text for two items. When the
-// key is not reachable (a change of a whole check, or a display subject that
-// is not unique in its check) the display subject stands in for it, so items
-// that look alike share one fingerprint rather than none.
+// subject, which is cleaned and may be the same text for two items, and diff
+// may have taken it from either run. The key is used only when exactly one raw
+// key shows that text across the current and the previous run of the check.
+// Otherwise (a change of a whole check, or a display subject that is not
+// unique) the display subject stands in for it, so items that look alike share
+// one fingerprint rather than getting another item's key.
 func rawKey(ch diff.Change, prev, cur *state.State) string {
 	if ch.Subject == "" {
 		return ""
@@ -106,13 +119,13 @@ func rawKey(ch diff.Change, prev, cur *state.State) string {
 			continue
 		}
 		for _, it := range c.Items {
-			if it.Subject == ch.Subject && (n == 0 || it.Key != found) {
+			if it.Subject != ch.Subject {
+				continue
+			}
+			if n == 0 || it.Key != found {
 				found = it.Key
 				n++
 			}
-		}
-		if n > 0 {
-			break
 		}
 	}
 	if n == 1 {
