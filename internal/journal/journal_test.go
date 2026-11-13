@@ -61,8 +61,10 @@ func TestDecodeFixtures(t *testing.T) {
 		{"priority_99", event.Event{Kind: event.KindJournal, Cursor: cursor("18"), Time: ts(1760000016000000), UID: 1000, Identifier: "app", Priority: -1, Transport: "journal", Message: "p"}},
 		// journalctl emits a field of 4096 bytes or more as null.
 		{"null_message", event.Event{Kind: event.KindJournal, Cursor: cursor("19"), Time: ts(1760000017000000), UID: 1000, Identifier: "app", Priority: 6, Transport: "journal"}},
-		// Raw text: newline and ANSI escape arrive unchanged.
+		// journalctl emits a MESSAGE with a newline and ESC as a byte array.
 		{"hostile_user_escape", event.Event{Kind: event.KindJournal, Cursor: cursor("11"), Time: ts(1760000010000000), UID: 0, SystemdUnit: "ssh.service", Identifier: "sshd", PID: 816, Priority: 6, Transport: "syslog", Comm: "sshd", Message: "Invalid user evil\n\x1b[31mRED\x1b[0m from 203.0.113.7 port 1"}},
+		// A JSON string with a newline arrives unchanged too.
+		{"hostile_user_newline", event.Event{Kind: event.KindJournal, Cursor: cursor("20"), Time: ts(1760000010000000), UID: 0, SystemdUnit: "ssh.service", Identifier: "sshd", PID: 816, Priority: 6, Transport: "syslog", Comm: "sshd", Message: "Invalid user evil\nbob from 203.0.113.7 port 1"}},
 		// Byte-array MESSAGE: raw bytes, including invalid UTF-8.
 		{"bytearray_message", event.Event{Kind: event.KindJournal, Cursor: cursor("12"), Time: ts(1760000011000000), UID: 1000, Identifier: "app", Priority: -1, Transport: "syslog", Message: "bytes \xff\xfe ok"}},
 	}
@@ -87,6 +89,15 @@ func TestDecodeErrors(t *testing.T) {
 		{"null cursor", `{"__CURSOR":null,"MESSAGE":"x"}`, ""},
 		{"bad timestamp", `{"__CURSOR":"c","__REALTIME_TIMESTAMP":"yesterday"}`, "c"},
 		{"bad uid", `{"__CURSOR":"c","_UID":"-x"}`, "c"},
+		{"uid array", `{"__CURSOR":"c","_UID":["0","1000"]}`, "c"},
+		{"uid byte array", `{"__CURSOR":"c","_UID":[48]}`, "c"},
+		{"pid array", `{"__CURSOR":"c","_PID":["1","2"]}`, "c"},
+		{"unit array", `{"__CURSOR":"c","_SYSTEMD_UNIT":["ssh.service","x.service"]}`, "c"},
+		{"unit byte array", `{"__CURSOR":"c","_SYSTEMD_UNIT":[115]}`, "c"},
+		{"transport array", `{"__CURSOR":"c","_TRANSPORT":["kernel","syslog"]}`, "c"},
+		{"timestamp array", `{"__CURSOR":"c","__REALTIME_TIMESTAMP":["1","2"]}`, "c"},
+		{"uid number", `{"__CURSOR":"c","_UID":0}`, "c"},
+		{"cursor array", `{"__CURSOR":["a","b"]}`, ""},
 		{"not an object", `["x"]`, ""},
 		{"empty", ``, ""},
 		{"truncated", `{"__CURSOR":"c","MESSAGE":"x`, ""},
@@ -117,6 +128,13 @@ func TestDecodeSenderFieldsAreSoft(t *testing.T) {
 		`{"__CURSOR":"c","MESSAGE":[[1,[2]],"x"]}`,
 		`{"__CURSOR":"c","UNIT":{"a":1},"PRIORITY":[[1]],"EXIT_CODE":true}`,
 		`{"__CURSOR":"c","PRIORITY":"-1"}`,
+		`{"__CURSOR":"c","PRIORITY":"-5"}`,
+		`{"__CURSOR":"c","PRIORITY":"+3"}`,
+		`{"__CURSOR":"c","PRIORITY":"03"}`,
+		`{"__CURSOR":"c","PRIORITY":"8"}`,
+		`{"__CURSOR":"c","PRIORITY":"-"}`,
+		`{"__CURSOR":"c","PRIORITY":"/"}`,
+		`{"__CURSOR":"c","MESSAGE":[null,"small"]}`,
 	} {
 		ev, err := Decode([]byte(line))
 		if err != nil {
@@ -126,9 +144,16 @@ func TestDecodeSenderFieldsAreSoft(t *testing.T) {
 			t.Fatalf("%s: %#v", line, ev)
 		}
 	}
-	ev, err := Decode([]byte(`{"__CURSOR":"c","PRIORITY":"7"}`))
-	if err != nil || ev.Priority != 7 {
-		t.Fatalf("priority 7: %#v %v", ev, err)
+	for p := 0; p <= 7; p++ {
+		ev, err := Decode([]byte(`{"__CURSOR":"c","PRIORITY":"` + string(rune('0'+p)) + `"}`))
+		if err != nil || ev.Priority != p {
+			t.Fatalf("priority %d: %#v %v", p, ev, err)
+		}
+	}
+	// An escaped quote inside the first value of a multi-value field.
+	ev, err := Decode([]byte(`{"__CURSOR":"c","MESSAGE":["a\"b","c"]}`))
+	if err != nil || ev.Message != `a"b` {
+		t.Fatalf("escaped quote: %#v %v", ev, err)
 	}
 }
 
@@ -213,7 +238,7 @@ func TestDecodeLargeMessage(t *testing.T) {
 }
 
 func FuzzDecode(f *testing.F) {
-	for _, name := range []string{"sshd_failed_password", "forged_sshd_syslog", "forged_unit_native", "hostile_user_escape", "bytearray_message", "no_cursor", "bad_pid", "null_uid_priority", "systemd_exit", "systemd_result", "multi_unit", "multi_message", "multi_message_string_first", "priority_high", "priority_99", "null_message"} {
+	for _, name := range []string{"sshd_failed_password", "forged_sshd_syslog", "forged_unit_native", "hostile_user_escape", "hostile_user_newline", "bytearray_message", "no_cursor", "bad_pid", "null_uid_priority", "systemd_exit", "systemd_result", "multi_unit", "multi_message", "multi_message_string_first", "priority_high", "priority_99", "null_message"} {
 		b, err := os.ReadFile(filepath.Join("testdata", name+".json"))
 		if err != nil {
 			f.Fatal(err)

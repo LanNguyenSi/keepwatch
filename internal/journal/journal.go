@@ -132,86 +132,126 @@ func byteArray(b []byte) string {
 	}
 }
 
+// setByJournald is a field journald itself sets (names starting with an
+// underscore, and __CURSOR and __REALTIME_TIMESTAMP). Journald writes one
+// string for these, so any other shape (an array, a byte array, an object,
+// a number) is not trusted data: bad is set and Decode rejects the line.
+type setByJournald struct {
+	v   string
+	bad bool
+}
+
+func (f *setByJournald) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	switch {
+	case len(b) > 0 && b[0] == '"':
+		f.v = unquote(b)
+	case string(b) == "null":
+	default:
+		f.bad = true
+	}
+	return nil
+}
+
 // entry lists the whitelisted fields. encoding/json skips every other key
 // without keeping it.
 type entry struct {
-	Cursor     value `json:"__CURSOR"`
-	Realtime   value `json:"__REALTIME_TIMESTAMP"`
-	Message    value `json:"MESSAGE"`
-	SystemdU   value `json:"_SYSTEMD_UNIT"`
-	Unit       value `json:"UNIT"`
-	Identifier value `json:"SYSLOG_IDENTIFIER"`
-	PID        value `json:"_PID"`
-	UID        value `json:"_UID"`
-	Priority   value `json:"PRIORITY"`
-	Transport  value `json:"_TRANSPORT"`
-	Comm       value `json:"_COMM"`
-	UnitResult value `json:"UNIT_RESULT"`
-	ExitCode   value `json:"EXIT_CODE"`
-	ExitStatus value `json:"EXIT_STATUS"`
+	Cursor     setByJournald `json:"__CURSOR"`
+	Realtime   setByJournald `json:"__REALTIME_TIMESTAMP"`
+	Message    value         `json:"MESSAGE"`
+	SystemdU   setByJournald `json:"_SYSTEMD_UNIT"`
+	Unit       value         `json:"UNIT"`
+	Identifier value         `json:"SYSLOG_IDENTIFIER"`
+	PID        setByJournald `json:"_PID"`
+	UID        setByJournald `json:"_UID"`
+	Priority   value         `json:"PRIORITY"`
+	Transport  setByJournald `json:"_TRANSPORT"`
+	Comm       value         `json:"_COMM"`
+	UnitResult value         `json:"UNIT_RESULT"`
+	ExitCode   value         `json:"EXIT_CODE"`
+	ExitStatus value         `json:"EXIT_STATUS"`
 }
 
 // Decode turns one journalctl JSON line into an Event. Every error is a
 // *LineError. A line without __CURSOR is an error, and so is a bad _PID,
-// _UID or __REALTIME_TIMESTAMP (journald-set fields). Problems in
+// _UID or __REALTIME_TIMESTAMP, and a journald-set field (those and
+// _SYSTEMD_UNIT, _TRANSPORT) given as anything but a string or null.
+// Problems in
 // sender-set fields are data: a field with several values yields the first,
-// and a PRIORITY that is not a number or lies outside 0..7 becomes -1, like
+// and a PRIORITY that is not exactly one digit 0..7 becomes -1, like
 // an absent one. A missing _UID is -1, a missing _PID is 0, and a missing
 // __REALTIME_TIMESTAMP leaves Time zero.
 //
 // With the arguments from Args, journalctl emits a field of 4096 bytes or
-// more as null, so a large MESSAGE reaches Decode as an empty Message.
+// more as null, so a large MESSAGE reaches Decode as an empty Message. That
+// also bounds allocation: a byte array allocates about the size of its text,
+// but an escape-heavy JSON string MESSAGE may allocate up to about 2.5 times
+// the line (decoder copy plus string conversion), which stays small because
+// such a field cannot exceed 4096 bytes.
 func Decode(line []byte) (event.Event, error) {
 	var e entry
 	if err := json.Unmarshal(line, &e); err != nil {
 		return event.Event{}, &LineError{Err: fmt.Errorf("decode line: %w", err)}
 	}
-	if e.Cursor == "" {
+	if e.Cursor.bad {
+		return event.Event{}, &LineError{Err: errors.New("__CURSOR is not a string")}
+	}
+	if e.Cursor.v == "" {
 		return event.Event{}, &LineError{Err: errors.New("line has no __CURSOR")}
 	}
-	cur := string(e.Cursor)
+	cur := e.Cursor.v
 	fail := func(err error) (event.Event, error) {
 		return event.Event{}, &LineError{Cursor: cur, Err: err}
+	}
+	for name, f := range map[string]setByJournald{
+		"__REALTIME_TIMESTAMP": e.Realtime, "_SYSTEMD_UNIT": e.SystemdU,
+		"_PID": e.PID, "_UID": e.UID, "_TRANSPORT": e.Transport,
+	} {
+		if f.bad {
+			return fail(fmt.Errorf("%s is not a string", name))
+		}
 	}
 	ev := event.Event{
 		Kind:        event.KindJournal,
 		Cursor:      cur,
-		SystemdUnit: string(e.SystemdU),
+		SystemdUnit: e.SystemdU.v,
 		Unit:        string(e.Unit),
 		Identifier:  string(e.Identifier),
-		Transport:   string(e.Transport),
+		Transport:   e.Transport.v,
 		Message:     string(e.Message),
 		Comm:        string(e.Comm),
 		UnitResult:  string(e.UnitResult),
 		ExitCode:    string(e.ExitCode),
 		ExitStatus:  string(e.ExitStatus),
 	}
-	if e.Realtime != "" {
-		us, err := strconv.ParseInt(string(e.Realtime), 10, 64)
+	if e.Realtime.v != "" {
+		us, err := strconv.ParseInt(e.Realtime.v, 10, 64)
 		if err != nil {
 			return fail(fmt.Errorf("__REALTIME_TIMESTAMP: %w", err))
 		}
 		ev.Time = time.UnixMicro(us).UTC()
 	}
 	var err error
-	if ev.PID, err = num("_PID", e.PID, 0); err != nil {
+	if ev.PID, err = num("_PID", e.PID.v, 0); err != nil {
 		return fail(err)
 	}
-	if ev.UID, err = num("_UID", e.UID, -1); err != nil {
+	if ev.UID, err = num("_UID", e.UID.v, -1); err != nil {
 		return fail(err)
 	}
+	// PRIORITY is sender-set: only a single digit 0..7 is accepted, so
+	// signs, padding and spaces never produce a value.
 	ev.Priority = -1
-	if p, perr := strconv.Atoi(string(e.Priority)); perr == nil && p >= 0 && p <= 7 {
-		ev.Priority = p
+	if p := string(e.Priority); len(p) == 1 && p[0] >= '0' && p[0] <= '7' {
+		ev.Priority = int(p[0] - '0')
 	}
 	return ev, nil
 }
 
-func num(name string, v value, absent int) (int, error) {
+func num(name string, v string, absent int) (int, error) {
 	if v == "" {
 		return absent, nil
 	}
-	n, err := strconv.Atoi(string(v))
+	n, err := strconv.Atoi(v)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
