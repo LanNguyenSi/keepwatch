@@ -24,6 +24,11 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- A request spool for the watch daemon: acknowledging or closing an incident
+  is asked for by dropping a small file into `requests/` in the state
+  directory, which the daemon reads with owner, mode, size and schema checks
+  (a file that fails one is reported with its reason instead of being
+  applied) and consumes. At most 100 files are looked at per pass.
 
 ### Security
 
