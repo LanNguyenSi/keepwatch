@@ -3,7 +3,7 @@ type: module
 title: execx, the only seam that starts a program
 description: The execution layer's contract as its callers must know it - fixed program table, its own pipe copies, the two incomplete-output signals, the process-group kill that no os/exec default gives, and the streaming sibling of Run for long-lived programs.
 tags: [execx, probes, sandbox]
-timestamp: 2026-11-13T18:05:41Z
+timestamp: 2026-11-13T18:21:13Z
 sources:
   - internal/execx/execx.go
   - internal/execx/real.go

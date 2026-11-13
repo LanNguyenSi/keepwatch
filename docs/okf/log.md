@@ -4,6 +4,9 @@
 
 ## 2026-11-13
 
+- Re-verified `module-execx.md` and `limit-known-limits.md` after the line
+  reader buffer size in `stream.go` became a named constant; no cited line
+  moved and no claim changed.
 - Re-verified `module-execx.md`, `limit-known-limits.md`,
   `invariant-single-transformation.md` and `overview-run.md` after
   `internal/execx` gained `Stream`: line-by-line delivery with a per-line cap,
