@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -31,6 +33,13 @@ var (
 	// ErrUntrusted is returned when a directory or file fails a trust check
 	// (symlink, wrong type, foreign owner, group/other writable, swapped).
 	ErrUntrusted = errors.New("not trusted")
+	// ErrInvalidSize is returned for a size cap that is negative or so large
+	// that the cap plus one overflows.
+	ErrInvalidSize = errors.New("invalid size limit")
+	// ErrChanged is returned when a file kept being replaced while it was
+	// opened, so no stable version could be looked at. It is not a trust
+	// failure (it does not wrap ErrUntrusted); the caller may retry.
+	ErrChanged = errors.New("file kept changing while it was being opened")
 )
 
 // OwnerOf reports the uid that owns the file described by fi. Tests inject one
@@ -62,6 +71,22 @@ func wantOwner() string {
 // dot, so a temporary name cannot be the name of a real file.
 const tempPrefix = ".kwtmp-"
 
+// TempPrefix is tempPrefix for the code that removes what a crash left
+// behind (a write that was killed between creating the temporary file and
+// renaming it leaves a file whose name starts with it).
+const TempPrefix = tempPrefix
+
+// openAttempts bounds how often a look/open/compare sequence is repeated when
+// the file is replaced while it is being opened.
+const openAttempts = 5
+
+func checkMax(maxSize int64) error {
+	if maxSize < 0 || maxSize == math.MaxInt64 {
+		return fmt.Errorf("%d: %w", maxSize, ErrInvalidSize)
+	}
+	return nil
+}
+
 // hooks are the steps of a write that tests make fail or interleave.
 type hooks struct {
 	write      func(f *os.File, b []byte) (int, error)
@@ -70,6 +95,7 @@ type hooks struct {
 	syncDir    func(d *os.File) error
 	dirChecked func()
 	beforeOpen func()
+	afterOpen  func()
 	afterStat  func()
 	tempName   func() (string, error)
 }
@@ -82,6 +108,7 @@ func defaultHooks() hooks {
 		syncDir:    func(d *os.File) error { return d.Sync() },
 		dirChecked: func() {},
 		beforeOpen: func() {},
+		afterOpen:  func() {},
 		afterStat:  func() {},
 		tempName:   randomTempName,
 	}
@@ -144,6 +171,13 @@ func openDir(path string, create bool, ownerOf OwnerOf, h hooks) (*Dir, error) {
 	if ownerOf == nil {
 		ownerOf = DefaultOwnerOf
 	}
+	// Clean first, so that a trailing "/" or "/." cannot make the kernel
+	// follow a symlink that Lstat would otherwise report.
+	c := filepath.Clean(path)
+	if !filepath.IsAbs(c) || c == string(filepath.Separator) {
+		return nil, fmt.Errorf("%q: must be an absolute path other than /", path)
+	}
+	path = c
 	fi, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) && create {
 		if err = os.MkdirAll(path, 0o700); err != nil {
@@ -216,10 +250,15 @@ func (d *Dir) checkFile(name string, fi fs.FileInfo) error {
 // WriteAtomic replaces the file name with data: a temporary file in the same
 // directory (mode 0600, created exclusively without following links) is
 // written and flushed, renamed over name, and the directory is flushed.
-// Whatever fails, the previous file stays as it was and the temporary file is
-// removed. data above maxSize is refused before anything is written.
+// Whatever fails before the rename, the previous file stays as it was and the
+// temporary file is removed. An error after the rename (the directory flush)
+// means the new content is in place but may not be durable. data above
+// maxSize is refused before anything is written.
 func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 	if err := validName(name); err != nil {
+		return err
+	}
+	if err := checkMax(maxSize); err != nil {
 		return err
 	}
 	if int64(len(data)) > maxSize {
@@ -264,59 +303,84 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 }
 
 // openChecked looks at name, opens it without following links and checks that
-// the opened file is the one looked at, before and after the open.
-func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, fi fs.FileInfo, err error) {
-	// Look at the path first so a symlink is named as such, and remember what
-	// is there: os.Root follows a link whose target stays inside the directory
-	// even with O_NOFOLLOW (so that flag alone is not relied on), so a file swapped in after this look is caught by
-	// comparing the opened file with this one.
-	li, lerr := d.root.Lstat(name)
-	switch {
-	case lerr == nil && li.Mode()&os.ModeSymlink != 0:
-		return nil, nil, fmt.Errorf("%s is a symlink, it is not followed: %w", d.filePath(name), ErrUntrusted)
-	case lerr != nil && !errors.Is(lerr, fs.ErrNotExist):
-		return nil, nil, lerr
-	}
-	d.hooks.beforeOpen()
-	f, err = d.root.OpenFile(name, flag|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, perm)
-	switch {
-	case errors.Is(err, syscall.ELOOP):
-		return nil, nil, fmt.Errorf("%s is a symlink, it is not followed: %w", d.filePath(name), ErrUntrusted)
-	case err != nil:
-		return nil, nil, err
-	}
-	fi, err = f.Stat()
-	if err != nil {
+// the path still names the opened file afterwards. With create, a file that
+// was absent at the look is created (the returned created is true) and is
+// removed again if a trust check on it fails.
+//
+// os.Root follows a link whose target stays inside the directory even with
+// O_NOFOLLOW, so that flag alone is not relied on: the first look names a
+// symlink or any non-regular entry before anything is opened, and the second
+// look after the open catches a link planted in between. A file that was
+// replaced by a rename between the open and the second look (a concurrent
+// WriteAtomic) is not tampering: the sequence is repeated a few times, and
+// ErrChanged is returned if it never settles.
+//
+// O_NONBLOCK keeps an open of a FIFO swapped in after the first look from
+// blocking; the regular-file check then rejects it (a write open fails).
+func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, fi fs.FileInfo, created bool, err error) {
+	for range openAttempts {
+		li, lerr := d.root.Lstat(name)
+		switch {
+		case lerr == nil && li.Mode()&os.ModeSymlink != 0:
+			return nil, nil, false, fmt.Errorf("%s is a symlink, it is not followed: %w", d.filePath(name), ErrUntrusted)
+		case lerr == nil && !li.Mode().IsRegular():
+			return nil, nil, false, fmt.Errorf("%s is not a regular file (%s): %w", d.filePath(name), li.Mode().Type(), ErrUntrusted)
+		case lerr != nil && !errors.Is(lerr, fs.ErrNotExist):
+			return nil, nil, false, lerr
+		}
+		absent := lerr != nil
+		d.hooks.beforeOpen()
+		f, err = d.root.OpenFile(name, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, perm)
+		switch {
+		case err == nil:
+		case errors.Is(err, syscall.ELOOP), strings.Contains(err.Error(), "path escapes from parent"):
+			return nil, nil, false, fmt.Errorf("%s is a link that is not followed (%v): %w", d.filePath(name), err, ErrUntrusted)
+		default:
+			return nil, nil, false, err
+		}
+		d.hooks.afterOpen()
+		created = absent && flag&os.O_CREATE != 0
+		fi, err = f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, nil, false, err
+		}
+		pi, perr := d.root.Lstat(name)
+		if perr == nil && pi.Mode()&os.ModeSymlink != 0 {
+			f.Close()
+			return nil, nil, false, fmt.Errorf("%s is a symlink, it is not followed: %w", d.filePath(name), ErrUntrusted)
+		}
+		if cerr := d.checkFile(name, fi); cerr != nil {
+			f.Close()
+			if created && perr == nil && os.SameFile(pi, fi) {
+				_ = d.root.Remove(name)
+			}
+			return nil, nil, false, cerr
+		}
+		if perr == nil && os.SameFile(pi, fi) {
+			return f, fi, created, nil
+		}
+		// Replaced (or removed) between the open and the second look.
 		f.Close()
-		return nil, nil, err
 	}
-	if lerr == nil && !os.SameFile(li, fi) {
-		f.Close()
-		return nil, nil, fmt.Errorf("%s changed while it was being opened: %w", d.filePath(name), ErrUntrusted)
-	}
-	// The path must still name the opened file: this is what catches a link
-	// planted after the first look when the file was absent then.
-	if pi, perr := d.root.Lstat(name); perr != nil || !os.SameFile(pi, fi) {
-		f.Close()
-		return nil, nil, fmt.Errorf("%s changed while it was being opened: %w", d.filePath(name), ErrUntrusted)
-	}
-	if err := d.checkFile(name, fi); err != nil {
-		f.Close()
-		return nil, nil, err
-	}
-	return f, fi, nil
+	return nil, nil, false, fmt.Errorf("%s: %w", d.filePath(name), ErrChanged)
 }
 
 // ReadCapped reads the file name. A missing file is an error for which
 // errors.Is(err, fs.ErrNotExist) holds. The file must be a regular file with
 // a trusted owner and no group/other write bit; a size above maxSize is
 // refused before reading, and the read itself stops at maxSize+1 bytes so a
-// file that grows meanwhile cannot make it unbounded.
+// file that grows meanwhile cannot make it unbounded. A file replaced by a
+// concurrent WriteAtomic is read as one complete version, either the old or
+// the new one.
 func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	f, fi, err := d.openChecked(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err := checkMax(maxSize); err != nil {
+		return nil, err
+	}
+	f, fi, _, err := d.openChecked(name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -336,21 +400,42 @@ func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 }
 
 // OpenAppend opens name for appending (O_APPEND|O_CREATE, mode 0600, links
-// not followed) and returns the file with its current size. An existing file
-// gets the same owner and mode checks as in ReadCapped. A file already larger
-// than maxSize is refused with ErrTooLarge, so the caller can rotate it. The
-// caller closes the file.
+// not followed) and returns the file with its current size. An existing entry
+// that is not a regular file is refused before it is opened, and an existing
+// file gets the same owner and mode checks as in ReadCapped. A file already
+// larger than maxSize is refused with ErrTooLarge, so the caller can rotate
+// it. A file this call created is removed again if a later check fails, and
+// the directory is flushed after a successful create. The caller closes the
+// file.
+//
+// Residual: with O_CREATE, a dangling in-directory symlink planted after the
+// first look makes the open create its target before the second look refuses
+// the link; that stray file stays inside the trusted directory.
 func (d *Dir) OpenAppend(name string, maxSize int64) (*os.File, int64, error) {
 	if err := validName(name); err != nil {
 		return nil, 0, err
 	}
-	f, fi, err := d.openChecked(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err := checkMax(maxSize); err != nil {
+		return nil, 0, err
+	}
+	f, fi, created, err := d.openChecked(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, 0, err
 	}
 	if fi.Size() > maxSize {
 		f.Close()
 		return nil, 0, fmt.Errorf("%s is %d bytes, larger than the limit %d: %w", d.filePath(name), fi.Size(), maxSize, ErrTooLarge)
+	}
+	if created {
+		dir, err := d.root.Open(".")
+		if err == nil {
+			err = d.hooks.syncDir(dir)
+			dir.Close()
+		}
+		if err != nil {
+			f.Close()
+			return nil, 0, err
+		}
 	}
 	return f, fi.Size(), nil
 }

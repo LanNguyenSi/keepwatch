@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func newDir(t *testing.T) (*Dir, string) {
@@ -498,8 +503,9 @@ func TestOpenAppendOversizeExisting(t *testing.T) {
 	f.Close()
 }
 
-// A symlink planted after the path was seen to be absent is refused by the
-// open itself (no earlier look to compare with), and its target is untouched.
+// A symlink planted after the path was seen to be absent is not stopped by the
+// open (os.Root follows an in-directory link); the look after the open refuses
+// it, and the target's content is untouched.
 func TestOpenAppendSymlinkPlantedBeforeCreate(t *testing.T) {
 	d, p := newDir(t)
 	if err := d.WriteAtomic("real", []byte("secret"), 100); err != nil {
@@ -519,5 +525,326 @@ func TestOpenAppendSymlinkPlantedBeforeCreate(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(p, "real")); string(b) != "secret" {
 		t.Fatalf("target was modified: %q", b)
+	}
+}
+
+func TestOpenDirPathForms(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{link + "/", link + "/.", link + "//"} {
+		if d, err := OpenDir(p, false, nil); !errors.Is(err, ErrUntrusted) {
+			if d != nil {
+				d.Close()
+			}
+			t.Errorf("%q: got %v, want ErrUntrusted", p, err)
+		}
+	}
+	for _, p := range []string{"rel/dir", "", ".", "/", "//", "/."} {
+		for _, create := range []bool{false, true} {
+			if d, err := OpenDir(p, create, nil); err == nil {
+				d.Close()
+				t.Errorf("%q create=%v: accepted", p, create)
+			}
+		}
+	}
+	// A messy but real path is cleaned and stored cleaned.
+	d, err := OpenDir(real+"/./", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.Path() != real {
+		t.Fatalf("Path() = %q, want %q", d.Path(), real)
+	}
+}
+
+func withTimeout(t *testing.T, what string, fn func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s blocked", what)
+		return nil
+	}
+}
+
+func TestFIFOAndDirectoryEntries(t *testing.T) {
+	d, p := newDir(t)
+	if err := syscall.Mkfifo(filepath.Join(p, "fifo"), 0o600); err != nil {
+		t.Skip(err)
+	}
+	if err := os.Mkdir(filepath.Join(p, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"fifo", "sub"} {
+		err := withTimeout(t, "OpenAppend "+n, func() error {
+			f, _, err := d.OpenAppend(n, 100)
+			if f != nil {
+				f.Close()
+			}
+			return err
+		})
+		if !errors.Is(err, ErrUntrusted) {
+			t.Errorf("OpenAppend %s: got %v, want ErrUntrusted", n, err)
+		}
+		err = withTimeout(t, "ReadCapped "+n, func() error { _, err := d.ReadCapped(n, 100); return err })
+		if !errors.Is(err, ErrUntrusted) {
+			t.Errorf("ReadCapped %s: got %v, want ErrUntrusted", n, err)
+		}
+	}
+}
+
+// A FIFO swapped in after the first look must not block the open.
+func TestFIFOSwappedBeforeOpen(t *testing.T) {
+	for _, op := range []string{"read", "append"} {
+		t.Run(op, func(t *testing.T) {
+			d, p := newDir(t)
+			if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+				t.Fatal(err)
+			}
+			d.hooks.beforeOpen = func() {
+				fp := filepath.Join(p, "a")
+				if err := os.Remove(fp); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := syscall.Mkfifo(fp, 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+			err := withTimeout(t, op, func() error {
+				if op == "read" {
+					_, err := d.ReadCapped("a", 10)
+					return err
+				}
+				f, _, err := d.OpenAppend("a", 10)
+				if f != nil {
+					f.Close()
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}
+
+// A reader racing atomic replaces sees one complete version and never a trust
+// error.
+func TestConcurrentReplaceAndRead(t *testing.T) {
+	d, _ := newDir(t)
+	versions := map[string]bool{}
+	var vs [3][]byte
+	for i := range vs {
+		vs[i] = bytes.Repeat([]byte{byte('a' + i)}, 4096)
+		versions[string(vs[i])] = true
+	}
+	if err := d.WriteAtomic("a", vs[0], 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			if err := d.WriteAtomic("a", vs[i%3], 1<<20); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	var reads, changed int
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		b, err := d.ReadCapped("a", 1<<20)
+		switch {
+		case errors.Is(err, ErrUntrusted):
+			t.Fatalf("benign replace reported as untrusted: %v", err)
+		case errors.Is(err, ErrChanged):
+			changed++
+		case err != nil:
+			t.Fatal(err)
+		case !versions[string(b)]:
+			t.Fatalf("incomplete or mixed read of %d bytes", len(b))
+		default:
+			reads++
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
+	t.Logf("%d reads, %d ErrChanged", reads, changed)
+	if reads == 0 {
+		t.Fatal("no read succeeded")
+	}
+}
+
+func replaceFile(t *testing.T, p, name, content string) {
+	t.Helper()
+	tmp := filepath.Join(p, "swap-"+name)
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(p, name)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A file replaced once while it is being opened is read on the next attempt.
+func TestReplacedOnceIsRetried(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("old"), 10); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	d.hooks.afterOpen = func() {
+		if n++; n == 1 {
+			replaceFile(t, p, "a", "new")
+		}
+	}
+	b, err := d.ReadCapped("a", 10)
+	if err != nil || string(b) != "new" {
+		t.Fatalf("got %q, %v", b, err)
+	}
+}
+
+// A file replaced on every attempt yields ErrChanged, which is not a trust
+// error.
+func TestReplacedEveryTimeIsErrChanged(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("old"), 10); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	d.hooks.afterOpen = func() { n++; replaceFile(t, p, "a", "new") }
+	_, err := d.ReadCapped("a", 10)
+	if !errors.Is(err, ErrChanged) || errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrChanged only", err)
+	}
+	if n != openAttempts {
+		t.Fatalf("%d attempts, want %d", n, openAttempts)
+	}
+}
+
+func TestMaxSizeBounds(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "a"), []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []int64{-1, math.MinInt64, math.MaxInt64} {
+		if err := d.WriteAtomic("w", []byte("x"), m); !errors.Is(err, ErrInvalidSize) {
+			t.Errorf("WriteAtomic %d: %v", m, err)
+		}
+		if _, err := d.ReadCapped("a", m); !errors.Is(err, ErrInvalidSize) {
+			t.Errorf("ReadCapped %d: %v", m, err)
+		}
+		if f, _, err := d.OpenAppend("new", m); !errors.Is(err, ErrInvalidSize) {
+			if f != nil {
+				f.Close()
+			}
+			t.Errorf("OpenAppend %d: %v", m, err)
+		}
+	}
+	if got := entries(t, p); len(got) != 1 {
+		t.Fatalf("entries after refused sizes: %v", got)
+	}
+	// 0 and MaxInt64-1 are valid.
+	if err := d.WriteAtomic("z", nil, 0); err != nil {
+		t.Errorf("WriteAtomic cap 0: %v", err)
+	}
+	if b, err := d.ReadCapped("a", math.MaxInt64-1); err != nil || string(b) != "12345" {
+		t.Errorf("ReadCapped big cap: %q, %v", b, err)
+	}
+}
+
+func TestOpenAppendCreatedFileCleanup(t *testing.T) {
+	d, p := newDir(t)
+	// A created file that fails the owner check is removed again.
+	d.ownerOf = foreign
+	if f, _, err := d.OpenAppend("audit", 10); !errors.Is(err, ErrUntrusted) {
+		if f != nil {
+			f.Close()
+		}
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+	if got := entries(t, p); len(got) != 0 {
+		t.Fatalf("created file left behind: %v", got)
+	}
+	// An existing file that fails the check is kept.
+	if err := os.WriteFile(filepath.Join(p, "old"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f, _, err := d.OpenAppend("old", 10); !errors.Is(err, ErrUntrusted) {
+		if f != nil {
+			f.Close()
+		}
+		t.Fatalf("got %v", err)
+	}
+	if got := entries(t, p); len(got) != 1 {
+		t.Fatalf("existing file removed: %v", got)
+	}
+}
+
+func TestOpenAppendSyncsDirAfterCreate(t *testing.T) {
+	d, _ := newDir(t)
+	synced := 0
+	d.hooks.syncDir = func(f *os.File) error { synced++; return f.Sync() }
+	f, _, err := d.OpenAppend("audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if synced != 1 {
+		t.Fatalf("dir synced %d times after create, want 1", synced)
+	}
+	f, _, err = d.OpenAppend("audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if synced != 1 {
+		t.Fatalf("dir synced for an existing file")
+	}
+	d.hooks.syncDir = func(*os.File) error { return errors.New("boom") }
+	if f, _, err := d.OpenAppend("audit2", 10); err == nil {
+		f.Close()
+		t.Fatal("want the sync error")
+	}
+}
+
+// A link that leaves the directory, planted after the first look, is a trust
+// failure.
+func TestEscapingLinkPlantedBeforeOpen(t *testing.T) {
+	d, p := newDir(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("o"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.beforeOpen = func() {
+		_ = os.Remove(filepath.Join(p, "a"))
+		_ = os.Symlink(outside, filepath.Join(p, "a"))
+	}
+	if _, err := d.ReadCapped("a", 10); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("got %v, want ErrUntrusted", err)
+	}
+}
+
+func TestTempPrefixExported(t *testing.T) {
+	if TempPrefix != tempPrefix || !strings.HasPrefix(TempPrefix, ".") {
+		t.Fatalf("TempPrefix %q", TempPrefix)
 	}
 }
