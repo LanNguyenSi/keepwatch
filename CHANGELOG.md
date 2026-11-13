@@ -27,14 +27,31 @@ report.
 - Notification worker for the watch daemon: a bounded queue with its own
   goroutine, a per-incident and a global rate limit, reported drops, and an
   incident notice that is cleaned before it is cut.
+- A single-instance lock for the state directory: an exclusive non-blocking
+  `flock` on `watch.lock`, opened under the secure file rules (no symlink,
+  mode `0600`, trusted owner), so a second lock attempt on the same directory
+  reports that the lock is held instead of running twice; the lock file is
+  kept after release, and the lock is unsupported rather than silently absent
+  on platforms without `flock`.
+- An incident store for the watch daemon: signals are grouped by fingerprint
+  into incidents with a short stable id, and a repeated signal updates the
+  count and last-seen time, a closed incident reopens (and counts the
+  reopening), and a new or reopened incident asks for a notification that
+  stays pending until it is marked as sent. Incidents live in `incidents.json`
+  in the state directory (versioned, written atomically, at most 500). Open or
+  acked incidents idle for 7 days are closed, and when the store is full the
+  least severe incident is evicted for a signal that is at least as severe
+  (closed incidents go first), so a flood of low-severity incidents cannot
+  blind the daemon. A file that is corrupt or of another version is reported
+  and left as it is.
 - Rules for the daemon that turn journal events into signals: an ssh brute
   force rule (failed and invalid-user logins, plus refused pre-auth
   connections, per source address or IPv6 /64), a restart loop rule (systemd
   automatic restarts per unit) and an OOM kill rule (kernel and systemd lines,
-  by unit where the unit is known, otherwise by command name). They count
-  only lines whose sender journald vouches for (sshd as root in the ssh unit,
-  PID 1, the kernel), so a local user cannot inject lines, and a name a user
-  can choose inside a genuine line (a cgroup name, a command name, an ssh user
+  by unit where the unit is known, otherwise by command name). They count only
+  lines whose sender journald vouches for (sshd as root in the ssh unit, PID
+  1, the kernel), so a local user cannot inject lines, and a name a user can
+  choose inside a genuine line (a cgroup name, a command name, an ssh user
   name) does not decide which unit or address a signal names. They keep a
   capped amount of state per rule.
 
