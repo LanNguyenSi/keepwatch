@@ -24,6 +24,9 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- Notification worker for the watch daemon: a bounded queue with its own
+  goroutine, a per-incident and a global rate limit, reported drops, and an
+  incident notice that is cleaned before it is cut.
 - An audit log for the daemon: an append-only file in the state directory in
   which every record carries the SHA-256 of its own canonical bytes and of the
   record before it, synced to disk on every append, with a size limit at which
