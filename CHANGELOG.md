@@ -30,12 +30,16 @@ report.
 - An audit log for the daemon: an append-only file in the state directory in
   which every record carries the SHA-256 of its own canonical bytes and of the
   record before it, synced to disk on every append, with a size limit at which
-  it refuses to write. A torn last line from a crash is kept as it is and
-  accounted for by a recovery record. The reader checks the whole chain from
-  the first record (content, order, links) and can filter records by kind,
-  incident and time. It does not notice a log that was cut off at its end,
-  and anyone who can write the file can rewrite all of it consistently; both
-  limits are documented.
+  it refuses to write; ordinary records stop a little earlier, so that one
+  last record (a stop or an error) and the recovery record still fit. Opening
+  the log reads only its end, so a log of any size opens in constant memory.
+  Whatever a crash left after the last intact record, also a crash while the
+  log was being recovered, is kept as it is and accounted for by one recovery
+  record that names its offset, length and hash. The reader checks the whole
+  chain from the first record (content, order, links), refuses what the writer
+  could not have stored, and can filter records by kind, incident and time. It
+  does not notice a log that was cut off at its end, and anyone who can write
+  the file can rewrite all of it consistently; both limits are documented.
 
 ### Security
 

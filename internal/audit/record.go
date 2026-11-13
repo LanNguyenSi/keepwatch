@@ -17,6 +17,17 @@
 // read it. What the chain proves and what it does not (a cut-off end, an
 // attacker who rewrites everything) is on Verify. Rotation does not exist:
 // at the size limit the writer refuses with ErrFull.
+//
+// A full log. Ordinary records are refused at MaxSize minus ReserveBytes; the
+// reserve keeps room for one terminal record (DaemonError or DaemonStop) and
+// for the record Open appends after a torn tail, so the daemon can still say
+// that it stopped because the log is full. Nothing in keepwatch shrinks,
+// rotates or deletes the file. An operator who finds the daemon stopped for
+// this reason stops it (if it is running), runs Verify over the log and keeps
+// the result (Count and LastHash) with the file, moves the file out of the
+// state directory (never truncates it in place), and starts the daemon: it
+// begins a new log at Seq 1 from Genesis. The two files are separate chains
+// and are verified separately; nothing links the new one to the old one.
 package audit
 
 import "time"

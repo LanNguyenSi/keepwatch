@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,22 +222,28 @@ func TestReopenOfEmptyFileStartsAtGenesis(t *testing.T) {
 func TestTornTail(t *testing.T) {
 	_, lines := chainLines(sample(3))
 	good := join(lines)
+	two := join(lines[:2])
 	partial := lines[2][:len(lines[2])/2] // half of a record, as a crash leaves it
 	cases := []struct {
 		name       string
 		content    []byte
-		tornAt     int // offset of the torn line
-		tornBytes  []byte
+		tornAt     int    // offset of the torn region
+		region     []byte // the bytes after the last intact record
 		wantSeq    uint64 // seq of the recovery record
-		addNewline bool
+		terminated bool   // the region already ends with a newline
 	}{
-		{"unterminated fragment", append(join(lines[:2]), partial...), len(join(lines[:2])), partial, 3, true},
-		{"invalid line with newline", append(join(lines[:2]), append(append([]byte(nil), partial...), '\n')...), len(join(lines[:2])), partial, 3, false},
-		{"zero filled tail", append(join(lines[:2]), make([]byte, 40)...), len(join(lines[:2])), make([]byte, 40), 3, true},
-		{"empty line at the end", append(append([]byte(nil), good...), '\n'), len(good), nil, 4, false},
-		{"fragment only", partial, 0, partial, 1, true},
-		{"invalid line only", append(append([]byte(nil), partial...), '\n'), 0, partial, 1, false},
-		{"non canonical last line", append(join(lines[:2]), append([]byte(" "+string(lines[2])), '\n')...), len(join(lines[:2])), []byte(" " + string(lines[2])), 3, false},
+		{"unterminated fragment", append(append([]byte(nil), two...), partial...), len(two), partial, 3, false},
+		{"invalid line with newline", append(append([]byte(nil), two...), append(append([]byte(nil), partial...), '\n')...), len(two), append(append([]byte(nil), partial...), '\n'), 3, true},
+		{"zero filled tail", append(append([]byte(nil), two...), make([]byte, 40)...), len(two), make([]byte, 40), 3, false},
+		{"empty line at the end", append(append([]byte(nil), good...), '\n'), len(good), []byte("\n"), 4, true},
+		{"fragment only", partial, 0, partial, 1, false},
+		{"invalid line only", append(append([]byte(nil), partial...), '\n'), 0, append(append([]byte(nil), partial...), '\n'), 1, true},
+		{"non canonical last line", append(append([]byte(nil), two...), append([]byte(" "+string(lines[2])), '\n')...), len(two), append([]byte(" "+string(lines[2])), '\n'), 3, true},
+		{"two lines, the last without newline", append(append([]byte(nil), two...), []byte("junk\nmore junk")...), len(two), []byte("junk\nmore junk"), 3, false},
+		{"two lines with newlines", append(append([]byte(nil), two...), []byte("junk\nmore junk\n")...), len(two), []byte("junk\nmore junk\n"), 3, true},
+		{"garbage then a fragment", append(append([]byte(nil), lines[0]...), append([]byte("\njunk\n"), lines[2][:20]...)...), len(lines[0]) + 1, append([]byte("junk\n"), lines[2][:20]...), 2, false},
+		{"empty line then a fragment", append(append([]byte(nil), join(lines[:1])...), append([]byte("\n"), lines[2][:20]...)...), len(lines[0]) + 1, append([]byte("\n"), lines[2][:20]...), 2, false},
+		{"garbage then an invalid line", append(append([]byte(nil), join(lines[:1])...), []byte("junk\nmore junk\n")...), len(lines[0]) + 1, []byte("junk\nmore junk\n"), 2, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -251,7 +258,7 @@ func TestTornTail(t *testing.T) {
 			if rec == nil {
 				t.Fatal("torn tail not reported")
 			}
-			want := Recovery{Offset: int64(c.tornAt), Length: int64(len(c.tornBytes)), Hash: sumHex(c.tornBytes), Seq: c.wantSeq}
+			want := Recovery{Offset: int64(c.tornAt), Length: int64(len(c.region)), Hash: sumHex(c.region), Terminated: c.terminated, Seq: c.wantSeq}
 			if *rec != want {
 				t.Fatalf("recovery %+v, want %+v", *rec, want)
 			}
@@ -260,7 +267,7 @@ func TestTornTail(t *testing.T) {
 				t.Fatal("earlier bytes were changed")
 			}
 			added := after[len(c.content):]
-			if c.addNewline != (len(added) > 0 && added[0] == '\n' && bytes.Count(added, []byte("\n")) == 2) {
+			if c.terminated == (len(added) > 0 && added[0] == '\n') {
 				t.Errorf("newline handling: added %q", added)
 			}
 			res := mustVerify(t, "recovered", after)
@@ -270,7 +277,7 @@ func TestTornTail(t *testing.T) {
 			var last Record
 			_ = Show(bytes.NewReader(after), Filter{}, func(r Record) error { last = r; return nil })
 			if last.Kind != AuditRecovered || last.Seq != c.wantSeq || !last.Time.Equal(now) ||
-				last.Summary != tornSummary(want.Offset, want.Length, want.Hash) || last.IncidentID != "" || last.Fingerprint != "" {
+				last.Summary != tornSummary(want.Offset, want.Length, want.Terminated, want.Hash) || last.IncidentID != "" || last.Fingerprint != "" {
 				t.Errorf("recovery record %+v", last)
 			}
 			// The writer continues after the recovery record.
@@ -293,20 +300,40 @@ func TestTornTail(t *testing.T) {
 	}
 }
 
-func TestTornTailLargerThanLineCap(t *testing.T) {
-	d, p := newDir(t)
-	w, _ := openW(t, d, Options{})
-	put(t, w, 2)
-	w.Close()
-	junk := bytes.Repeat([]byte("j"), 4*MaxLineBytes+3)
-	appendRaw(t, p, junk)
-	_, rec := openW(t, d, Options{})
-	if rec == nil || rec.Length != int64(len(junk)) || rec.Hash != sumHex(junk) {
-		t.Fatalf("%+v", rec)
-	}
-	res := mustVerify(t, "large torn", readLog(t, p))
-	if res.TornLines != 1 || res.Count != 3 {
-		t.Fatalf("%+v", res)
+func TestTornRegionBoundAtOpen(t *testing.T) {
+	for _, withRecords := range []int{0, 2} {
+		for name, size := range map[string]int{"at the bound": MaxTornBytes, "past the bound": MaxTornBytes + 1} {
+			t.Run(fmt.Sprintf("%s after %d records", name, withRecords), func(t *testing.T) {
+				d, p := newDir(t)
+				w, _ := openW(t, d, Options{})
+				put(t, w, withRecords)
+				w.Close()
+				junk := bytes.Repeat([]byte("j"), size)
+				appendRaw(t, p, junk)
+				before := readLog(t, p)
+				w2, rec, err := Open(d, Options{Now: func() time.Time { return t0 }})
+				if size > MaxTornBytes {
+					if !errors.Is(err, ErrCorrupt) || w2 != nil {
+						t.Fatalf("got %v %v", w2, err)
+					}
+					if !bytes.Equal(readLog(t, p), before) {
+						t.Fatal("the file was changed")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer w2.Close()
+				if rec == nil || rec.Length != int64(len(junk)) || rec.Hash != sumHex(junk) || rec.Terminated {
+					t.Fatalf("%+v", rec)
+				}
+				res := mustVerify(t, "large torn", readLog(t, p))
+				if res.TornLines != 1 || res.Count != uint64(withRecords+1) {
+					t.Fatalf("%+v", res)
+				}
+			})
+		}
 	}
 }
 
@@ -316,12 +343,11 @@ func TestOpenRefusesDamageThatIsNotATornWrite(t *testing.T) {
 		return bytes.Replace(l, []byte(r.Hash), []byte(strings.Repeat("a", 64)), 1)
 	}
 	cases := map[string][]byte{
-		"last record with a wrong hash":     join([][]byte{lines[0], lines[1], badHash(lines[2], recs[2])}),
-		"only record with a wrong hash":     join([][]byte{badHash(lines[0], recs[0])}),
-		"bad record before a torn fragment": append(join([][]byte{lines[0], badHash(lines[1], recs[1])}), lines[2][:20]...),
-		"garbage before a torn fragment":    append(join([][]byte{lines[0], []byte("junk")}), lines[2][:20]...),
-		"garbage before an invalid line":    join([][]byte{lines[0], []byte("junk"), []byte("more junk")}),
-		"empty line before a torn fragment": append(join([][]byte{lines[0], {}}), lines[2][:20]...),
+		"last record with a wrong hash":                  join([][]byte{lines[0], lines[1], badHash(lines[2], recs[2])}),
+		"only record with a wrong hash":                  join([][]byte{badHash(lines[0], recs[0])}),
+		"bad record before a torn fragment":              append(join([][]byte{lines[0], badHash(lines[1], recs[1])}), lines[2][:20]...),
+		"bad record after a torn fragment":               join([][]byte{lines[0], lines[1][:20], badHash(lines[2], recs[2])}),
+		"bad record, then garbage, then an unterminated": append(join([][]byte{lines[0], badHash(lines[1], recs[1]), []byte("junk")}), "tail"...),
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -342,21 +368,68 @@ func TestOpenRefusesChangedFile(t *testing.T) {
 	d, p := newDir(t)
 	w, _ := openW(t, d, Options{})
 	put(t, w, 2)
-	// A writer that believes the file has another size than it has.
-	x := &Writer{size: 5, max: DefaultMaxSize}
-	if _, err := x.resume(d); !errors.Is(err, securefile.ErrChanged) {
-		t.Fatalf("got %v", err)
+	// A writer that believes the file has another size than it has: bigger
+	// and smaller.
+	for _, believed := range []int64{5, w.Size() + 7} {
+		x := &Writer{f: w.f, size: believed, max: DefaultMaxSize}
+		if _, err := x.resume(); !errors.Is(err, securefile.ErrChanged) {
+			t.Fatalf("believed %d: got %v", believed, err)
+		}
 	}
-	_ = p
+	// A file that shrank between the check and the read.
+	x := &Writer{f: w.f, size: w.Size(), max: DefaultMaxSize}
+	if err := os.Truncate(logPath(p), w.Size()-3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.resume(); !errors.Is(err, securefile.ErrChanged) {
+		t.Fatalf("shrunk: got %v", err)
+	}
+}
+
+func TestOpenReadsTheFileItAppendsTo(t *testing.T) {
+	// The log is replaced by another file (same name, other content) after
+	// the writer opened it: the writer keeps working on the descriptor it
+	// holds and never mixes in the file that the name now points to.
+	d, p := newDir(t)
+	w, _ := openW(t, d, Options{})
+	recs := put(t, w, 2)
+	w.Close()
+	_, other := chainLines(sample(9))
+	w2, _, err := Open(d, Options{afterOpen: func() {
+		// Between the open and the read, swap the file by name.
+		if err := os.WriteFile(logPath(p)+".new", join(other), 0o600); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(logPath(p)+".new", logPath(p)); err != nil {
+			t.Error(err)
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+	r, err := w2.Append(sample(1)[0])
+	if err != nil || r.Seq != 3 || r.Prev != recs[1].Hash {
+		t.Fatalf("resumed from the swapped file: %+v %v", r, err)
+	}
+}
+
+// sizedFor is a MaxSize that lets ordinary records reach ordinary bytes.
+func sizedFor(ordinary int64) int64 { return ordinary + ReserveBytes }
+
+func lineLenOf(t *testing.T, r Record) int64 {
+	t.Helper()
+	_, probe := chainLines([]Record{r})
+	return int64(len(probe[0]) + 1)
 }
 
 func TestSizeLimit(t *testing.T) {
 	_, lines := chainLines(sample(3))
 	lineLen := int64(len(lines[0]) + 1)
-	t.Run("refuses at the limit and leaves the file alone", func(t *testing.T) {
+	t.Run("ordinary records stop at the limit minus the reserve and leave the file alone", func(t *testing.T) {
 		d, p := newDir(t)
 		// room for exactly two records of this size
-		w, _ := openW(t, d, Options{MaxSize: 2*lineLen + 20})
+		w, _ := openW(t, d, Options{MaxSize: sizedFor(2*lineLen + 20)})
 		for i := 0; i < 2; i++ {
 			if _, err := w.Append(sample(3)[i]); err != nil {
 				t.Fatal(err)
@@ -370,8 +443,8 @@ func TestSizeLimit(t *testing.T) {
 		if !bytes.Equal(before, readLog(t, p)) {
 			t.Fatal("the refused record was written")
 		}
-		// Not a failure of the writer: the refusal stays the same, a smaller
-		// record that fits is accepted, and the chain has no hole.
+		// Not a failure of the writer: the refusal stays the same and the
+		// chain has no hole.
 		if _, err := w.Append(sample(3)[2]); !errors.Is(err, ErrFull) {
 			t.Fatalf("second try: %v", err)
 		}
@@ -380,15 +453,14 @@ func TestSizeLimit(t *testing.T) {
 	t.Run("a record that fits exactly is written, one byte less room is not", func(t *testing.T) {
 		d, p := newDir(t)
 		r := sample(1)[0]
-		_, probe := chainLines([]Record{r})
-		exact := int64(len(probe[0]) + 1)
-		w, _ := openW(t, d, Options{MaxSize: exact - 1})
+		exact := lineLenOf(t, r)
+		w, _ := openW(t, d, Options{MaxSize: sizedFor(exact - 1)})
 		if _, err := w.Append(r); !errors.Is(err, ErrFull) {
 			t.Fatalf("one byte short: %v", err)
 		}
 		w.Close()
 		os.Remove(logPath(p))
-		w2, _ := openW(t, d, Options{MaxSize: exact})
+		w2, _ := openW(t, d, Options{MaxSize: sizedFor(exact)})
 		if _, err := w2.Append(r); err != nil {
 			t.Fatalf("exact fit: %v", err)
 		}
@@ -409,31 +481,179 @@ func TestSizeLimit(t *testing.T) {
 		if !errors.Is(err, ErrFull) || !errors.Is(err, securefile.ErrTooLarge) {
 			t.Fatalf("got %v", err)
 		}
-		// At the limit exactly, open works and the next append is refused.
+		// At the limit exactly, open works and no record is accepted, not
+		// even a terminal one.
 		w2, _, err := Open(d, Options{MaxSize: int64(len(before))})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer w2.Close()
-		if _, err := w2.Append(sample(1)[0]); !errors.Is(err, ErrFull) {
-			t.Fatalf("got %v", err)
+		for _, k := range []Kind{IncidentOpen, DaemonStop, DaemonError} {
+			r := sample(1)[0]
+			r.Kind = k
+			if _, err := w2.Append(r); !errors.Is(err, ErrFull) {
+				t.Fatalf("%s: got %v", k, err)
+			}
 		}
 	})
-	t.Run("the recovery record needs room too", func(t *testing.T) {
+	t.Run("the recovery record uses the reserve and needs room there", func(t *testing.T) {
 		d, p := newDir(t)
 		w, _ := openW(t, d, Options{})
 		put(t, w, 2)
 		w.Close()
-		appendRaw(t, p, []byte(`{"seq":3,`))
+		// A torn region bigger than the reserve, so that the recovery record
+		// starts beyond the ordinary limit.
+		appendRaw(t, p, bytes.Repeat([]byte("t"), ReserveBytes+500))
 		before := readLog(t, p)
-		_, _, err := Open(d, Options{MaxSize: int64(len(before)) + 10})
+		// Find the size after a recovery with room to spare.
+		probe := t.TempDir()
+		pd, err := securefile.OpenDir(filepath.Join(probe, "s"), true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pd.Close()
+		if err := os.WriteFile(filepath.Join(probe, "s", FileName), before, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pw, _, err := Open(pd, Options{Now: func() time.Time { return t0 }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		final := pw.Size()
+		pw.Close()
+		if final-ReserveBytes >= int64(len(before)) {
+			t.Fatal("test bug: the recovery record does not need the reserve")
+		}
+
+		_, _, err = Open(d, Options{MaxSize: final - 1, Now: func() time.Time { return t0 }})
 		if !errors.Is(err, ErrFull) {
-			t.Fatalf("got %v", err)
+			t.Fatalf("one byte short: %v", err)
 		}
 		if !bytes.Equal(before, readLog(t, p)) {
 			t.Fatal("the file was changed")
 		}
+		w2, rec, err := Open(d, Options{MaxSize: final, Now: func() time.Time { return t0 }})
+		if err != nil || rec == nil {
+			t.Fatalf("exact fit: %v %v", rec, err)
+		}
+		defer w2.Close()
+		if w2.Size() != final {
+			t.Fatalf("size %d, want %d", w2.Size(), final)
+		}
 	})
+	t.Run("a log in the reserve opens; only a terminal record is taken", func(t *testing.T) {
+		d, _ := newDir(t)
+		w, _ := openW(t, d, Options{MaxSize: sizedFor(2*lineLen + 20)})
+		for i := 0; i < 2; i++ {
+			if _, err := w.Append(sample(3)[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stop := sample(1)[0]
+		stop.Kind = DaemonStop
+		if _, err := w.Append(stop); err != nil {
+			t.Fatalf("terminal record in the reserve: %v", err)
+		}
+		w.Close()
+		w2, rec := openW(t, d, Options{MaxSize: sizedFor(2*lineLen + 20)})
+		if rec != nil {
+			t.Fatalf("%+v", rec)
+		}
+		if w2.Size() <= w2.MaxSize()-ReserveBytes {
+			t.Fatal("test bug: the log is not in the reserve")
+		}
+		if _, err := w2.Append(sample(1)[0]); !errors.Is(err, ErrFull) {
+			t.Fatalf("ordinary record: %v", err)
+		}
+		// A terminal record of the new run may use the reserve again.
+		stop.Kind = DaemonError
+		if _, err := w2.Append(stop); err != nil {
+			t.Fatalf("terminal record after reopen: %v", err)
+		}
+	})
+}
+
+func TestTerminalRecordUsesTheReserveOnce(t *testing.T) {
+	r := sample(1)[0]
+	for _, kind := range []Kind{DaemonStop, DaemonError} {
+		t.Run(string(kind), func(t *testing.T) {
+			d, p := newDir(t)
+			lineLen := lineLenOf(t, r)
+			w, _ := openW(t, d, Options{MaxSize: sizedFor(lineLen)})
+			if _, err := w.Append(r); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Append(r); !errors.Is(err, ErrFull) {
+				t.Fatalf("ordinary record at the limit: %v", err)
+			}
+			term := r
+			term.Kind = kind
+			if _, err := w.Append(term); err != nil {
+				t.Fatalf("terminal record: %v", err)
+			}
+			if w.Size() <= w.MaxSize()-ReserveBytes {
+				t.Fatal("test bug: the terminal record did not use the reserve")
+			}
+			// Only one: a second terminal record, of either kind, and any
+			// other record are refused.
+			for _, k := range []Kind{DaemonStop, DaemonError, IncidentClose, AuditRecovered} {
+				x := r
+				x.Kind = k
+				if _, err := w.Append(x); !errors.Is(err, ErrFull) {
+					t.Errorf("%s after the terminal record: %v", k, err)
+				}
+			}
+			mustVerify(t, "terminal", readLog(t, p))
+		})
+	}
+}
+
+func TestOnlyTerminalKindsUseTheReserve(t *testing.T) {
+	r := sample(1)[0]
+	for _, kind := range []Kind{IncidentOpen, AuditRecovered, DaemonStart, NotifyDropped, Kind("daemon_stop2")} {
+		d, _ := newDir(t)
+		w, _ := openW(t, d, Options{MaxSize: sizedFor(10)})
+		x := r
+		x.Kind = kind
+		if _, err := w.Append(x); !errors.Is(err, ErrFull) {
+			t.Errorf("%s: got %v", kind, err)
+		}
+	}
+}
+
+func TestTerminalRecordUpperBoundAndRetry(t *testing.T) {
+	r := sample(1)[0]
+	r.Kind = DaemonError
+	exact := lineLenOf(t, r)
+	// MaxSize below the reserve: ordinary records never fit, a terminal one
+	// fits up to MaxSize exactly.
+	d, p := newDir(t)
+	w, _ := openW(t, d, Options{MaxSize: exact - 1})
+	if _, err := w.Append(r); !errors.Is(err, ErrFull) {
+		t.Fatalf("one byte over MaxSize: %v", err)
+	}
+	w.Close()
+	os.Remove(logPath(p))
+	w2, _ := openW(t, d, Options{MaxSize: exact})
+	if _, err := w2.Append(r); err != nil {
+		t.Fatalf("exactly MaxSize: %v", err)
+	}
+	if w2.Size() != exact {
+		t.Fatalf("size %d, want %d", w2.Size(), exact)
+	}
+	w2.Close()
+	os.Remove(logPath(p))
+	// A refused terminal record does not use up the allowance.
+	small := r
+	small.Summary = ""
+	smallLen := lineLenOf(t, small)
+	w3, _ := openW(t, d, Options{MaxSize: smallLen})
+	if _, err := w3.Append(r); !errors.Is(err, ErrFull) {
+		t.Fatalf("too big: %v", err)
+	}
+	if _, err := w3.Append(small); err != nil {
+		t.Fatalf("smaller terminal record after a refused one: %v", err)
+	}
 }
 
 func TestMaxSizeOption(t *testing.T) {
@@ -624,7 +844,7 @@ func TestWholeRecordWithoutNewlineIsCompleted(t *testing.T) {
 		}
 		defer w.Close()
 		off := int64(len(content) - len(lines[n-1]))
-		if rec == nil || !rec.Completed || rec.Seq != uint64(n+1) || rec.Offset != off ||
+		if rec == nil || !rec.Completed || rec.Terminated || rec.Seq != uint64(n+1) || rec.Offset != off ||
 			rec.Length != int64(len(lines[n-1])) || rec.Hash != sumHex(lines[n-1]) {
 			t.Fatalf("n=%d: %+v", n, rec)
 		}
@@ -697,4 +917,39 @@ func TestFailedOpenReleasesTheFile(t *testing.T) {
 			t.Fatalf("%d descriptors before, %d after a failed Open", before, after)
 		}
 	})
+}
+
+func TestCloseReleasesTheFile(t *testing.T) {
+	d, _ := newDir(t)
+	w, _, err := Open(d, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, w, 1)
+	open := openFDs(t)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := openFDs(t); after != open-1 {
+		t.Fatalf("%d descriptors before Close, %d after", open, after)
+	}
+	// A second Close is a no-op and does not close anything else.
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if again := openFDs(t); again != open-1 {
+		t.Fatalf("%d descriptors after the second Close", again)
+	}
+}
+
+func TestCloseReportsTheCloseError(t *testing.T) {
+	d, _ := newDir(t)
+	w, _, err := Open(d, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.f.Close() // the descriptor is gone: closing it again fails
+	if err := w.Close(); err == nil {
+		t.Fatal("Close hid the error of the file")
+	}
 }

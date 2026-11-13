@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -14,14 +15,17 @@ import (
 )
 
 var (
-	// ErrFull is returned when a record would take the log past its size
-	// limit, and by Open for a log that is already past it. The log is not
-	// changed. Rotation does not exist; the daemon treats this as fatal.
+	// ErrFull is returned when a record would take the log past the size it
+	// is allowed to reach (see ReserveBytes), and by Open for a log that is
+	// already past MaxSize. The log is not changed. Rotation does not exist;
+	// the daemon treats this as fatal. What an operator does with a full log
+	// is in the package documentation.
 	ErrFull = errors.New("audit log is at its size limit")
 	// ErrCorrupt is returned by Open when the end of the log is damaged in a
-	// way that is not a torn write: the last record decodes but its hash is
-	// wrong, or the record before a torn line is not intact. Nothing is
-	// appended; Verify names the place.
+	// way that is not a torn write: a record after the last intact one has a
+	// wrong hash, the bytes after the last intact record are more than
+	// MaxTornBytes, or there is no intact record in the window Open reads.
+	// Nothing is appended; Verify names the place.
 	ErrCorrupt = errors.New("audit log is damaged")
 	// ErrClosed is returned by Append after Close.
 	ErrClosed = errors.New("audit writer is closed")
@@ -29,8 +33,9 @@ var (
 
 // Options configures Open. The zero value is valid.
 type Options struct {
-	// MaxSize is the size in bytes at which the writer refuses to append.
-	// Zero means DefaultMaxSize; a negative value is refused by Open.
+	// MaxSize is the size in bytes of the file the writer never exceeds.
+	// Ordinary records stop at MaxSize-ReserveBytes. Zero means
+	// DefaultMaxSize; a negative value is refused by Open.
 	MaxSize int64
 	// Now is the clock for the record Open appends after a torn tail. Nil
 	// means time.Now.
@@ -38,18 +43,30 @@ type Options struct {
 
 	// syncFile replaces File.Sync in tests.
 	syncFile func(*os.File) error
+	// afterOpen runs between the open of the file and the read of its end,
+	// in tests.
+	afterOpen func()
 }
 
 // Recovery describes the torn tail Open found and accounted for.
 type Recovery struct {
-	// Offset is where the torn line starts, Length how many bytes it has
-	// (without a newline), Hash the hex SHA-256 of those bytes.
+	// Offset is where the torn region starts and Length how many bytes it
+	// has (the bytes after the last intact record, newlines inside included;
+	// a newline Open added to end it is not counted). Hash is the hex
+	// SHA-256 of those bytes.
 	Offset int64
 	Length int64
 	Hash   string
+	// Terminated is true when the region already ended with a newline. When
+	// it is false Open added one, which says more than the region itself: a
+	// crash in the middle of a write leaves no newline, a region that ends
+	// in a newline was written by someone who finished a line. The caller
+	// should report every Recovery as security relevant: the bytes may hold
+	// a record that was erased, and the Seq of the erased record is reused.
+	Terminated bool
 	// Completed is true when the last line was a whole, intact record that
 	// only lacked its newline. It is then part of the chain (Open added the
-	// newline) and not a torn line.
+	// newline) and not a torn region; Terminated is false.
 	Completed bool
 	// Seq is the Seq of the audit_recovered record that was appended.
 	Seq uint64
@@ -65,47 +82,63 @@ type Recovery struct {
 // The audit rate is low (one record per step of the daemon), so there is no
 // batching.
 //
+// Size: ordinary records are refused with ErrFull once the file would pass
+// MaxSize-ReserveBytes. The reserve is for the last words: one terminal
+// record (kind DaemonError or DaemonStop) and the audit_recovered record
+// that Open appends may use it, up to MaxSize. A second terminal record is
+// an ordinary one. Nothing ever shrinks or rotates the file.
+//
 // Failure: if a write or fsync fails, the Writer is unusable. Every later
 // Append returns the first error. The file may then end in a torn line, which
 // the next Open handles. ErrFull is not such a failure; the Writer stays
 // usable (and stays full).
 type Writer struct {
-	mu     sync.Mutex
-	f      *os.File
-	max    int64
-	size   int64
-	seq    uint64
-	prev   string
-	sync   func(*os.File) error
-	failed error
-	closed bool
+	mu       sync.Mutex
+	f        *os.File
+	max      int64
+	size     int64
+	seq      uint64
+	prev     string
+	sync     func(*os.File) error
+	failed   error
+	closed   bool
+	terminal bool
 }
 
 // Open opens (creating it if needed) the audit log in dir through
-// securefile.OpenAppend, so the trust checks and the size check of that
-// package apply. It reads the last complete record to continue Seq and Prev
-// where the log ended; it does not verify the chain before it (that is
-// Verify).
+// securefile.OpenAppendReadable, so the trust checks and the size check of
+// that package apply, and reads the end of the very file it will append to:
+// a fixed window from the end, never the whole log, and no second open by
+// name. It finds the last intact record to continue Seq and Prev where the
+// log ended; it does not verify the chain before it (that is Verify). What
+// counts as an intact record is what decodeLine accepts, the same lines that
+// Verify accepts as records: a line longer than MaxLineBytes is never one,
+// because no record Append can store has such a line.
 //
-// A torn tail is the bytes after the last intact record: a last line without
-// a newline, or a last line with a newline that is not a record (not JSON or
-// not in canonical form). Open never rewrites or removes them. It ends the
-// torn line with a newline if it lacks one and appends an audit_recovered
-// record whose Summary names the line by offset, length and SHA-256. The
-// returned Recovery is non-nil exactly in this case, so the caller can report
-// it. Verify accepts such a line only because that record follows it.
+// A torn tail is all the bytes after the last intact record: a last line
+// without a newline, lines that are not records (not JSON or not in
+// canonical form), several of them, newlines among them. That is what a
+// crash leaves, also a crash in the middle of this recovery. Open never
+// rewrites or removes those bytes. It ends the region with a newline if it
+// lacks one and appends an audit_recovered record whose Summary names the
+// region by offset, length, whether it ended with a newline, and SHA-256.
+// The returned Recovery is non-nil exactly in this case, so the caller can
+// report it. Verify accepts the region only because that record follows it.
+// If Open is interrupted while it writes that record, the next Open finds
+// the region with the partial record at its end and accounts for all of it
+// again.
 //
 // One variant: a last line without a newline that is a whole intact record
 // (the write stopped one byte short) is not torn. Open adds the newline, the
 // record stays in the chain, and an audit_recovered record notes that it was
 // completed (Recovery.Completed).
 //
-// A last line that is a record with a wrong hash, or a torn line preceded by
-// something that is not an intact record, is ErrCorrupt: that is not what an
-// interrupted write looks like.
-//
-// The log is read into memory once, up to MaxSize, to find its end;
-// securefile has no way to read just a tail yet.
+// ErrCorrupt: a line after the last intact record that looks like a record
+// but has a wrong hash (that is not what an interrupted write looks like),
+// more than MaxTornBytes after the last intact record, or no intact record
+// within the window although the log is longer than it. The recovery record
+// may use the reserve (ReserveBytes); if even that is not enough, Open
+// returns ErrFull.
 func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 	limit := opts.MaxSize
 	if limit == 0 {
@@ -119,7 +152,7 @@ func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 	if syncFn == nil {
 		syncFn = (*os.File).Sync
 	}
-	f, size, err := dir.OpenAppend(FileName, limit)
+	f, size, err := dir.OpenAppendReadable(FileName, limit)
 	if err != nil {
 		if errors.Is(err, securefile.ErrTooLarge) {
 			err = fmt.Errorf("%w: %w", ErrFull, err)
@@ -127,7 +160,10 @@ func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 		return nil, nil, err
 	}
 	w := &Writer{f: f, max: limit, size: size, prev: Genesis, sync: syncFn}
-	t, err := w.resume(dir)
+	if opts.afterOpen != nil {
+		opts.afterOpen()
+	}
+	t, err := w.resume()
 	if err != nil {
 		f.Close()
 		return nil, nil, err
@@ -135,89 +171,113 @@ func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 	if t == nil {
 		return w, nil, nil
 	}
-	// Terminate the torn line if needed and account for it.
+	// Terminate the torn region if needed and account for it.
 	var prefix []byte
-	if t.unterminated {
+	if !t.terminated {
 		prefix = []byte{'\n'}
 	}
-	summary := tornSummary(t.offset, t.length, t.sum)
+	summary := tornSummary(t.offset, t.length, t.terminated, t.sum)
 	if t.completed {
 		summary = completedSummary(t.offset, w.seq)
 	}
-	stamped, err := w.appendLocked(prefix, Record{Time: now(), Kind: AuditRecovered, Summary: summary})
+	stamped, err := w.appendLocked(prefix, Record{Time: now(), Kind: AuditRecovered, Summary: summary}, true)
 	if err != nil {
 		f.Close()
 		return nil, nil, err
 	}
-	return w, &Recovery{Offset: t.offset, Length: t.length, Hash: t.sum, Completed: t.completed, Seq: stamped.Seq}, nil
+	return w, &Recovery{Offset: t.offset, Length: t.length, Hash: t.sum, Terminated: t.terminated,
+		Completed: t.completed, Seq: stamped.Seq}, nil
 }
 
 // torn is the torn tail found by resume.
 type torn struct {
-	offset       int64
-	length       int64
-	sum          string
-	unterminated bool
-	// completed: the unterminated line is an intact record.
+	offset int64
+	length int64
+	sum    string
+	// terminated: the region ends with a newline.
+	terminated bool
+	// completed: the unterminated last line is an intact record.
 	completed bool
 }
 
 // resume sets seq and prev from the end of the log and returns the torn tail
-// if there is one.
-func (w *Writer) resume(dir *securefile.Dir) (*torn, error) {
+// if there is one. It reads a window of at most tailWindow bytes from the end
+// of the file it holds open, with ReadAt.
+func (w *Writer) resume() (*torn, error) {
 	if w.size == 0 {
 		return nil, nil
 	}
-	b, err := dir.ReadCapped(FileName, w.max)
-	if err != nil {
+	if fi, err := w.f.Stat(); err != nil {
+		return nil, err
+	} else if fi.Size() != w.size {
+		return nil, fmt.Errorf("%s was %d bytes when opened and %d bytes when read: %w", FileName, w.size, fi.Size(), securefile.ErrChanged)
+	}
+	base := max(0, w.size-tailWindow)
+	buf := make([]byte, w.size-base)
+	if _, err := w.f.ReadAt(buf, base); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%s ended before %d bytes when read: %w", FileName, w.size, securefile.ErrChanged)
+		}
 		return nil, err
 	}
-	if int64(len(b)) != w.size {
-		return nil, fmt.Errorf("%s was %d bytes when opened and %d bytes when read: %w", FileName, w.size, len(b), securefile.ErrChanged)
+	data := buf
+	if base > 0 {
+		// The window starts somewhere in a line: the first line is not whole.
+		nl := bytes.IndexByte(data, '\n')
+		if nl < 0 {
+			return nil, fmt.Errorf("%w: no line break in the last %d bytes", ErrCorrupt, len(data))
+		}
+		data = data[nl+1:]
+		base += int64(nl + 1)
 	}
 
-	var t *torn
-	// prevEnd is the index of the newline that ends the last intact line, or
-	// -1 when there is no line before the torn one.
-	var prevEnd int
-	if lastNL := bytes.LastIndexByte(b, '\n'); lastNL != len(b)-1 {
-		start := lastNL + 1
-		t = &torn{offset: int64(start), length: int64(len(b) - start), unterminated: true}
-		prevEnd = lastNL
-		rec, lerr := decodeLine(b[start:])
+	// Walk the lines of the window. regionAt is where the bytes after the
+	// last intact record start; badAt is the start of a line after the last
+	// intact record that looks like a record but has a wrong hash (-1 for
+	// none).
+	var last Record
+	haveIntact, completed := false, false
+	lastStart, regionAt, badAt := 0, 0, -1
+	for pos := 0; pos < len(data); {
+		end := len(data)
+		if nl := bytes.IndexByte(data[pos:], '\n'); nl >= 0 {
+			end = pos + nl
+		}
+		rec, lerr := decodeLine(data[pos:end])
 		switch {
 		case lerr == nil:
-			t.completed = true
-			t.sum = sumHex(b[start:])
-			w.seq, w.prev = rec.Seq, rec.Hash
-			return t, nil
+			last, haveIntact = rec, true
+			badAt = -1
+			lastStart = pos
+			completed = end == len(data)
+			regionAt = min(end+1, len(data))
 		case lerr.reason != ReasonMalformed:
-			return nil, fmt.Errorf("%w: last record (offset %d): %s", ErrCorrupt, start, lerr)
+			badAt = pos
 		}
-	} else {
-		start := bytes.LastIndexByte(b[:lastNL], '\n') + 1
-		rec, lerr := decodeLine(b[start:lastNL])
-		switch {
-		case lerr == nil:
-			w.seq, w.prev = rec.Seq, rec.Hash
-			return nil, nil
-		case lerr.reason != ReasonMalformed:
-			return nil, fmt.Errorf("%w: last record (offset %d): %s", ErrCorrupt, start, lerr)
-		}
-		t = &torn{offset: int64(start), length: int64(lastNL - start)}
-		prevEnd = start - 1
+		pos = end + 1
 	}
-	t.sum = sumHex(b[t.offset : t.offset+t.length])
-	if prevEnd < 0 {
-		return t, nil
+	if badAt >= 0 {
+		return nil, fmt.Errorf("%w: the line at offset %d has a wrong hash and follows the last intact record", ErrCorrupt, base+int64(badAt))
 	}
-	start := bytes.LastIndexByte(b[:prevEnd], '\n') + 1
-	rec, lerr := decodeLine(b[start:prevEnd])
-	if lerr != nil {
-		return nil, fmt.Errorf("%w: record before the torn line (offset %d): %s", ErrCorrupt, start, lerr)
+	if !haveIntact && base > 0 {
+		return nil, fmt.Errorf("%w: no intact record in the last %d bytes", ErrCorrupt, w.size-base)
 	}
-	w.seq, w.prev = rec.Seq, rec.Hash
-	return t, nil
+	if haveIntact {
+		w.seq, w.prev = last.Seq, last.Hash
+	}
+	if completed {
+		line := data[lastStart:]
+		return &torn{offset: base + int64(lastStart), length: int64(len(line)), sum: sumHex(line), completed: true}, nil
+	}
+	region := data[regionAt:]
+	if len(region) == 0 {
+		return nil, nil
+	}
+	if len(region) > MaxTornBytes {
+		return nil, fmt.Errorf("%w: %d bytes after the last intact record, limit %d", ErrCorrupt, len(region), MaxTornBytes)
+	}
+	return &torn{offset: base + int64(regionAt), length: int64(len(region)), sum: sumHex(region),
+		terminated: region[len(region)-1] == '\n'}, nil
 }
 
 // Append stamps r with the next Seq, the Prev and the Hash, writes it and
@@ -227,14 +287,23 @@ func (w *Writer) resume(dir *securefile.Dir) (*torn, error) {
 // text); Append only refuses what it cannot store: a Summary over MaxSummary
 // bytes (ErrSummaryTooLong, never cut), other fields over their limit
 // (ErrFieldTooLong), and what ErrInvalidRecord names. A record that would
-// take the log past its size limit gets ErrFull.
+// take the log past MaxSize-ReserveBytes gets ErrFull, except the first
+// record of kind DaemonError or DaemonStop, which may use the reserve up to
+// MaxSize.
 func (w *Writer) Append(r Record) (Record, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.appendLocked(nil, r)
+	terminal := (r.Kind == DaemonError || r.Kind == DaemonStop) && !w.terminal
+	got, err := w.appendLocked(nil, r, terminal)
+	if err == nil && terminal {
+		w.terminal = true
+	}
+	return got, err
 }
 
-func (w *Writer) appendLocked(prefix []byte, r Record) (Record, error) {
+// appendLocked writes prefix and r. useReserve lets the write take the room
+// that ordinary records may not.
+func (w *Writer) appendLocked(prefix []byte, r Record, useReserve bool) (Record, error) {
 	if w.closed {
 		return Record{}, ErrClosed
 	}
@@ -249,8 +318,12 @@ func (w *Writer) appendLocked(prefix []byte, r Record) (Record, error) {
 	r.Hash = hashOf(r)
 	data := append(append([]byte(nil), prefix...), encodeLine(r)...)
 	data = append(data, '\n')
-	if w.size+int64(len(data)) > w.max {
-		return Record{}, fmt.Errorf("%w: %d bytes in the log, %d more needed, limit %d", ErrFull, w.size, len(data), w.max)
+	limit := w.max - ReserveBytes
+	if useReserve {
+		limit = w.max
+	}
+	if w.size+int64(len(data)) > limit {
+		return Record{}, fmt.Errorf("%w: %d bytes in the log, %d more needed, limit %d (size limit %d, reserve %d)", ErrFull, w.size, len(data), limit, w.max, ReserveBytes)
 	}
 	// os.File.Write returns an error whenever it writes fewer bytes than given.
 	_, err := w.f.Write(data)

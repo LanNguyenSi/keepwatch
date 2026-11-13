@@ -2,8 +2,6 @@ package audit
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,8 +15,10 @@ type Result struct {
 	// is the value to keep elsewhere if the end of the log is to be
 	// protected (see Verify).
 	LastHash string
-	// TornLines is the number of torn lines the log carries, each of them
-	// accounted for by the audit_recovered record that follows it.
+	// TornLines is the number of torn regions the log carries, each of them
+	// accounted for by the audit_recovered record that follows it. A region
+	// is all the bytes between two records that are not records, however
+	// many lines they make.
 	TornLines int
 }
 
@@ -48,10 +48,15 @@ func (e *BreakError) Error() string {
 // the first). It returns the first break as a *BreakError, or the count and
 // the last hash.
 //
-// A line that is not a record is tolerated only when the very next line is
-// an audit_recovered record that names it by offset, length and SHA-256 (the
-// torn tail the writer found when it reopened the log). Any other malformed
-// line, and a malformed line at the end of the log, is a break.
+// Bytes that are not records are tolerated only as one torn region: every
+// consecutive line that is not a record, taken together with their
+// newlines, must be followed by an audit_recovered record that names the
+// region by offset, length, whether it ended with a newline, and SHA-256
+// (the torn tail the writer found when it reopened the log; see Open). A
+// region longer than MaxTornBytes, a recovery record that names it wrongly,
+// any other record after it and a region at the end of the log are breaks.
+// A line that looks like a record but has a wrong hash is a break, never
+// part of a region.
 //
 // What Verify proves: the file is a consistent chain from its first record,
 // in order, and no byte was changed, inserted, removed or reordered inside
@@ -64,80 +69,133 @@ func (e *BreakError) Error() string {
 //     off the host, which is not part of this code.
 //   - Authenticity. The hashes are unkeyed. Whoever can write the file can
 //     rewrite all of it with a consistent chain; Verify cannot tell.
+//   - What a torn region was. It is named and hashed, not judged: a crash
+//     artefact and bytes that someone put there look alike, and the record
+//     that was in the region (if any) is gone from the chain.
 //
-// The reader is consumed in lines of at most MaxLineBytes; longer lines are
-// counted and hashed without being held in memory.
+// The reader is consumed in lines; a line over MaxLineBytes is not a record
+// whatever the buffer of the reader, and Verify holds at most MaxTornBytes+1
+// bytes of any line.
 func Verify(r io.Reader) (Result, error) {
 	return walk(r, nil)
 }
 
-// tornLine is a malformed line waiting for the record that accounts for it.
-type tornLine struct {
+// region is a run of lines that are not records, waiting for the record that
+// accounts for it.
+type region struct {
 	seq    uint64
 	line   int
 	offset int64
-	length int64
-	sum    string
 	detail string
+	// buf holds the bytes of the region, each line with its newline, up to
+	// MaxTornBytes+1 bytes; n counts all of them.
+	buf []byte
+	n   int64
+}
+
+// add appends one line to the region.
+func (g *region) add(l rawLine) {
+	g.n += l.length
+	if l.terminated {
+		g.n++
+	}
+	if room := MaxTornBytes + 1 - len(g.buf); room > 0 {
+		g.buf = append(g.buf, l.data[:min(room, len(l.data))]...)
+		if l.terminated && len(g.buf) < MaxTornBytes+1 {
+			g.buf = append(g.buf, '\n')
+		}
+	}
+}
+
+// tooLong: the region cannot be what Open accounts for.
+func (g *region) tooLong() bool { return g.n > MaxTornBytes+1 }
+
+// accounts reports whether rec is the record that Open writes for exactly
+// this region. A region Open found without a final newline is followed by a
+// newline Open added, which is not part of what the record names.
+func (g *region) accounts(rec Record) bool {
+	if rec.Kind != AuditRecovered || g.tooLong() {
+		return false
+	}
+	// Not too long: buf holds every byte of the region.
+	n := len(g.buf)
+	if n <= MaxTornBytes && rec.Summary == tornSummary(g.offset, int64(n), true, sumHex(g.buf)) {
+		return true
+	}
+	if n >= 2 && n-1 <= MaxTornBytes && g.buf[n-1] == '\n' {
+		return rec.Summary == tornSummary(g.offset, int64(n-1), false, sumHex(g.buf[:n-1]))
+	}
+	return false
+}
+
+func (g *region) breakError() *BreakError {
+	detail := g.detail + " (not followed by a matching audit_recovered record)"
+	if g.tooLong() {
+		detail = fmt.Sprintf("%s (the lines that are not records add up to more than %d bytes)", g.detail, MaxTornBytes)
+	}
+	return &BreakError{Seq: g.seq, Line: g.line, Offset: g.offset, Reason: ReasonMalformed, Detail: detail}
 }
 
 // rawLine is one line as read from the log.
 type rawLine struct {
-	data       []byte // nil when over
-	length     int64  // without the newline
-	sum        string // hex SHA-256 of the line, set only when over
-	over       bool
+	// data is the line without its newline, cut at MaxTornBytes+1 bytes; it
+	// is valid until the next call of lineReader.next.
+	data       []byte
+	length     int64 // all bytes of the line, without the newline
+	over       bool  // length > MaxLineBytes: not a record
 	terminated bool
 }
 
-// readLine reads the next line. At the end of the input it returns io.EOF
-// with an empty rawLine. data is valid until the next call.
-func readLine(br *bufio.Reader) (rawLine, error) {
-	chunk, err := br.ReadSlice('\n')
-	switch {
-	case err == nil:
-		return rawLine{data: chunk[:len(chunk)-1], length: int64(len(chunk) - 1), terminated: true}, nil
-	case errors.Is(err, io.EOF):
-		if len(chunk) == 0 {
-			return rawLine{}, io.EOF
+// lineReader splits a reader into lines. The cap on a line is applied to
+// the bytes read, not to the size of the buffer, so it does not depend on
+// the reader it is given (bufio.NewReaderSize returns a *bufio.Reader it is
+// handed when that one is large enough).
+type lineReader struct {
+	br  *bufio.Reader
+	buf []byte
+}
+
+// next reads the next line. At the end of the input it returns io.EOF.
+func (lr *lineReader) next() (rawLine, error) {
+	lr.buf = lr.buf[:0]
+	var l rawLine
+	for {
+		chunk, err := lr.br.ReadSlice('\n')
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
+			return rawLine{}, err
 		}
-		return rawLine{data: chunk, length: int64(len(chunk))}, nil
-	case errors.Is(err, bufio.ErrBufferFull):
-		h := sha256.New()
-		l := rawLine{over: true}
-		for {
-			terminated := err == nil
-			if terminated {
-				chunk = chunk[:len(chunk)-1]
-			}
-			h.Write(chunk)
-			l.length += int64(len(chunk))
-			if terminated || errors.Is(err, io.EOF) {
-				l.terminated = terminated
-				l.sum = hex.EncodeToString(h.Sum(nil))
-				return l, nil
-			}
-			if !errors.Is(err, bufio.ErrBufferFull) {
-				return rawLine{}, err
-			}
-			chunk, err = br.ReadSlice('\n')
+		terminated := err == nil
+		if terminated {
+			chunk = chunk[:len(chunk)-1]
 		}
-	default:
-		return rawLine{}, err
+		l.length += int64(len(chunk))
+		if room := MaxTornBytes + 1 - len(lr.buf); room > 0 {
+			lr.buf = append(lr.buf, chunk[:min(room, len(chunk))]...)
+		}
+		if terminated || errors.Is(err, io.EOF) {
+			l.terminated = terminated
+			break
+		}
 	}
+	if l.length == 0 && !l.terminated {
+		return rawLine{}, io.EOF
+	}
+	l.data = lr.buf
+	l.over = l.length > MaxLineBytes
+	return l, nil
 }
 
 // walk is the one reader behind Verify and Show. It calls emit (when not
 // nil) for every record after the record has passed all checks.
 func walk(r io.Reader, emit func(Record) error) (Result, error) {
-	br := bufio.NewReaderSize(r, MaxLineBytes+1)
+	lr := &lineReader{br: bufio.NewReaderSize(r, MaxLineBytes+1)}
 	res := Result{LastHash: Genesis}
 	expect := uint64(1)
 	var offset int64
-	var pending *tornLine
+	var pending *region
 	lineNo := 0
 	for {
-		raw, err := readLine(br)
+		raw, err := lr.next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -163,24 +221,26 @@ func walk(r io.Reader, emit func(Record) error) (Result, error) {
 		}
 
 		if lerr != nil {
-			// The earlier malformed line, if any, is the first break.
-			if pending != nil {
-				return res, pending.breakError()
-			}
 			if lerr.reason != ReasonMalformed {
+				// A record with a wrong hash is never part of a torn
+				// region; an earlier region is the first break.
+				if pending != nil {
+					return res, pending.breakError()
+				}
 				return res, &BreakError{Seq: expect, Line: lineNo, Offset: start, Reason: lerr.reason, Detail: lerr.detail}
 			}
-			sum := raw.sum
-			if !raw.over {
-				s := sha256.Sum256(raw.data)
-				sum = hex.EncodeToString(s[:])
+			if pending == nil {
+				pending = &region{seq: expect, line: lineNo, offset: start, detail: lerr.detail}
 			}
-			pending = &tornLine{seq: expect, line: lineNo, offset: start, length: raw.length, sum: sum, detail: lerr.detail}
+			pending.add(raw)
+			if pending.tooLong() {
+				return res, pending.breakError()
+			}
 			continue
 		}
 
 		if pending != nil {
-			if rec.Kind != AuditRecovered || rec.Summary != tornSummary(pending.offset, pending.length, pending.sum) {
+			if !pending.accounts(rec) {
 				return res, pending.breakError()
 			}
 			pending = nil
@@ -207,9 +267,4 @@ func walk(r io.Reader, emit func(Record) error) (Result, error) {
 		return res, pending.breakError()
 	}
 	return res, nil
-}
-
-func (p *tornLine) breakError() *BreakError {
-	return &BreakError{Seq: p.seq, Line: p.line, Offset: p.offset, Reason: ReasonMalformed,
-		Detail: p.detail + " (not followed by a matching audit_recovered record)"}
 }

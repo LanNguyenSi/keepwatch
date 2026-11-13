@@ -214,25 +214,25 @@ func TestIsHex64(t *testing.T) {
 	}
 }
 
-func TestValidate(t *testing.T) {
-	ok := goldenRecord()
-	if err := validate(ok); err != nil {
-		t.Fatalf("golden record: %v", err)
-	}
-	cases := []struct {
-		name string
-		mut  func(*Record)
-		want error
-	}{
+type validateCase struct {
+	name string
+	mut  func(*Record)
+	want error
+}
+
+func validateCases() []validateCase {
+	return []validateCase{
 		{"summary at cap", func(r *Record) { r.Summary = strings.Repeat("x", MaxSummary) }, nil},
 		{"summary over cap", func(r *Record) { r.Summary = strings.Repeat("x", MaxSummary+1) }, ErrSummaryTooLong},
 		{"kind at cap", func(r *Record) { r.Kind = Kind(strings.Repeat("k", MaxKind)) }, nil},
 		{"kind over cap", func(r *Record) { r.Kind = Kind(strings.Repeat("k", MaxKind+1)) }, ErrFieldTooLong},
+		{"kind far over cap", func(r *Record) { r.Kind = Kind(strings.Repeat("k", 200)) }, ErrFieldTooLong},
 		{"incident id at cap", func(r *Record) { r.IncidentID = strings.Repeat("i", MaxIncidentID) }, nil},
 		{"incident id over cap", func(r *Record) { r.IncidentID = strings.Repeat("i", MaxIncidentID+1) }, ErrFieldTooLong},
 		{"fingerprint at cap", func(r *Record) { r.Fingerprint = strings.Repeat("f", MaxFingerprint) }, nil},
 		{"fingerprint over cap", func(r *Record) { r.Fingerprint = strings.Repeat("f", MaxFingerprint+1) }, ErrFieldTooLong},
 		{"empty kind", func(r *Record) { r.Kind = "" }, ErrInvalidRecord},
+		{"an unknown kind is stored as given", func(r *Record) { r.Kind = "not_one_of_ours" }, nil},
 		{"zero time", func(r *Record) { r.Time = time.Time{} }, ErrInvalidRecord},
 		{"year 1", func(r *Record) { r.Time = time.Date(1, 1, 1, 0, 0, 1, 0, time.UTC) }, nil},
 		{"year 9999", func(r *Record) { r.Time = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC) }, nil},
@@ -247,7 +247,14 @@ func TestValidate(t *testing.T) {
 		{"invalid utf8 fingerprint", func(r *Record) { r.Fingerprint = "\xe2\x82" }, ErrInvalidRecord},
 		{"encoded surrogate", func(r *Record) { r.Summary = "\xed\xa0\x80" }, ErrInvalidRecord},
 	}
-	for _, c := range cases {
+}
+
+func TestValidate(t *testing.T) {
+	ok := goldenRecord()
+	if err := validate(ok); err != nil {
+		t.Fatalf("golden record: %v", err)
+	}
+	for _, c := range validateCases() {
 		r := ok
 		c.mut(&r)
 		err := validate(r)
@@ -260,6 +267,65 @@ func TestValidate(t *testing.T) {
 	}
 	if errors.Is(validate(func() Record { r := ok; r.Summary = strings.Repeat("x", MaxSummary+1); return r }()), ErrFieldTooLong) {
 		t.Error("a long summary is ErrSummaryTooLong, not ErrFieldTooLong")
+	}
+}
+
+// What the writer cannot store is not read as a record: for every case a
+// line that is otherwise a perfect record (canonical, with its own correct
+// hash) is accepted by decodeLine exactly when validate accepts the record,
+// and a refusal is a malformed line, not a hash mismatch.
+func TestDecodeAppliesTheWritersValidation(t *testing.T) {
+	for _, c := range validateCases() {
+		r := goldenRecord()
+		c.mut(&r)
+		r.Hash = hashOf(r)
+		got, lerr := decodeLine(encodeLine(r))
+		if c.want == nil {
+			if lerr != nil {
+				t.Errorf("%s: a record Append stores was refused: %v", c.name, lerr)
+			} else if got.Kind != r.Kind || got.Summary != r.Summary || !got.Time.Equal(r.Time) {
+				t.Errorf("%s: decoded %+v", c.name, got)
+			}
+			continue
+		}
+		if lerr == nil || lerr.reason != ReasonMalformed {
+			t.Errorf("%s: a record Append refuses was accepted or not malformed: %v", c.name, lerr)
+		}
+	}
+}
+
+// The same through Verify and Show: such a line is not a record, so it is a
+// break unless a recovery record accounts for it.
+func TestVerifyAndShowRefuseWhatAppendRefuses(t *testing.T) {
+	recs, lines := chainLines(sample(2))
+	for _, c := range validateCases() {
+		if c.want == nil {
+			continue
+		}
+		bad := Record{Seq: 3, Time: t0, Kind: IncidentOpen, Prev: recs[1].Hash}
+		c.mut(&bad)
+		bad.Hash = hashOf(bad)
+		log := join(append(append([][]byte(nil), lines...), encodeLine(bad)))
+		be := mustBreak(t, c.name, log)
+		if be.Reason != ReasonMalformed || be.Seq != 3 || be.Line != 3 {
+			t.Errorf("%s: %+v", c.name, be)
+		}
+		n := 0
+		err := Show(bytes.NewReader(log), Filter{}, func(Record) error { n++; return nil })
+		if err == nil || n != 2 {
+			t.Errorf("%s: Show delivered %d records, err %v", c.name, n, err)
+		}
+	}
+	// Year 0000 written the way an attacker would, by hand.
+	zero := `"time":"0000-01-01T00:00:00.000000000Z"`
+	r := Record{Seq: 3, Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Kind: IncidentOpen, Prev: recs[1].Hash}
+	r.Hash = hashOf(r)
+	line := strings.Replace(string(encodeLine(r)), `"time":"2026-01-01T00:00:00.000000000Z"`, zero, 1)
+	if line == string(encodeLine(r)) {
+		t.Fatal("test bug")
+	}
+	if _, lerr := decodeLine([]byte(line)); lerr == nil {
+		t.Error("year 0000 accepted")
 	}
 }
 
@@ -289,8 +355,12 @@ func TestWorstCaseLineFitsTheLineCap(t *testing.T) {
 }
 
 func TestTornSummaryFormat(t *testing.T) {
-	got := tornSummary(12, 34, "abc")
-	if got != "torn tail: offset=12 length=34 sha256=abc" {
+	got := tornSummary(12, 34, true, "abc")
+	if got != "torn tail: offset=12 length=34 terminated=true sha256=abc" {
+		t.Fatalf("got %q", got)
+	}
+	got = tornSummary(12, 34, false, "abc")
+	if got != "torn tail: offset=12 length=34 terminated=false sha256=abc" {
 		t.Fatalf("got %q", got)
 	}
 }

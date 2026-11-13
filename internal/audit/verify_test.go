@@ -1,14 +1,14 @@
 package audit
 
 import (
+	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -252,12 +252,14 @@ func TestVerifyTruncatedTail(t *testing.T) {
 func TestPropertyAnySingleByteChangeIsDetected(t *testing.T) {
 	_, lines := chainLines(sample(6))
 	full := join(lines)
-	// A log that went through a torn tail recovery is covered as well.
+	// A log that went through a torn tail recovery is covered as well, with a
+	// region of two lines.
+	region := []byte("{\"seq\":5,\"tim\njunk")
 	torn := join(lines[:4])
-	torn = append(torn, []byte(`{"seq":5,"tim`)...)
-	sum := sha256.Sum256([]byte(`{"seq":5,"tim`))
+	tornAt := int64(len(torn))
+	torn = append(torn, region...)
 	tr := Record{Seq: 5, Time: t0, Kind: AuditRecovered,
-		Summary: tornSummary(int64(len(join(lines[:4]))), 13, hex.EncodeToString(sum[:])),
+		Summary: regionSummary(tornAt, region),
 		Prev:    func() string { r, _ := decodeLine(lines[3]); return r.Hash }()}
 	tr.Hash = hashOf(tr)
 	torn = append(torn, '\n')
@@ -408,47 +410,90 @@ func TestVerifyLineCap(t *testing.T) {
 	}
 }
 
-// recoveredLog builds lines[:keep], a torn line, and the matching recovery
-// record, then the remaining lines relinked after it.
-func recoveredLog(t *testing.T, keep int, tornBytes []byte) ([]byte, int64) {
+// regionSummary is the Summary Open writes for the bytes after the last
+// intact record as it found them (a newline Open adds is not among them).
+func regionSummary(offset int64, region []byte) string {
+	terminated := len(region) > 0 && region[len(region)-1] == '\n'
+	return tornSummary(offset, int64(len(region)), terminated, sumHex(region))
+}
+
+// recoveredLog builds the first keep records, the torn region as given
+// (ended by a newline if it lacks one, as Open does), and the matching
+// recovery record.
+func recoveredLog(t *testing.T, keep int, region []byte) ([]byte, int64) {
 	t.Helper()
 	recs, lines := chainLines(sample(keep))
 	log := join(lines)
 	off := int64(len(log))
-	log = append(log, tornBytes...)
-	log = append(log, '\n')
-	sum := sha256.Sum256(tornBytes)
+	log = append(log, region...)
+	if len(region) == 0 || region[len(region)-1] != '\n' {
+		log = append(log, '\n')
+	}
 	prev := Genesis
 	if keep > 0 {
 		prev = recs[keep-1].Hash
 	}
-	r := Record{Seq: uint64(keep + 1), Time: t0, Kind: AuditRecovered, Prev: prev,
-		Summary: tornSummary(off, int64(len(tornBytes)), hex.EncodeToString(sum[:]))}
+	r := Record{Seq: uint64(keep + 1), Time: t0, Kind: AuditRecovered, Prev: prev, Summary: regionSummary(off, region)}
 	r.Hash = hashOf(r)
 	log = append(log, encodeLine(r)...)
 	log = append(log, '\n')
 	return log, off
 }
 
-func TestVerifyAcceptsAccountedTornLine(t *testing.T) {
-	for _, torn := range [][]byte{
-		[]byte(`{"seq":4,"time":"2026`),
-		[]byte("\x00\x00\x00\x00"),
-		[]byte{},
-		bytes.Repeat([]byte("z"), 3*MaxLineBytes+5),
+func TestVerifyAcceptsAccountedTornRegion(t *testing.T) {
+	for name, region := range map[string][]byte{
+		"fragment":                 []byte(`{"seq":4,"time":"2026`),
+		"zeros":                    []byte("\x00\x00\x00\x00"),
+		"blank line":               []byte("\n"),
+		"fragment with newline":    []byte("{\"seq\":4,\n"),
+		"two lines":                []byte("frag one\nfrag two"),
+		"two lines, newline end":   []byte("frag one\nfrag two\n"),
+		"blank line inside":        []byte("a\n\nb"),
+		"newline first":            []byte("\nb"),
+		"three buffers":            bytes.Repeat([]byte("z"), 3*MaxLineBytes+5),
+		"exactly the bound":        bytes.Repeat([]byte("z"), MaxTornBytes),
+		"the bound, newline end":   append(bytes.Repeat([]byte("z"), MaxTornBytes-1), '\n'),
+		"over-long lines in a row": append(append(bytes.Repeat([]byte("y"), MaxLineBytes+5), '\n'), bytes.Repeat([]byte("x"), MaxLineBytes+9)...),
 	} {
 		for _, keep := range []int{0, 3} {
-			log, _ := recoveredLog(t, keep, torn)
-			res := mustVerify(t, fmt.Sprintf("torn %d bytes after %d records", len(torn), keep), log)
+			log, _ := recoveredLog(t, keep, region)
+			res := mustVerify(t, fmt.Sprintf("%s after %d records", name, keep), log)
 			if res.TornLines != 1 || res.Count != uint64(keep+1) {
-				t.Errorf("torn %d bytes after %d records: %+v", len(torn), keep, res)
+				t.Errorf("%s after %d records: %+v", name, keep, res)
 			}
 		}
 	}
 }
 
+func TestVerifyTornRegionBound(t *testing.T) {
+	// One byte over the bound cannot be accounted for, in any of its forms.
+	for name, region := range map[string][]byte{
+		"one line":                 bytes.Repeat([]byte("z"), MaxTornBytes+1),
+		"one line, newline end":    append(bytes.Repeat([]byte("z"), MaxTornBytes), '\n'),
+		"several lines":            append(append(bytes.Repeat([]byte("z"), MaxTornBytes/2), '\n'), bytes.Repeat([]byte("z"), MaxTornBytes/2+1)...),
+		"far over the bound":       bytes.Repeat([]byte("z"), 10*MaxTornBytes),
+		"short lines add up":       bytes.Repeat([]byte("z\n"), MaxTornBytes/2+1),
+		"short lines, exact bound": bytes.Repeat([]byte("z\n"), MaxTornBytes/2),
+	} {
+		log, off := recoveredLog(t, 2, region)
+		wantBreak := int64(len(region)) > MaxTornBytes
+		_, err := Verify(bytes.NewReader(log))
+		var be *BreakError
+		if !wantBreak {
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		if !errors.As(err, &be) || be.Reason != ReasonMalformed || be.Seq != 3 || be.Line != 3 || be.Offset != off {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
 func TestVerifyTornLineNeedsItsRecoveryRecord(t *testing.T) {
-	log, off := recoveredLog(t, 3, []byte(`{"seq":4,"tim`))
+	frag := `{"seq":4,"tim`
+	log, off := recoveredLog(t, 3, []byte(frag))
 	good := mustVerify(t, "accounted", log)
 	if good.TornLines != 1 {
 		t.Fatalf("%+v", good)
@@ -461,8 +506,7 @@ func TestVerifyTornLineNeedsItsRecoveryRecord(t *testing.T) {
 		return join(append(append([][]byte(nil), lines[:3]...), toBytes(extra)...))
 	}
 	recovery, _ := decodeLine(lines[4])
-	sum := sha256.Sum256([]byte(`{"seq":4,"tim`))
-	hexSum := hex.EncodeToString(sum[:])
+	hexSum := sumHex([]byte(frag))
 	mk := func(kind Kind, summary string) string {
 		r := recovery
 		r.Kind = kind
@@ -471,15 +515,17 @@ func TestVerifyTornLineNeedsItsRecoveryRecord(t *testing.T) {
 		return string(encodeLine(r))
 	}
 	cases := map[string][]byte{
-		"torn line only":         tornAt(`{"seq":4,"tim`),
-		"torn then ordinary":     tornAt(`{"seq":4,"tim`, mk(NotifySent, recovery.Summary)),
-		"wrong offset":           tornAt(`{"seq":4,"tim`, mk(AuditRecovered, tornSummary(off+1, 13, hexSum))),
-		"wrong length":           tornAt(`{"seq":4,"tim`, mk(AuditRecovered, tornSummary(off, 14, hexSum))),
-		"wrong sum":              tornAt(`{"seq":4,"tim`, mk(AuditRecovered, tornSummary(off, 13, strings.Repeat("0", 64)))),
+		"torn line only":         tornAt(frag),
+		"torn then ordinary":     tornAt(frag, mk(NotifySent, recovery.Summary)),
+		"wrong offset":           tornAt(frag, mk(AuditRecovered, tornSummary(off+1, 13, false, hexSum))),
+		"wrong length":           tornAt(frag, mk(AuditRecovered, tornSummary(off, 14, false, hexSum))),
+		"wrong sum":              tornAt(frag, mk(AuditRecovered, tornSummary(off, 13, false, strings.Repeat("0", 64)))),
+		"wrong terminated flag":  tornAt(frag, mk(AuditRecovered, tornSummary(off, 13, true, hexSum))),
+		"flag and length lie":    tornAt(frag, mk(AuditRecovered, tornSummary(off, 12, false, sumHex([]byte(frag[:12]))))),
 		"other torn bytes":       tornAt(`{"seq":4,"tiM`, string(lines[4])),
-		"free text summary":      tornAt(`{"seq":4,"tim`, mk(AuditRecovered, "recovered")),
-		"two torn lines":         tornAt(`{"seq":4,"tim`, `{"seq":4,"tim`, string(lines[4])),
-		"torn then bad hash rec": tornAt(`{"seq":4,"tim`, strings.Replace(string(lines[4]), recovery.Hash, strings.Repeat("a", 64), 1)),
+		"free text summary":      tornAt(frag, mk(AuditRecovered, "recovered")),
+		"two torn lines":         tornAt(frag, frag, string(lines[4])),
+		"torn then bad hash rec": tornAt(frag, strings.Replace(string(lines[4]), recovery.Hash, strings.Repeat("a", 64), 1)),
 	}
 	for name, l := range cases {
 		be := mustBreak(t, name, l)
@@ -487,12 +533,38 @@ func TestVerifyTornLineNeedsItsRecoveryRecord(t *testing.T) {
 			t.Errorf("%s: %+v", name, be)
 		}
 	}
+	// The newline that ends the fragment is either one Open added or one the
+	// region had; the bytes are the same, so a record that names the region
+	// with it (terminated) is as good as one that names it without.
+	withNL := recovery
+	withNL.Summary = tornSummary(off, int64(len(frag)+1), true, sumHex([]byte(frag+"\n")))
+	withNL.Hash = hashOf(withNL)
+	if res := mustVerify(t, "region named with its newline", tornAt(frag, string(encodeLine(withNL)))); res.TornLines != 1 {
+		t.Errorf("%+v", res)
+	}
+	// Both lines of a two-line region are accounted for by one record that
+	// names both.
+	two := frag + "\n" + frag
+	r2 := recovery
+	r2.Summary = regionSummary(off, []byte(two))
+	r2.Hash = hashOf(r2)
+	if res := mustVerify(t, "two lines, one record", tornAt(frag, frag, string(encodeLine(r2)))); res.TornLines != 1 || res.Count != 4 {
+		t.Errorf("%+v", res)
+	}
+	// A record with a wrong hash inside a region is a break at the region's
+	// start, not part of the region.
+	_, ls := chainLines(sample(4))
+	badRec := bytes.Replace(ls[3], []byte(`"hash":"`), []byte(`"hash":"0`), 1)
+	be := mustBreak(t, "record-shaped line in a region", join(append(append([][]byte(nil), lines[:3]...), []byte(frag), badRec)))
+	if be.Seq != 4 || be.Line != 4 || be.Offset != off {
+		t.Errorf("record-shaped line in a region: %+v", be)
+	}
 	// A recovery record that is not preceded by a torn line is fine, it is
 	// an ordinary record.
-	recs, ls := chainLines(sample(2))
+	recs, ls2 := chainLines(sample(2))
 	r := Record{Seq: 3, Time: t0, Kind: AuditRecovered, Prev: recs[1].Hash, Summary: "anything"}
 	r.Hash = hashOf(r)
-	if res := mustVerify(t, "lone recovery", join(append(ls, encodeLine(r)))); res.TornLines != 0 || res.Count != 3 {
+	if res := mustVerify(t, "lone recovery", join(append(ls2, encodeLine(r)))); res.TornLines != 0 || res.Count != 3 {
 		t.Errorf("%+v", res)
 	}
 }
@@ -526,5 +598,54 @@ func TestVerifyReaderErrorIsNotABreak(t *testing.T) {
 	_, err = Verify(long)
 	if err == nil || errors.As(err, &be) || !strings.Contains(err.Error(), "disk on fire") {
 		t.Fatalf("over-long line: got %v", err)
+	}
+}
+
+// The cap on a line does not depend on the reader: a bufio.Reader with a
+// large buffer is used as it is by bufio.NewReaderSize, and the line must
+// still be refused.
+func TestVerifyLineCapDoesNotDependOnTheReader(t *testing.T) {
+	_, lines := chainLines(sample(2))
+	readers := map[string]func([]byte) io.Reader{
+		"bytes.Reader":       func(b []byte) io.Reader { return bytes.NewReader(b) },
+		"bufio 1 MiB":        func(b []byte) io.Reader { return bufio.NewReaderSize(bytes.NewReader(b), 1<<20) },
+		"bufio 64 KiB":       func(b []byte) io.Reader { return bufio.NewReaderSize(bytes.NewReader(b), 64<<10) },
+		"bufio tiny":         func(b []byte) io.Reader { return bufio.NewReaderSize(bytes.NewReader(b), 16) },
+		"one byte at a time": func(b []byte) io.Reader { return iotest.OneByteReader(bytes.NewReader(b)) },
+	}
+	for _, size := range []int{MaxLineBytes + 1, 3 * MaxLineBytes, MaxTornBytes, MaxTornBytes + 5} {
+		line := bytes.Repeat([]byte("x"), size)
+		for _, form := range []struct {
+			name string
+			log  []byte
+			line int
+		}{
+			{"middle", join([][]byte{lines[0], line, lines[1]}), 2},
+			{"last, with newline", join([][]byte{lines[0], line}), 2},
+			{"last, unterminated", append(join(lines[:1]), line...), 2},
+		} {
+			for rname, mk := range readers {
+				_, err := Verify(mk(form.log))
+				var be *BreakError
+				if !errors.As(err, &be) || be.Reason != ReasonMalformed || be.Seq != 2 || be.Line != form.line || be.Offset != int64(len(lines[0])+1) ||
+					!strings.Contains(be.Detail, fmt.Sprintf("longer than %d bytes", MaxLineBytes)) {
+					t.Errorf("%d bytes, %s, %s: %v", size, form.name, rname, err)
+				}
+			}
+		}
+	}
+	// A record that fills the cap as far as a record can, in a large buffer,
+	// is still a record.
+	worst := worstRecord()
+	worst.Seq, worst.Prev = 1, Genesis
+	worst.Hash = hashOf(worst)
+	line := encodeLine(worst)
+	if len(line) <= MaxLineBytes/2 || len(line) > MaxLineBytes {
+		t.Fatalf("test bug: %d bytes", len(line))
+	}
+	for rname, mk := range readers {
+		if res, err := Verify(mk(join([][]byte{line}))); err != nil || res.Count != 1 {
+			t.Errorf("worst-case record, %s: %+v %v", rname, res, err)
+		}
 	}
 }

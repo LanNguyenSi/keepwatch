@@ -132,8 +132,8 @@ func TestShowReturnsCallbackError(t *testing.T) {
 	}
 }
 
-func TestShowAcceptsAnAccountedTornLine(t *testing.T) {
-	log, _ := recoveredLog(t, 3, []byte("torn"))
+func TestShowAcceptsAnAccountedTornRegion(t *testing.T) {
+	log, _ := recoveredLog(t, 3, []byte("torn\nlines"))
 	var kinds []Kind
 	if err := Show(bytes.NewReader(log), Filter{}, func(r Record) error { kinds = append(kinds, r.Kind); return nil }); err != nil {
 		t.Fatal(err)
@@ -152,5 +152,25 @@ func TestFilterMatchEmptyKindsListMeansAll(t *testing.T) {
 	}
 	if (Filter{Kinds: []Kind{DaemonStop}}).Match(r) {
 		t.Error("other kind matched")
+	}
+}
+
+// The zero Filter matches every record, whatever its time, and an open side
+// of the time range leaves that side open.
+func TestFilterMatchOpenTimeRange(t *testing.T) {
+	early := goldenRecord()
+	early.Time = time.Date(0, 6, 1, 0, 0, 0, 0, time.UTC)
+	late := goldenRecord()
+	late.Time = time.Date(10000, 6, 1, 0, 0, 0, 0, time.UTC)
+	for _, r := range []Record{early, late, {}} {
+		if !(Filter{}).Match(r) {
+			t.Errorf("zero filter does not match time %v", r.Time)
+		}
+		if !(Filter{Since: t0}).Match(late) || !(Filter{Until: t0.Add(time.Hour)}).Match(early) {
+			t.Error("one open side")
+		}
+	}
+	if (Filter{Since: t0}).Match(early) || (Filter{Until: t0}).Match(late) {
+		t.Error("closed side ignored")
 	}
 }

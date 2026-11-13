@@ -32,11 +32,29 @@ const (
 	// MaxLineBytes is the longest record line, without its newline. The
 	// worst case (every byte of every string escaped to six bytes, plus
 	// the fixed parts) stays below it; a test pins that. Verify and Show
-	// read a longer line as a malformed one without holding it in memory.
+	// read a longer line as a malformed one, whatever the buffer of the
+	// reader, without holding it in memory.
 	MaxLineBytes = 16384
-	// DefaultMaxSize is the size at which the writer refuses to append:
-	// 256 MiB.
+	// MaxTornBytes is the most bytes after the last intact record that Open
+	// accounts for as one torn region, and that Verify accepts in front of
+	// an audit_recovered record. A crash leaves at most one partial line
+	// (MaxLineBytes) and each interrupted recovery adds under 500 bytes, so
+	// the bound leaves room for about a hundred of those. A region over the
+	// bound is not a crash artefact; Open refuses it (ErrCorrupt) and Verify
+	// reports it as a break.
+	MaxTornBytes = 4 * MaxLineBytes
+	// DefaultMaxSize is the size at which the writer stops taking ordinary
+	// records (see ReserveBytes), and at which it stops taking any: 256 MiB.
 	DefaultMaxSize = 256 << 20
+	// ReserveBytes is the room below MaxSize that ordinary records may not
+	// use: two worst-case lines. One terminal record (kind DaemonError or
+	// DaemonStop) and the audit_recovered record that Open appends may use
+	// it, so a full log can still say why the daemon stopped.
+	ReserveBytes = 2 * (MaxLineBytes + 1)
+	// tailWindow is how many bytes from the end Open reads to find the last
+	// intact record: a torn region of at most MaxTornBytes, the longest
+	// intact line and its newline, and the newline before that line.
+	tailWindow = MaxTornBytes + 2*(MaxLineBytes+1)
 )
 
 // timeLayout is the one time format of a record: UTC, nanoseconds always
@@ -164,9 +182,11 @@ func isHex64(s string) bool {
 // decodeLine parses one line (without its newline). It accepts exactly the
 // bytes encodeLine would produce for the record it returns: the line is
 // decoded, encoded again and compared byte for byte, so every byte of an
-// accepted line is significant. A line that is a record but whose Hash is
-// not the hash of its content gets ReasonHash; every other refusal is
-// ReasonMalformed. The chain (Seq, Prev) is not looked at here.
+// accepted line is significant. The record must also be one that Append
+// could have stored (validate): what the writer cannot store is not read as
+// a record either. A line that is a record but whose Hash is not the hash
+// of its content gets ReasonHash; every other refusal is ReasonMalformed.
+// The chain (Seq, Prev) is not looked at here.
 func decodeLine(line []byte) (Record, *lineError) {
 	var w wire
 	if err := json.Unmarshal(line, &w); err != nil {
@@ -185,6 +205,9 @@ func decodeLine(line []byte) (Record, *lineError) {
 	r := Record{
 		Seq: w.Seq, Time: t, Kind: Kind(w.Kind), IncidentID: w.IncidentID,
 		Fingerprint: w.Fingerprint, Summary: w.Summary, Prev: w.Prev, Hash: w.Hash,
+	}
+	if err := validate(r); err != nil {
+		return Record{}, malformed("%v", err)
 	}
 	if got := encodeLine(r); string(got) != string(line) {
 		return Record{}, malformed("not in canonical form")
@@ -244,11 +267,13 @@ func validate(r Record) error {
 	return nil
 }
 
-// tornSummary is the Summary of the record that follows a torn line: where
-// the line starts, how long it is (without a newline) and the SHA-256 of its
-// bytes, so Verify can tell this line from any other garbage.
-func tornSummary(offset, length int64, sum string) string {
-	return fmt.Sprintf("torn tail: offset=%d length=%d sha256=%s", offset, length, sum)
+// tornSummary is the Summary of the record that follows a torn region: where
+// the region starts, how many bytes it has, whether its last byte is a
+// newline (when it is not, the writer added one before the record, and that
+// newline is not counted), and the SHA-256 of its bytes, so Verify can tell
+// this region from any other garbage.
+func tornSummary(offset, length int64, terminated bool, sum string) string {
+	return fmt.Sprintf("torn tail: offset=%d length=%d terminated=%t sha256=%s", offset, length, terminated, sum)
 }
 
 // completedSummary is the Summary of the record noting that the last record,
