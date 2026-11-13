@@ -320,7 +320,11 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 // look and an exclusive create is retried as an existing file.
 //
 // O_NONBLOCK keeps an open of a FIFO swapped in after the first look from
-// blocking; the regular-file check then rejects it (a write open fails).
+// blocking. What happens next depends on the access mode: a write-only open
+// of a FIFO without a reader fails (ENXIO) and is reported as not a regular
+// file; a read-only or a read-write open succeeds, and the regular-file check
+// on the opened file then rejects it, so no FIFO is ever returned to the
+// caller.
 func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, fi fs.FileInfo, created bool, err error) {
 	for range openAttempts {
 		li, lerr := d.root.Lstat(name)
@@ -442,13 +446,29 @@ func (d *Dir) ReadCapped(name string, maxSize int64) ([]byte, error) {
 // returned file is in non-blocking mode, which does not affect a regular file.
 // If the directory flush after a create fails, the new file stays in place.
 func (d *Dir) OpenAppend(name string, maxSize int64) (*os.File, int64, error) {
+	return d.openAppend(name, maxSize, os.O_WRONLY)
+}
+
+// OpenAppendReadable is OpenAppend for a caller that also reads the file it
+// appends to: the file is opened O_RDWR|O_APPEND on the same terms (same
+// look, same trust checks, same size check, same create and cleanup rules,
+// one code path), so reads at an offset (ReadAt) see the very file that the
+// appends go to, with no second open by name. Writes still always land at
+// the end. The caller closes the file.
+func (d *Dir) OpenAppendReadable(name string, maxSize int64) (*os.File, int64, error) {
+	return d.openAppend(name, maxSize, os.O_RDWR)
+}
+
+// openAppend is the one implementation behind OpenAppend and
+// OpenAppendReadable; access is os.O_WRONLY or os.O_RDWR.
+func (d *Dir) openAppend(name string, maxSize int64, access int) (*os.File, int64, error) {
 	if err := validName(name); err != nil {
 		return nil, 0, err
 	}
 	if err := checkMax(maxSize); err != nil {
 		return nil, 0, err
 	}
-	f, fi, created, err := d.openChecked(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, fi, created, err := d.openChecked(name, access|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, 0, err
 	}
