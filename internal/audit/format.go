@@ -225,7 +225,8 @@ func decodeLine(line []byte) (Record, *lineError) {
 var (
 	// ErrInvalidRecord is returned for a record that cannot be stored: an
 	// empty Kind, a zero Time or a year outside 1..9999, a string that is
-	// not valid UTF-8.
+	// not valid UTF-8, or, from Append, the kind audit_recovered, which only
+	// Open writes.
 	ErrInvalidRecord = errors.New("invalid audit record")
 	// ErrSummaryTooLong is returned for a Summary over MaxSummary bytes. It
 	// is never cut; the caller shortens it.
