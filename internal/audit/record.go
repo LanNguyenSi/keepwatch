@@ -1,4 +1,22 @@
-// Package audit defines the audit record.
+// Package audit defines the audit record and the audit log: an append-only
+// JSON Lines file in which every record carries the SHA-256 of its own
+// canonical bytes and the hash of the record before it.
+//
+// File format. One record per line, UTF-8, each line ended by a single "\n".
+// A line is the canonical JSON object of a Record with the fields seq, time,
+// kind, incident_id, fingerprint, summary, prev, hash in this order, no
+// spaces, time in UTC with nine fractional digits and a literal Z, and
+// strings escaped only as \" \\ and \u00xx (lowercase) for the bytes below
+// 0x20 and 0x7f. The encoder is written by hand because the hash needs a form
+// that no library version may change. Seq counts from 1. Prev of the first
+// record is Genesis. Hash is the lowercase hex SHA-256 over the bytes of the
+// line from its first byte up to and including the prev field (everything but
+// the hash field), so the hash covers the link to the previous record.
+//
+// Writer appends and Open finds the end of an existing log; Verify and Show
+// read it. What the chain proves and what it does not (a cut-off end, an
+// attacker who rewrites everything) is on Verify. Rotation does not exist:
+// at the size limit the writer refuses with ErrFull.
 package audit
 
 import "time"

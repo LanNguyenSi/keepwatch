@@ -24,6 +24,15 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- An audit log for the daemon: an append-only file in the state directory in
+  which every record carries the SHA-256 of its own canonical bytes and of the
+  record before it, synced to disk on every append, with a size limit at which
+  it refuses to write. A torn last line from a crash is kept as it is and
+  accounted for by a recovery record. The reader checks the whole chain from
+  the first record (content, order, links) and can filter records by kind,
+  incident and time. It does not notice a log that was cut off at its end,
+  and anyone who can write the file can rewrite all of it consistently; both
+  limits are documented.
 
 ### Security
 
