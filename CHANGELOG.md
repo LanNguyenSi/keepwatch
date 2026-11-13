@@ -24,6 +24,9 @@ report.
   file with the one it saw before and turns alert-worthy changes into signals
   that do not notify on their own, so `check --notify` stays the only
   notification path for posture.
+- Notification worker for the watch daemon: a bounded queue with its own
+  goroutine, a per-incident and a global rate limit, reported drops, and an
+  incident notice that is cleaned before it is cut.
 - A request spool for the watch daemon: acknowledging or closing an incident
   is asked for by dropping a small file into `requests/` in the state
   directory, which the daemon reads with owner, mode, size and schema checks
