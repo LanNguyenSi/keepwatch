@@ -77,6 +77,19 @@ func TestBaselineKnownAndAdd(t *testing.T) {
 	if _, exists := b.users[strings.Repeat("u", maxBaselineUserLen+1)]; exists {
 		t.Error("an over-long user must not be created")
 	}
+	if b.AddIP("", "9.9.9.9") || b.AddKey("", "SHA256:x") {
+		t.Error("empty user name must be refused")
+	}
+	if _, exists := b.users[""]; exists {
+		t.Error("an empty user must not be created")
+	}
+	badUser := "bob\xff\xfe" // not valid UTF-8
+	if b.AddIP(badUser, "9.9.9.9") || b.AddKey(badUser, "SHA256:x") {
+		t.Error("user name that is not valid UTF-8 must be refused")
+	}
+	if _, exists := b.users[badUser]; exists {
+		t.Error("a non-UTF-8 user must not be created")
+	}
 	if len(b.users["bob"].ips) != 1 || len(b.users["bob"].keys) != 1 {
 		t.Fatalf("a refused entry must not be stored: %+v", b.users["bob"])
 	}
@@ -219,6 +232,52 @@ func TestBaselineMarshalRoundTrip(t *testing.T) {
 	}
 }
 
+// A baseline restored without a LearningStart (the zero instant) is past
+// its learning phase. The learning latch round-trips: a baseline whose
+// phase ended loads ended, and one that never saw the end loads open,
+// including from a file that predates the field.
+func TestBaselineLearningDoneRoundTrip(t *testing.T) {
+	b := NewBaseline(t0)
+	if b.LearningDone() {
+		t.Fatal("a fresh baseline has not ended its learning phase")
+	}
+	raw, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Unmarshal(raw)
+	if err != nil || again.LearningDone() {
+		t.Fatalf("unset latch: %v %v", err, again.LearningDone())
+	}
+	b.MarkLearningDone()
+	if !b.LearningDone() {
+		t.Fatal("MarkLearningDone")
+	}
+	raw, err = b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["learning_done"] != true {
+		t.Errorf("learning_done = %v in %s", doc["learning_done"], raw)
+	}
+	again, err = Unmarshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.LearningDone() || !again.LearningStart().Equal(t0) {
+		t.Fatal("learning latch lost in the round trip")
+	}
+	// A file without the field (an older writer) loads open.
+	again, err = Unmarshal([]byte(`{"schema_version":1,"learning_start":"2026-01-02T03:04:05Z","users":[]}`))
+	if err != nil || again.LearningDone() {
+		t.Fatalf("missing latch field: %v %v", err, again != nil && again.LearningDone())
+	}
+}
+
 func TestUnmarshalSchemaAndErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -261,6 +320,13 @@ func TestUnmarshalCapCounts(t *testing.T) {
 		}
 		return `["` + strings.Join(parts, `","`) + `"]`
 	}
+	keys := func(n int) string {
+		var parts []string
+		for i := 0; i < n; i++ {
+			parts = append(parts, fmt.Sprintf("SHA256:k%04d", i))
+		}
+		return `["` + strings.Join(parts, `","`) + `"]`
+	}
 	// One entry over the per-user cap is refused; at the cap it loads.
 	_, err := Unmarshal([]byte(`{"schema_version":1,"users":[{"user":"bob","ips":` + ips(BaselineEntriesPerUser+1) + `}]}`))
 	if !errors.Is(err, errBaselineCorrupt) {
@@ -270,18 +336,90 @@ func TestUnmarshalCapCounts(t *testing.T) {
 	if err != nil || !b.KnownIP("bob", "10.0.0.1") {
 		t.Errorf("at-cap entries: %v %+v", err, b)
 	}
-	// One user over the user cap is refused.
-	var users []string
+	// Keys count against the per-user cap together with the addresses:
+	// ips plus keys one over the cap is refused, at the cap it loads.
+	_, err = Unmarshal([]byte(`{"schema_version":1,"users":[{"user":"bob","ips":` +
+		ips(BaselineEntriesPerUser/2) + `,"keys":` + keys(BaselineEntriesPerUser/2+1) + `}]}`))
+	if !errors.Is(err, errBaselineCorrupt) {
+		t.Errorf("ips plus keys over the cap: %v", err)
+	}
+	b, err = Unmarshal([]byte(`{"schema_version":1,"users":[{"user":"bob","ips":` +
+		ips(BaselineEntriesPerUser/2) + `,"keys":` + keys(BaselineEntriesPerUser/2) + `}]}`))
+	if err != nil || !b.KnownIP("bob", "10.0.0.1") || !b.KnownKey("bob", "SHA256:k0000") {
+		t.Errorf("ips plus keys at the cap: %v %+v", err, b)
+	}
+	// One user over the user cap is refused; exactly at the cap it loads.
+	var users, usersAt []string
 	for i := 0; i < BaselineMaxUsers+1; i++ {
 		users = append(users, fmt.Sprintf(`{"user":"u%d","ips":["192.0.2.1"]}`, i))
+		if i < BaselineMaxUsers {
+			usersAt = append(usersAt, fmt.Sprintf(`{"user":"v%d","ips":["192.0.2.2"]}`, i))
+		}
 	}
 	if _, err := Unmarshal([]byte(`{"schema_version":1,"users":[` + strings.Join(users, ",") + `]}`)); !errors.Is(err, errBaselineCorrupt) {
 		t.Errorf("over-cap users: %v", err)
 	}
-	// An oversized document is refused without parsing it: the padding is a
-	// field no reader uses, so only the size bound can refuse this.
-	if _, err := Unmarshal([]byte(`{"schema_version":1,"users":[],"pad":"` + strings.Repeat(" ", maxBaselineUnmarshalBytes+1) + `"}`)); !errors.Is(err, errBaselineCorrupt) {
+	b, err = Unmarshal([]byte(`{"schema_version":1,"users":[` + strings.Join(usersAt, ",") + `]}`))
+	if err != nil {
+		t.Fatalf("at-cap users: %v", err)
+	}
+	b.mu.Lock()
+	n := len(b.users)
+	b.mu.Unlock()
+	if n != BaselineMaxUsers || !b.KnownIP("v0", "192.0.2.2") || !b.KnownIP(fmt.Sprintf("v%d", BaselineMaxUsers-1), "192.0.2.2") {
+		t.Errorf("at-cap users: %d users loaded", n)
+	}
+	// An oversized document is refused before it is parsed. The size
+	// bound admits a worst-case marshal at the caps (see its
+	// derivation), so a refusal of such a large input must come from
+	// the bound itself: the error names the byte count. (The input is
+	// this large because the bound is.)
+	if _, err := Unmarshal(make([]byte, maxBaselineUnmarshalBytes+1)); err == nil || !strings.Contains(err.Error(), "bytes exceeds") {
 		t.Errorf("oversized document: %v", err)
+	}
+}
+
+// Marshal at the caps, with entries of realistic length, produces a
+// document Unmarshal accepts: the size bound is derived from the caps
+// and the length bounds, so a baseline can never outgrow its own load
+// bound.
+func TestBaselineMarshalAtCapsRoundTrip(t *testing.T) {
+	b := NewBaseline(t0)
+	for u := 0; u < BaselineMaxUsers; u++ {
+		name := fmt.Sprintf("user%d", u)
+		for e := 0; e < BaselineEntriesPerUser; e++ {
+			var ok bool
+			if e%2 == 0 {
+				ok = b.AddIP(name, fmt.Sprintf("2001:db8:%x:%x::%x", u, e, e))
+			} else {
+				ok = b.AddKey(name, fmt.Sprintf("SHA256:%s%04d%04d", "AbCdEfGhIjKlMnOpQrStUvWxYz012345678", u, e))
+			}
+			if !ok {
+				t.Fatalf("entry %d of user %d refused below the cap", e, u)
+			}
+		}
+	}
+	raw, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Unmarshal(raw)
+	if err != nil {
+		t.Fatalf("a marshal at the caps must load: %d bytes, %v", len(raw), err)
+	}
+	if !again.KnownIP("user0", "2001:db8:0:0::0") || !again.KnownKey("user0", "SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz01234567800000001") {
+		t.Fatal("first user lost")
+	}
+	last := fmt.Sprintf("user%d", BaselineMaxUsers-1)
+	if !again.KnownIP(last, fmt.Sprintf("2001:db8:%x:%x::%x", BaselineMaxUsers-1, 0, 0)) ||
+		!again.KnownKey(last, fmt.Sprintf("SHA256:%s%04d%04d", "AbCdEfGhIjKlMnOpQrStUvWxYz012345678", BaselineMaxUsers-1, 1)) {
+		t.Fatal("last user lost")
+	}
+	again.mu.Lock()
+	n := len(again.users)
+	again.mu.Unlock()
+	if n != BaselineMaxUsers {
+		t.Fatalf("%d users loaded", n)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // BaselineSchemaVersion is the schema_version of the persisted baseline
@@ -22,11 +23,24 @@ const BaselineSchemaVersion = 1
 // cap (it returns false); the caller still reports the finding, so a cap
 // can make a source alert repeatedly but never go unnoticed.
 const (
-	BaselineMaxUsers          = 1024
-	BaselineEntriesPerUser    = 256
-	maxBaselineUserLen        = 256
-	maxBaselineEntryLen       = 256
-	maxBaselineUnmarshalBytes = 8 << 20
+	BaselineMaxUsers       = 1024
+	BaselineEntriesPerUser = 256
+	maxBaselineUserLen     = 256
+	maxBaselineEntryLen    = 256
+
+	// maxBaselineUnmarshalBytes bounds an Unmarshal input. It is derived
+	// from the caps and the length bounds so that it admits what Marshal
+	// can write at the caps: the worst case is a document whose every
+	// byte of a user name or entry is a control character, which JSON
+	// escapes as \u00xx, six bytes per byte. Per user: an escaped name
+	// with its quoted "user" field and separators, plus
+	// BaselineEntriesPerUser escaped entries with their quotes and
+	// separators across the two lists, plus the list syntax. The top
+	// object's fixed fields and the learning-start time (at most its
+	// longest RFC 3339 form) fit in the slack of the per-user roundings.
+	maxBaselineUnmarshalBytes = 1024 + BaselineMaxUsers*
+		(6*maxBaselineUserLen+6+8+1+7+8+2+2+
+			BaselineEntriesPerUser*(6*maxBaselineEntryLen+3))
 )
 
 // ErrBaselineSchema is returned by Unmarshal for a baseline whose
@@ -61,9 +75,12 @@ type baselineUser struct {
 }
 
 // Baseline is the set of source addresses and SSH key fingerprints a user
-// has logged in with, plus the instant the learning phase started. The
-// login rule consults and extends it; Marshal and Unmarshal carry it to and
-// from the state directory so the learning survives a restart.
+// has logged in with, plus the instant the learning phase started and a
+// latch recording that the login rule has seen a time at or past the end
+// of that phase (after which the learning phase never reopens, not even
+// for a clock step back). The login rule consults and extends it; Marshal
+// and Unmarshal carry it to and from the state directory so the learning
+// survives a restart.
 //
 // Its methods are safe for concurrent use. The login rule holds its own
 // mutex across a check-then-add pair, so a baseline shared between rules
@@ -71,12 +88,14 @@ type baselineUser struct {
 // The source addresses are stored in the canonical form returned by
 // parseLoginAddr (an IPv6 keeps its full form; only an IPv4-mapped IPv6 is
 // mapped to its IPv4); the fingerprints are stored normalized by
-// normalizeKeyFP. A user name, an address or a fingerprint longer than
-// maxBaselineUserLen or maxBaselineEntryLen is refused (added: not stored,
-// reported: not found) because a field that long is not real.
+// normalizeKeyFP. An empty or invalid-UTF-8 user name and a user name,
+// address or fingerprint longer than maxBaselineUserLen or
+// maxBaselineEntryLen are refused (added: not stored, reported: not
+// found) because such a field is not real.
 type Baseline struct {
 	mu            sync.Mutex
 	learningStart time.Time
+	learningDone  bool
 	users         map[string]*baselineUser
 }
 
@@ -97,6 +116,26 @@ func (b *Baseline) LearningStart() time.Time {
 	return b.learningStart
 }
 
+// LearningDone reports whether a time at or past the end of the learning
+// phase has been seen and recorded with MarkLearningDone. Once true the
+// learning phase is over for good: a clock step back to a time inside the
+// window does not reopen it.
+func (b *Baseline) LearningDone() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.learningDone
+}
+
+// MarkLearningDone records that a time at or past the end of the learning
+// phase has been seen, latching the end of the learning phase into the
+// persisted baseline. It is called by the login rule; the flag is carried
+// by Marshal and Unmarshal.
+func (b *Baseline) MarkLearningDone() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.learningDone = true
+}
+
 // known reports whether user has the entry (already in its stored form) in
 // the set named by toIPs.
 func (b *Baseline) known(user string, toIPs bool, entry string) bool {
@@ -113,11 +152,13 @@ func (b *Baseline) known(user string, toIPs bool, entry string) bool {
 }
 
 // add stores entry (already in its stored form) for user and reports
-// whether it was stored: false when the user is new and the user cap is
-// reached, when the user's entry cap is reached, or when a length bound is
-// exceeded. An entry already known counts against no cap.
+// whether it was stored: false when the user name is empty, is not valid
+// UTF-8 or exceeds the length bound, when the user is new and the user cap
+// is reached, when the user's entry cap is reached, or when the entry
+// length bound is exceeded. An entry already known counts against no cap.
 func (b *Baseline) add(user string, toIPs bool, entry string) bool {
-	if len(user) > maxBaselineUserLen || len(entry) == 0 || len(entry) > maxBaselineEntryLen {
+	if user == "" || !utf8.ValidString(user) || len(user) > maxBaselineUserLen ||
+		len(entry) == 0 || len(entry) > maxBaselineEntryLen {
 		return false
 	}
 	b.mu.Lock()
@@ -190,12 +231,14 @@ type baselineUserWire struct {
 type baselineWire struct {
 	SchemaVersion int                `json:"schema_version"`
 	LearningStart time.Time          `json:"learning_start"`
+	LearningDone  bool               `json:"learning_done"`
 	Users         []baselineUserWire `json:"users"`
 }
 
 // Marshal returns the JSON form of the baseline: schema_version, the
-// learning start and the users with their source addresses and normalized
-// key fingerprints, sorted.
+// learning start, the latch recording whether the learning phase has
+// ended, and the users with their source addresses and normalized key
+// fingerprints, sorted.
 func (b *Baseline) Marshal() ([]byte, error) {
 	b.mu.Lock()
 	users := make([]baselineUserWire, 0, len(b.users))
@@ -213,19 +256,21 @@ func (b *Baseline) Marshal() ([]byte, error) {
 		users = append(users, baselineUserWire{User: name, IPs: ips, Keys: keys})
 	}
 	start := b.learningStart
+	done := b.learningDone
 	b.mu.Unlock()
 	sort.Slice(users, func(i, j int) bool { return users[i].User < users[j].User })
-	return json.Marshal(baselineWire{SchemaVersion: BaselineSchemaVersion, LearningStart: start, Users: users})
+	return json.Marshal(baselineWire{SchemaVersion: BaselineSchemaVersion, LearningStart: start, LearningDone: done, Users: users})
 }
 
 // Unmarshal returns the baseline stored in data by Marshal. A data longer
 // than maxBaselineUnmarshalBytes, another schema_version (an error wrapping
 // ErrBaselineSchema), a repeated user, a duplicate or oversized entry and a
 // count above the documented caps are all refused with an error: a baseline
-// is loaded whole or not at all, and a caller that cannot load it starts a
-// fresh learning phase instead of trusting a file it cannot verify.
-// Fingerprints are normalized, so a file written with config-form entries
-// reads as the keys the log lines carry.
+// is loaded whole or not at all. What to do when a file cannot be loaded
+// (a missing, corrupt or newer file, for instance) is the caller's
+// decision; Unmarshal only says that this data is not a baseline this
+// keepwatch can trust. Fingerprints are normalized, so a file written with
+// config-form entries reads as the keys the log lines carry.
 func Unmarshal(data []byte) (*Baseline, error) {
 	if len(data) > maxBaselineUnmarshalBytes {
 		return nil, fmt.Errorf("%w: %d bytes exceeds %d", errBaselineCorrupt, len(data), maxBaselineUnmarshalBytes)
@@ -240,7 +285,7 @@ func Unmarshal(data []byte) (*Baseline, error) {
 	if len(w.Users) > BaselineMaxUsers {
 		return nil, fmt.Errorf("%w: %d users exceeds %d", errBaselineCorrupt, len(w.Users), BaselineMaxUsers)
 	}
-	b := &Baseline{learningStart: w.LearningStart, users: map[string]*baselineUser{}}
+	b := &Baseline{learningStart: w.LearningStart, learningDone: w.LearningDone, users: map[string]*baselineUser{}}
 	for _, uw := range w.Users {
 		if uw.User == "" || len(uw.User) > maxBaselineUserLen {
 			return nil, fmt.Errorf("%w: unusable user name", errBaselineCorrupt)
