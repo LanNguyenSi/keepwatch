@@ -27,6 +27,12 @@ report.
 - Notification worker for the watch daemon: a bounded queue with its own
   goroutine, a per-incident and a global rate limit, reported drops, and an
   incident notice that is cleaned before it is cut.
+- A single-instance lock for the state directory: an exclusive non-blocking
+  `flock` on `watch.lock`, opened under the secure file rules (no symlink,
+  mode `0600`, trusted owner), so a second lock attempt on the same directory
+  reports that the lock is held instead of running twice; the lock file is
+  kept after release, and the lock is unsupported rather than silently absent
+  on platforms without `flock`.
 
 ### Security
 
