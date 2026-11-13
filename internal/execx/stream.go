@@ -12,6 +12,9 @@ import (
 
 var _ Streamer = (*Real)(nil)
 
+// killProcessGroup is killGroup; a variable so a test can count the calls.
+var killProcessGroup = killGroup
+
 // withDefaults fills the zero values. Timeout and IdleTimeout stay as given:
 // zero (or negative) means no limit.
 func (o StreamOpts) withDefaults() StreamOpts {
@@ -37,8 +40,10 @@ func (o StreamOpts) withDefaults() StreamOpts {
 // as Run (ErrEmptyArgv, ErrNotAllowed and ErrNotFound are returned before
 // anything starts), gives the child its own pipes and the same minimal
 // environment, and on unix runs it in its own process group, which is killed
-// when Stream returns on any path, so nothing it started outlives the call.
-// No goroutine started by Stream outlives it either.
+// when Stream returns on any path, so everything left in that group does not
+// outlive the call. A grandchild that started a new session is outside the
+// group and is not killed. No goroutine started by Stream outlives it, also
+// when onLine panics and the caller recovers.
 //
 // Lines are split at '\n'; a final line without a newline is delivered too.
 // A line longer than StreamOpts.MaxLine is dropped and counted, see
@@ -46,8 +51,9 @@ func (o StreamOpts) withDefaults() StreamOpts {
 // StreamOpts.MaxStderr.
 //
 // After the program exited, Stream keeps reading stdout until it ends, but
-// gives up after the same grace period Run uses when a leftover child holds
-// the pipe open (StreamResult.IOIncomplete).
+// gives up when no line arrives for the same grace period Run uses and a
+// leftover child holds the pipe open (StreamResult.IOIncomplete). The grace
+// period restarts after every line, so a slow onLine never causes it.
 func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLine func([]byte) error) (StreamResult, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return StreamResult{}, ErrEmptyArgv
@@ -62,7 +68,7 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 	opts = opts.withDefaults()
 
 	// The command's own context is not derived from ctx: the child is ended
-	// only by terminate below, so that there is one place that kills it.
+	// only by cleanup below, so that there is one place that kills it.
 	kctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(kctx, path, argv[1:]...)
 	cmd.Args[0] = argv[0]
@@ -99,15 +105,15 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 		}
 		return StreamResult{}, fmt.Errorf("execx: stream %s: %w", argv[0], startErr)
 	}
-	// terminate ends the child and everything it started. It is the only
-	// place the stream path kills, and it runs on every return path.
-	terminate := func() {
-		cancel()
-		killGroup(cmd)
-	}
-	defer terminate()
-
-	var stderr limitBuffer
+	var (
+		stderr     limitBuffer
+		abortErr   error
+		waitErr    error
+		exited     bool
+		eof        bool
+		incomplete bool
+		cleaned    bool
+	)
 	stderr.limit = opts.MaxStderr
 	errC := startCopy(errR, &stderr)
 
@@ -116,6 +122,32 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 
 	stop := make(chan struct{})
 	rd := startLineReader(outR, opts.MaxLine, stop)
+
+	// cleanup ends the child and everything left in its process group and
+	// joins every goroutine and descriptor Stream owns: the reader, the
+	// waiter and the stderr copy. It is the only place the stream path
+	// kills, and it runs once, so the group is signalled once and never
+	// again after the child was reaped, when its pid could have been reused.
+	// It runs after the loop and, if onLine panics, from the deferred call.
+	cleanup := func() {
+		if cleaned {
+			return
+		}
+		cleaned = true
+		cancel()
+		killProcessGroup(cmd)
+		if !exited {
+			waitErr = <-waitC
+			exited = true
+		}
+		close(stop)
+		outR.Close()
+		<-rd.done
+		if awaitCopies(errC) {
+			incomplete = true
+		}
+	}
+	defer cleanup()
 
 	var total, idle, grace *time.Timer
 	var totalC, idleC, graceC <-chan time.Time
@@ -135,15 +167,8 @@ func (r *Real) Stream(ctx context.Context, argv []string, opts StreamOpts, onLin
 		}
 	}()
 
-	var (
-		abortErr   error
-		waitErr    error
-		exited     bool
-		eof        bool
-		incomplete bool
-		linesC     = rd.lines
-		wc         = (<-chan error)(waitC)
-	)
+	linesC := rd.lines
+	wc := (<-chan error)(waitC)
 loop:
 	for !(exited && eof) {
 		select {
@@ -151,11 +176,7 @@ loop:
 			if !ok {
 				eof = true
 				linesC = nil
-				idleC = nil
 				continue
-			}
-			if idle != nil {
-				resetTimer(idle, opts.IdleTimeout)
 			}
 			if onLine != nil && !m.dropped {
 				if err := onLine(m.line); err != nil {
@@ -163,9 +184,19 @@ loop:
 					break loop
 				}
 			}
+			// The idle and grace timers measure waiting for the reader, not
+			// time inside onLine: they restart once the line was handled.
+			if idle != nil {
+				resetTimer(idle, opts.IdleTimeout)
+			}
+			if grace != nil {
+				resetTimer(grace, waitDelay)
+			}
 		case waitErr = <-wc:
 			exited = true
 			wc = nil
+			// From here a leftover child is bounded by the grace period.
+			idleC = nil
 			grace = time.NewTimer(waitDelay)
 			graceC = grace.C
 		case <-graceC:
@@ -183,18 +214,7 @@ loop:
 		}
 	}
 
-	// Kill whatever is left, then reap and join every goroutine: the reader,
-	// the waiter and the stderr copy.
-	terminate()
-	if !exited {
-		waitErr = <-waitC
-	}
-	close(stop)
-	outR.Close()
-	<-rd.done
-	if awaitCopies(errC) {
-		incomplete = true
-	}
+	cleanup()
 	res := StreamResult{
 		Stderr:          stderr.buf.Bytes(),
 		StderrTruncated: stderr.truncated,

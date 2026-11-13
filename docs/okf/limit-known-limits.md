@@ -14,6 +14,7 @@ sources:
   - internal/probes/sshd.go
   - internal/probes/listeners.go
   - internal/execx/real.go
+  - internal/execx/stream.go
   - internal/doctor/doctor.go
   - internal/history/history.go
   - docs/running.md
@@ -95,6 +96,15 @@ adjacent ones stop short.
   directories being root-owned; Go has no `fexecve`, so anyone who could
   write into those directories still races the final exec
   (`internal/execx/real.go:162-163#"Go has no fexecve"`).
+- **The process-group kill does not reach a new session.** `Run` and `Stream`
+  SIGKILL the child's process group when they return
+  (`internal/execx/stream.go:132#"cleanup := func() {"`), which covers
+  everything the child left in that group. A grandchild that starts a new
+  session (`setsid`) and ignores SIGPIPE is outside the group, survives the
+  call and keeps holding stdout and stderr; both return after their grace
+  period with `IOIncomplete` set instead of waiting for it, but the process
+  itself keeps running until it ends on its own. Pinned for `Stream` by
+  `TestStreamEscapeeHoldingPipesIsBounded`.
 - **Drop-ins are counted, not read.** `doctor` judges a drop-in's existence
   and location, never its content, and says so in the finding
   (`docs/install.md:371#"judged by its existence"`,

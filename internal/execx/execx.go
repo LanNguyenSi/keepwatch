@@ -113,7 +113,9 @@ type StreamOpts struct {
 	Timeout time.Duration
 	// IdleTimeout, when positive, ends the stream with ErrIdleTimeout if no
 	// stdout line arrives for that long (dropped lines count as arrivals).
-	// Zero means no limit.
+	// It measures time spent waiting for the program, not time spent inside
+	// onLine, and it stays armed until the program has exited, also after
+	// its stdout was closed. Zero means no limit.
 	IdleTimeout time.Duration
 	// Env and Dir behave as in Opts.
 	Env []string
@@ -132,10 +134,12 @@ type StreamResult struct {
 	// DroppedLines counts stdout lines longer than StreamOpts.MaxLine that
 	// were not delivered.
 	DroppedLines int
-	// IOIncomplete is set when the output pipes were still open a grace
-	// period after the program exited (a leftover child held them) and had
-	// to be cut: lines or stderr may be missing. A successful exit also
-	// returns ErrIOTimeout, as Run does.
+	// IOIncomplete is set when, after the program exited, no further stdout
+	// line arrived for a grace period while the output pipes were still open
+	// (a leftover child held them) and they had to be cut: lines or stderr
+	// may be missing. Time spent inside onLine does not count towards the
+	// grace period. A successful exit also returns ErrIOTimeout, as Run
+	// does.
 	IOIncomplete bool
 	Duration     time.Duration
 }

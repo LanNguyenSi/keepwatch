@@ -78,33 +78,40 @@ the skip rule is the package comment of `internal/probes/probes.go`).
 long-lived program's stdout line by line, on the caller's goroutine, while
 `Run` and `Runner` stay as they were. `Real.Stream` goes through the same
 `resolve` as `Run`, so the allowlist, the trusted directories and the typed
-errors are identical (`internal/execx/stream.go:55#"r.resolve(argv[0])"`),
+errors are identical (`internal/execx/stream.go:61#"r.resolve(argv[0])"`),
 and it uses the same minimal environment, its own pipes and the same
-process-group setup (`internal/execx/stream.go:84#"configureKill(cmd)"`). It
+process-group setup (`internal/execx/stream.go:90#"configureKill(cmd)"`). It
 is not a way around the allowlist: a program that is not in the table cannot
 be streamed either. What differs is the bound. There is no default timeout,
 because a follow stream is meant to run until the caller cancels it; a total
 `Timeout` (`ErrTimeout`) and an `IdleTimeout` (`ErrIdleTimeout`) exist but
 only when asked for (`internal/execx/execx.go:114#"IdleTimeout, when positive"`).
-Memory is bounded per line, not per run: a line longer than `MaxLine`
-(`DefaultMaxLine`, 64 KiB) is never delivered, not even cut, it is dropped and
-counted in `StreamResult.DroppedLines` and the stream goes on
-(`internal/execx/stream.go:274#"if len(acc)+len(data) > max"`). stderr is
+The idle limit measures waiting for the program, not time inside the
+callback, and it stays armed until the program has exited, also after it
+closed its stdout. Memory is bounded per line, not per run: a line longer than
+`MaxLine` (`DefaultMaxLine`, 64 KiB) is never delivered, not even cut, it is
+dropped and counted in `StreamResult.DroppedLines` and the stream goes on
+(`internal/execx/stream.go:294#"if len(acc)+len(data) > max"`). stderr is
 drained concurrently into a buffer capped like `Run`'s output, so a chatty
 child cannot block on a full pipe
-(`internal/execx/stream.go:112#"errC := startCopy(errR, &stderr)"`).
-The stream ends, and the process group is SIGKILLed on every path, when the
-context ends (the context's error is returned, never `ErrTimeout`), when the
-callback returns an error (that error is returned), on an opt-in timeout, and
-after the program exited by itself
-(`internal/execx/stream.go:104#"terminate := func() {"`); no goroutine started
-by `Stream` outlives the call. The grace period for a leftover child holding
-stdout is the same variable as `Run`'s, and the signal is the same: a stream
-whose pipes had to be cut sets `StreamResult.IOIncomplete`, and after a
-successful exit also returns `ErrIOTimeout`
-(`internal/execx/stream.go:169#"grace = time.NewTimer(waitDelay)"`). Callers
-of a stream that ended by an error other than their own must treat the lines
-they got as a prefix, not as a complete log. Nothing in the engine or the
-probes streams yet: the check allowlist from `engine.Programs` is untouched,
-and a streamed program such as `journalctl` joins a runner only by being
-named in the allowlist of the runner that streams it.
+(`internal/execx/stream.go:118#"errC := startCopy(errR, &stderr)"`).
+The stream ends when the context ends (the context's error is returned, never
+`ErrTimeout`), when the callback returns an error (that error is returned),
+on an opt-in timeout, or after the program exited by itself. One deferred
+cleanup then SIGKILLs the process group once, and joins the reader, the waiter
+and the stderr copy, also when the callback panics and the caller recovers
+(`internal/execx/stream.go:132#"cleanup := func() {"`). The kill reaches
+everything left in the child's process group; a grandchild that started a new
+session is outside it (see the known limit). After the program exited, the
+stream keeps reading stdout and gives up when no line arrives for the same
+grace period as `Run`'s (the same variable) while a leftover child still holds
+the pipe: that sets `StreamResult.IOIncomplete`, and after a successful exit
+also returns `ErrIOTimeout`
+(`internal/execx/stream.go:200#"grace = time.NewTimer(waitDelay)"`). The grace
+period restarts after every line, so a slow callback emptying a backlog is not
+mistaken for a held pipe. Callers of a stream that ended by an error other
+than their own must treat the lines they got as a prefix, not as a complete
+log. Nothing in the engine or the probes streams yet: the check allowlist from
+`engine.Programs` is untouched, and a streamed program such as `journalctl`
+joins a runner only by being named in the allowlist of the runner that streams
+it.

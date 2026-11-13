@@ -3,11 +3,14 @@ package execx
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -17,6 +20,32 @@ type streamOut struct {
 	res   StreamResult
 	err   error
 	lines []string
+}
+
+// within runs f and fails the test with a named message when it has not
+// finished after d, so a hang is reported in seconds instead of as the go test
+// timeout. A hung f is left behind.
+func within(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not finish within %s", what, d)
+	}
+}
+
+// callStream is a bounded r.Stream for tests that need no line collection.
+func callStream(t *testing.T, r *Real, ctx context.Context, argv []string, opts StreamOpts, onLine func([]byte) error) (StreamResult, error) {
+	t.Helper()
+	var res StreamResult
+	var err error
+	within(t, 15*time.Second, "Stream "+strings.Join(argv, " "), func() { res, err = r.Stream(ctx, argv, opts, onLine) })
+	return res, err
 }
 
 // streamBounded runs Stream and fails the test with a named message if it has
@@ -92,24 +121,24 @@ func TestStreamAllowlist(t *testing.T) {
 	r := realRunner(t, "echo")
 	marker := t.TempDir() + "/ran"
 	noLine := func([]byte) error { t.Error("onLine called"); return nil }
-	if _, err := r.Stream(bg, nil, StreamOpts{}, noLine); !errors.Is(err, ErrEmptyArgv) {
+	if _, err := callStream(t, r, bg, nil, StreamOpts{}, noLine); !errors.Is(err, ErrEmptyArgv) {
 		t.Errorf("nil argv: %v", err)
 	}
-	if _, err := r.Stream(bg, []string{""}, StreamOpts{}, noLine); !errors.Is(err, ErrEmptyArgv) {
+	if _, err := callStream(t, r, bg, []string{""}, StreamOpts{}, noLine); !errors.Is(err, ErrEmptyArgv) {
 		t.Errorf("empty argv: %v", err)
 	}
-	if _, err := r.Stream(bg, []string{"touch", marker}, StreamOpts{}, noLine); !errors.Is(err, ErrNotAllowed) {
+	if _, err := callStream(t, r, bg, []string{"touch", marker}, StreamOpts{}, noLine); !errors.Is(err, ErrNotAllowed) {
 		t.Errorf("not allowed: %v", err)
 	}
 	notExecuted(t, marker)
-	if _, err := r.Stream(bg, []string{"./echo"}, StreamOpts{}, noLine); !errors.Is(err, ErrNotAllowed) {
+	if _, err := callStream(t, r, bg, []string{"./echo"}, StreamOpts{}, noLine); !errors.Is(err, ErrNotAllowed) {
 		t.Errorf("relative: %v", err)
 	}
-	if _, err := realRunner(t, "keepwatch-no-such-tool").Stream(bg, []string{"keepwatch-no-such-tool"}, StreamOpts{}, noLine); !errors.Is(err, ErrNotFound) {
+	if _, err := callStream(t, realRunner(t, "keepwatch-no-such-tool"), bg, []string{"keepwatch-no-such-tool"}, StreamOpts{}, noLine); !errors.Is(err, ErrNotFound) {
 		t.Errorf("not found: %v", err)
 	}
 	var got []string
-	if _, err := r.Stream(bg, []string{"echo", "hi"}, StreamOpts{}, func(l []byte) error { got = append(got, string(l)); return nil }); err != nil || len(got) != 1 || got[0] != "hi" {
+	if _, err := callStream(t, r, bg, []string{"echo", "hi"}, StreamOpts{}, func(l []byte) error { got = append(got, string(l)); return nil }); err != nil || len(got) != 1 || got[0] != "hi" {
 		t.Errorf("allowed: %q %v", got, err)
 	}
 }
@@ -269,7 +298,7 @@ func TestStreamContextDoneBeforeStart(t *testing.T) {
 	marker := t.TempDir() + "/ran"
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
-	res, err := realRunner(t, "sh").Stream(ctx, []string{"sh", "-c", "touch " + marker}, StreamOpts{}, nil)
+	res, err := callStream(t, realRunner(t, "sh"), ctx, []string{"sh", "-c", "touch " + marker}, StreamOpts{}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -411,38 +440,51 @@ func TestStreamSlowConsumerCancel(t *testing.T) {
 	}
 }
 
-func goroutinesSettle(t *testing.T, name string, base int) {
+// fdCount is the number of open descriptors of this process; the directory
+// listing's own descriptor is in every sample, so differences are exact.
+func fdCount(t *testing.T) int {
 	t.Helper()
-	var n int
+	ents, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot count descriptors: %v", err)
+	}
+	return len(ents)
+}
+
+// resourcesSettle waits until the goroutine and descriptor counts are back at
+// the values taken before, and fails with a stack dump when they are not.
+func resourcesSettle(t *testing.T, name string, goroutines, fds int) {
+	t.Helper()
+	var g, f int
 	for i := 0; i < 100; i++ {
-		n = runtime.NumGoroutine()
-		if n <= base {
+		g, f = runtime.NumGoroutine(), fdCount(t)
+		if g <= goroutines && f <= fds {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	buf := make([]byte, 1<<16)
 	buf = buf[:runtime.Stack(buf, true)]
-	t.Fatalf("%s: goroutines: %d after, %d before\n%s", name, n, base, buf)
+	t.Fatalf("%s: %d goroutines and %d descriptors after, %d and %d before\n%s", name, g, f, goroutines, fds, buf)
 }
 
-// No goroutine started by Stream outlives it, on any way it can end.
+// No goroutine or descriptor of Stream outlives it, on any way it can end.
 func TestStreamLeavesNoGoroutines(t *testing.T) {
 	r := realRunner(t, "sh", "sleep", "yes")
 	run := func(name string, f func()) {
 		t.Helper()
-		base := runtime.NumGoroutine()
+		g, fds := runtime.NumGoroutine(), fdCount(t)
 		f()
-		goroutinesSettle(t, name, base)
+		resourcesSettle(t, name, g, fds)
 	}
 	run("clean", func() {
-		_, _ = r.Stream(bg, []string{"sh", "-c", "echo a; echo b >&2"}, StreamOpts{}, func([]byte) error { return nil })
+		_, _ = callStream(t, r, bg, []string{"sh", "-c", "echo a; echo b >&2"}, StreamOpts{}, func([]byte) error { return nil })
 	})
 	run("nonzero", func() {
-		_, _ = r.Stream(bg, []string{"sh", "-c", "exit 2"}, StreamOpts{}, nil)
+		_, _ = callStream(t, r, bg, []string{"sh", "-c", "exit 2"}, StreamOpts{}, nil)
 	})
 	run("callback error", func() {
-		_, err := r.Stream(bg, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { return errors.New("stop") })
+		_, err := callStream(t, r, bg, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { return errors.New("stop") })
 		if err == nil {
 			t.Error("want error")
 		}
@@ -450,7 +492,7 @@ func TestStreamLeavesNoGoroutines(t *testing.T) {
 	run("cancel", func() {
 		ctx, cancel := context.WithCancel(bg)
 		defer cancel()
-		_, err := r.Stream(ctx, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { cancel(); return nil })
+		_, err := callStream(t, r, ctx, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { cancel(); return nil })
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("err = %v", err)
 		}
@@ -458,30 +500,30 @@ func TestStreamLeavesNoGoroutines(t *testing.T) {
 	run("cancel while idle", func() {
 		ctx, cancel := context.WithTimeout(bg, 200*time.Millisecond)
 		defer cancel()
-		_, err := r.Stream(ctx, []string{"sleep", "30"}, StreamOpts{}, nil)
+		_, err := callStream(t, r, ctx, []string{"sleep", "30"}, StreamOpts{}, nil)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("err = %v", err)
 		}
 	})
 	run("timeouts", func() {
-		_, err := r.Stream(bg, []string{"sleep", "30"}, StreamOpts{Timeout: 150 * time.Millisecond}, nil)
+		_, err := callStream(t, r, bg, []string{"sleep", "30"}, StreamOpts{Timeout: 150 * time.Millisecond}, nil)
 		if !errors.Is(err, ErrTimeout) {
 			t.Errorf("err = %v", err)
 		}
-		_, err = r.Stream(bg, []string{"sleep", "30"}, StreamOpts{IdleTimeout: 150 * time.Millisecond}, nil)
+		_, err = callStream(t, r, bg, []string{"sleep", "30"}, StreamOpts{IdleTimeout: 150 * time.Millisecond}, nil)
 		if !errors.Is(err, ErrIdleTimeout) {
 			t.Errorf("err = %v", err)
 		}
 	})
 	run("refused", func() {
-		_, _ = r.Stream(bg, []string{"touch", t.TempDir() + "/ran"}, StreamOpts{}, nil)
-		_, _ = realRunner(t, "keepwatch-no-such-tool").Stream(bg, []string{"keepwatch-no-such-tool"}, StreamOpts{}, nil)
+		_, _ = callStream(t, r, bg, []string{"touch", t.TempDir() + "/ran"}, StreamOpts{}, nil)
+		_, _ = callStream(t, realRunner(t, "keepwatch-no-such-tool"), bg, []string{"keepwatch-no-such-tool"}, StreamOpts{}, nil)
 	})
 	run("held pipe", func() {
 		old := waitDelay
 		waitDelay = 200 * time.Millisecond
 		defer func() { waitDelay = old }()
-		_, _ = r.Stream(bg, []string{"sh", "-c", "sleep 30 & exit 0"}, StreamOpts{}, nil)
+		_, _ = callStream(t, r, bg, []string{"sh", "-c", "sleep 30 & exit 0"}, StreamOpts{}, nil)
 	})
 }
 
@@ -499,12 +541,215 @@ func TestStreamConcurrent(t *testing.T) {
 			}
 		}()
 	}
-	wg.Wait()
+	within(t, 30*time.Second, "8 concurrent streams", wg.Wait)
 }
 
 func TestStreamMissingBinaryMessage(t *testing.T) {
-	_, err := realRunner(t, "keepwatch-no-such-tool").Stream(bg, []string{"/usr/bin/keepwatch-no-such-tool"}, StreamOpts{}, nil)
+	_, err := callStream(t, realRunner(t, "keepwatch-no-such-tool"), bg, []string{"/usr/bin/keepwatch-no-such-tool"}, StreamOpts{}, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Once the child exited, the grace period counts the wait for the next line,
+// not the time spent in onLine: a slow consumer of a backlog loses nothing.
+func TestStreamSlowConsumerAfterExitLosesNothing(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	n := 0
+	start := time.Now()
+	res, err := callStream(t, realRunner(t, "sh"), bg, []string{"sh", "-c", "i=0; while [ $i -lt 200 ]; do echo line$i; i=$((i+1)); done"}, StreamOpts{}, func([]byte) error {
+		n++
+		time.Sleep(3 * time.Millisecond)
+		return nil
+	})
+	if time.Since(start) < 2*waitDelay {
+		t.Fatalf("consumer took %s, not longer than the grace period; the test proves nothing", time.Since(start))
+	}
+	if err != nil || res.IOIncomplete || n != 200 {
+		t.Fatalf("delivered %d/200 err=%v res=%+v", n, err, res)
+	}
+}
+
+// A consumer that stalls for longer than the idle limit is not idleness of the
+// program: the child never stops writing, so only the cancel ends the stream.
+func TestStreamIdleTimeoutIgnoresSlowConsumer(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(bg)
+		n := 0
+		_, err := callStream(t, realRunner(t, "sh", "yes"), ctx, []string{"sh", "-c", "yes"}, StreamOpts{IdleTimeout: 50 * time.Millisecond}, func([]byte) error {
+			n++
+			if n == 5 {
+				cancel()
+				return nil
+			}
+			time.Sleep(80 * time.Millisecond)
+			return nil
+		})
+		cancel()
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrIdleTimeout) {
+			t.Fatalf("run %d: err = %v, want context.Canceled", i, err)
+		}
+	}
+}
+
+// The idle limit stays armed after stdout was closed, until the program exits.
+func TestStreamIdleTimeoutAfterStdoutClosed(t *testing.T) {
+	start := time.Now()
+	o := streamBounded(t, bg, realRunner(t, "sh", "sleep"), []string{"sh", "-c", "echo up; exec >&-; exec sleep 30"}, StreamOpts{IdleTimeout: 300 * time.Millisecond}, nil)
+	if !errors.Is(o.err, ErrIdleTimeout) {
+		t.Fatalf("err = %v, want ErrIdleTimeout", o.err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("took %s", el)
+	}
+	// A quiet program with stdout still open times out as before.
+	o = streamBounded(t, bg, realRunner(t, "sh", "sleep"), []string{"sh", "-c", "echo up; sleep 0.5"}, StreamOpts{IdleTimeout: 300 * time.Millisecond}, nil)
+	if !errors.Is(o.err, ErrIdleTimeout) {
+		t.Fatalf("quiet running child: %v", o.err)
+	}
+	// Once the program has exited the limit no longer applies.
+	o = streamBounded(t, bg, realRunner(t, "sh"), []string{"sh", "-c", "echo up; exit 0"}, StreamOpts{IdleTimeout: 300 * time.Millisecond}, nil)
+	if o.err != nil {
+		t.Fatalf("exited child: %v", o.err)
+	}
+	// ... also while a leftover child still holds the pipe: the grace period
+	// applies then, not the idle limit.
+	old := waitDelay
+	waitDelay = 600 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	o = streamBounded(t, bg, realRunner(t, "sh", "sleep"), []string{"sh", "-c", "sleep 30 & exit 0"}, StreamOpts{IdleTimeout: 100 * time.Millisecond}, nil)
+	if !errors.Is(o.err, ErrIOTimeout) || errors.Is(o.err, ErrIdleTimeout) {
+		t.Fatalf("held pipe after exit: err = %v, want ErrIOTimeout", o.err)
+	}
+}
+
+// escapeScript starts a grandchild in a new session that ignores SIGPIPE and
+// holds the inherited stdout and stderr; it records its pid in $M.
+const escapeScript = `perl -e 'use POSIX qw(setsid); setsid(); $SIG{PIPE}="IGNORE"; open(F,">$ARGV[0].tmp") or die; print F $$; close F; rename("$ARGV[0].tmp",$ARGV[0]); exec("sleep","30")' "$M" &
+i=0; while [ ! -e "$M" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+`
+
+func escapeSetup(t *testing.T) (marker string, opts StreamOpts) {
+	t.Helper()
+	if _, err := NewReal(nil).lookup("perl"); err != nil {
+		t.Skip("no perl to start a grandchild in a new session")
+	}
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	marker = t.TempDir() + "/pid"
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(marker); err == nil {
+			if pid, err := strconv.Atoi(string(b)); err == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	return marker, StreamOpts{Env: []string{"PATH=" + SearchPath, "M=" + marker}}
+}
+
+// A pipe holder outside the process group survives the group kill. Stream must
+// not wait for it: it returns within a bound, flags the output incomplete, and
+// releases its goroutines and descriptors.
+func TestStreamEscapeeHoldingPipesIsBounded(t *testing.T) {
+	r := realRunner(t, "sh", "sleep")
+	g, fds := runtime.NumGoroutine(), fdCount(t)
+
+	marker, opts := escapeSetup(t)
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	start := time.Now()
+	o := streamBounded(t, ctx, r, []string{"sh", "-c", escapeScript + "echo ready; sleep 30"}, opts, func([]byte) error { cancel(); return nil })
+	if !errors.Is(o.err, context.Canceled) || !o.res.IOIncomplete {
+		t.Fatalf("cancel: err=%v res=%+v", o.err, o.res)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("cancel took %s", el)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("escapee never started: %v", err)
+	}
+
+	os.Remove(marker)
+	start = time.Now()
+	o = streamBounded(t, bg, r, []string{"sh", "-c", escapeScript + "exit 0"}, opts, nil)
+	if !errors.Is(o.err, ErrIOTimeout) || !o.res.IOIncomplete {
+		t.Fatalf("self-exit: err=%v res=%+v", o.err, o.res)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("self-exit took %s", el)
+	}
+	resourcesSettle(t, "escapee", g, fds)
+}
+
+// The deferred cleanup also runs when onLine panics and the caller recovers:
+// the child is gone and no goroutine or descriptor is left.
+func TestStreamPanicInCallbackReleasesEverything(t *testing.T) {
+	r := realRunner(t, "sh", "sleep")
+	g, fds := runtime.NumGoroutine(), fdCount(t)
+	for i := 0; i < 5; i++ {
+		pid := 0
+		var recovered any
+		within(t, 15*time.Second, "panicking Stream", func() {
+			defer func() { recovered = recover() }()
+			_, _ = r.Stream(bg, []string{"sh", "-c", "sleep 30 & echo $!; echo two; wait"}, StreamOpts{}, func(l []byte) error {
+				pid, _ = strconv.Atoi(string(l))
+				panic("callback failed")
+			})
+		})
+		if recovered != "callback failed" {
+			t.Fatalf("recovered = %v", recovered)
+		}
+		if pid == 0 {
+			t.Fatal("no pid")
+		}
+		mustBeGone(t, pid)
+	}
+	resourcesSettle(t, "panic", g, fds)
+}
+
+// The process group is signalled once per stream, on every way a stream ends:
+// a second signal could reach a group that reused the pid after the reap.
+func TestStreamKillsGroupOncePerStream(t *testing.T) {
+	var kills atomic.Int32
+	old := killProcessGroup
+	killProcessGroup = func(c *exec.Cmd) { kills.Add(1); old(c) }
+	t.Cleanup(func() { killProcessGroup = old })
+	r := realRunner(t, "sh", "yes", "sleep")
+
+	paths := map[string]func(){
+		"clean exit": func() { callStream(t, r, bg, []string{"sh", "-c", "echo a"}, StreamOpts{}, nil) },
+		"non-zero":   func() { callStream(t, r, bg, []string{"sh", "-c", "exit 3"}, StreamOpts{}, nil) },
+		"callback error": func() {
+			callStream(t, r, bg, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { return errors.New("stop") })
+		},
+		"cancel": func() {
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			callStream(t, r, ctx, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { cancel(); return nil })
+		},
+		"timeout": func() {
+			callStream(t, r, bg, []string{"sleep", "30"}, StreamOpts{Timeout: 100 * time.Millisecond}, nil)
+		},
+		"panic": func() {
+			within(t, 15*time.Second, "panicking Stream", func() {
+				defer func() { recover() }()
+				r.Stream(bg, []string{"sh", "-c", "yes"}, StreamOpts{}, func([]byte) error { panic("x") })
+			})
+		},
+	}
+	for name, f := range paths {
+		kills.Store(0)
+		f()
+		if n := kills.Load(); n != 1 {
+			t.Errorf("%s: group signalled %d times, want 1", name, n)
+		}
+	}
+	kills.Store(0)
+	callStream(t, r, bg, []string{"touch", t.TempDir() + "/ran"}, StreamOpts{}, nil)
+	if n := kills.Load(); n != 0 {
+		t.Errorf("refused program: group signalled %d times, want 0", n)
 	}
 }
