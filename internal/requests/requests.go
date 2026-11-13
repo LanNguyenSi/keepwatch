@@ -65,12 +65,22 @@
 // order is submission order for requests from one machine; the rest of the
 // name is 128 random bits, which makes it unpredictable.
 //
+// While Overfull is set, that order holds only among the entries the call
+// examined, which are the first ones the directory yields, in no particular
+// order: Items, More and the order of the Items refer to those entries alone,
+// and a request submitted earlier than the returned ones may be among the
+// unexamined. Submission order is therefore not kept until the directory is
+// back under MaxExamined entries.
+//
 // # Leftovers
 //
 // A Submit that is killed between creating its temporary file and renaming it
 // leaves a file named with securefile.TempPrefix. Pending ignores such files
 // and Remove refuses them, since they may belong to a write in progress;
-// SweepTemp removes the ones older than a given age.
+// SweepTemp removes the ones older than a given age, and the ones dated ahead
+// of the clock by more than TempClockSkew (a file with a modification time in
+// the future would otherwise never age, and enough of them fill the examined
+// window).
 package requests
 
 import (
@@ -120,6 +130,11 @@ const (
 	// MaxExamined is the largest number of directory entries one Pending call
 	// (or SweepTemp call) examines; temporary files count.
 	MaxExamined = 10000
+	// TempClockSkew is how far ahead of the clock the modification time of a
+	// temporary file may be before SweepTemp treats it as stale. A Submit sets
+	// no time itself, so a time further ahead than clock steps and file system
+	// rounding explain was set by somebody.
+	TempClockSkew = 5 * time.Minute
 )
 
 // Action is what a request asks for.
@@ -228,9 +243,12 @@ func (it Item) Accepted() bool { return it.Rejection == nil }
 // Batch is the result of one Pending call.
 type Batch struct {
 	// Items are at most MaxPending entries named as Submit names them, in
-	// name order.
+	// name order. While Overfull is set the order is that of the examined
+	// entries only, not of the whole directory.
 	Items []Item
-	// More is true when further such files were left for the next call.
+	// More is true when further such files were left for the next call. While
+	// Overfull is set it counts the examined entries only: unexamined ones may
+	// exist whatever More says.
 	More bool
 	// Stray are at most MaxStray entries of any other name, in name order,
 	// each a rejection with ReasonName. They were not opened and do not count
@@ -240,6 +258,9 @@ type Batch struct {
 	StrayMore bool
 	// Overfull is true when the directory holds more than MaxExamined
 	// entries: the call examined that many and did not look at the rest.
+	// While it is set, Items, More and Stray refer to the examined entries
+	// only, and submission order is not kept until the directory is back under
+	// MaxExamined entries.
 	Overfull bool
 }
 
@@ -272,6 +293,10 @@ var (
 	// afterDirOpen runs between the trust check of the requests directory and
 	// the second look at it.
 	afterDirOpen = func() {}
+	// afterRootOpen runs right after the root is opened, before its own look
+	// at "." (the root is opened by path, so whatever the path names at that
+	// moment is what it holds).
+	afterRootOpen = func() {}
 	// readCapped reads one request file.
 	readCapped = func(d *securefile.Dir, name string) ([]byte, error) {
 		return d.ReadCapped(name, MaxFileSize)
@@ -380,6 +405,7 @@ func open(stateDir string, create bool) (*handle, error) {
 		d.Close()
 		return nil, err
 	}
+	afterRootOpen()
 	ri, err := root.Lstat(".")
 	if err == nil {
 		err = checkDir(d.Path(), ri)
@@ -718,8 +744,12 @@ func Remove(stateDir, name string) error {
 // olderThan, and returns how many it removed. A Submit that is killed between
 // creating its temporary file and renaming it leaves one, and nothing else
 // removes it. olderThan must be positive: the age is what keeps a write in
-// progress safe, so choose it well above the time a Submit takes. At most
-// MaxExamined directory entries are examined per call. A missing requests
+// progress safe, so choose it well above the time a Submit takes. A temporary
+// file whose modification time is more than TempClockSkew ahead of the clock
+// is removed whatever its age. The call examines the same bounded window as
+// Pending (at most MaxExamined directory entries, the first ones the directory
+// yields), so with more entries than that it removes some of the stale files
+// and a repeated call reaches the rest. A missing requests
 // directory is zero files and no error. A file that cannot be removed does
 // not stop the others; the errors come back joined.
 func SweepTemp(stateDir string, olderThan time.Duration) (int, error) {
@@ -736,7 +766,9 @@ func SweepTemp(stateDir string, olderThan time.Duration) (int, error) {
 		return 0, err
 	}
 	afterList()
-	cutoff := now().Add(-olderThan)
+	at := now()
+	cutoff := at.Add(-olderThan)
+	ahead := at.Add(TempClockSkew)
 	removed := 0
 	var errs []error
 	for _, name := range l.temps {
@@ -748,7 +780,7 @@ func SweepTemp(stateDir string, olderThan time.Duration) (int, error) {
 			errs = append(errs, err)
 			continue
 		}
-		if !fi.ModTime().Before(cutoff) {
+		if mt := fi.ModTime(); !mt.Before(cutoff) && !mt.After(ahead) {
 			continue
 		}
 		if err := h.root.RemoveAll(name); err != nil {

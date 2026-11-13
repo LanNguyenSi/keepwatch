@@ -599,14 +599,17 @@ func TestSweepTemp(t *testing.T) {
 	touch(securefile.TempPrefix+"edge", time.Hour)
 	touch(securefile.TempPrefix+"young", time.Minute)
 	touch(securefile.TempPrefix+"fresh", 0)
-	touch(securefile.TempPrefix+"future", -time.Hour)
+	touch(securefile.TempPrefix+"future", -time.Minute)                  // ahead, within the tolerance
+	touch(securefile.TempPrefix+"skewedge", -TempClockSkew)              // exactly at the tolerance
+	touch(securefile.TempPrefix+"farfuture", -TempClockSkew-time.Second) // beyond it: stale whatever the age
+	touch(securefile.TempPrefix+"farfuture2", -365*24*time.Hour)
 	touch(fname(1), 5*time.Hour) // an old request is not a temp file
 	touch("stray", 5*time.Hour)
 	touch(securefile.TempPrefix[:len(securefile.TempPrefix)-1], 5*time.Hour) // one byte short of the prefix
 
 	n, err := SweepTemp(state, time.Hour)
-	if err != nil || n != 2 {
-		t.Fatalf("removed %d, err %v; want 2", n, err)
+	if err != nil || n != 4 {
+		t.Fatalf("removed %d, err %v; want 4 (two old, two far in the future)", n, err)
 	}
 	var left []string
 	ents, _ := os.ReadDir(rd)
@@ -615,7 +618,7 @@ func TestSweepTemp(t *testing.T) {
 	}
 	want := []string{
 		securefile.TempPrefix[:len(securefile.TempPrefix)-1], securefile.TempPrefix + "edge", securefile.TempPrefix + "fresh",
-		securefile.TempPrefix + "future", securefile.TempPrefix + "young", fname(1), "stray",
+		securefile.TempPrefix + "future", securefile.TempPrefix + "skewedge", securefile.TempPrefix + "young", fname(1), "stray",
 	}
 	sort.Strings(want)
 	if strings.Join(left, "|") != strings.Join(want, "|") {
@@ -627,6 +630,10 @@ func TestSweepTemp(t *testing.T) {
 	}
 	if n, err := SweepTemp(state, 30*time.Second); err != nil || n != 2 {
 		t.Fatalf("shorter age removed %d, err %v; want 2 (edge, young)", n, err)
+	}
+	// Dated ahead within the tolerance, a file is not old whatever the age.
+	if n, err := SweepTemp(state, time.Nanosecond); err != nil || n != 0 {
+		t.Fatalf("smallest age removed %d, err %v; want 0 (fresh is not older, the two dated ahead stay)", n, err)
 	}
 	// Pending never saw the temp files, and still sees the request.
 	if b := pending(t, state); len(b.Items) != 1 || len(b.Stray) != 2 {
@@ -830,5 +837,126 @@ func TestSweepTempSkipsVanishedFile(t *testing.T) {
 	n, err := SweepTemp(state, time.Hour)
 	if err != nil || n != 1 {
 		t.Fatalf("removed %d, err %v; want 1 and no error (the other file vanished)", n, err)
+	}
+}
+
+func TestSweepTempFutureDatedFlood(t *testing.T) {
+	// Temporary files dated far ahead never age. Enough of them fill the
+	// examined window and would keep Pending from seeing anything else, so the
+	// sweep treats them as stale and a few calls drain them.
+	state := newState(t)
+	rd := reqDir(t, state)
+	at := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	setNowFixed(t, at)
+	setMaxExamined(t, 50)
+	future := at.Add(365 * 24 * time.Hour)
+	const total = 400
+	for i := 0; i < total; i++ {
+		p := filepath.Join(rd, fmt.Sprintf("%sf%04d", securefile.TempPrefix, i))
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plant(t, state, fname(1), goodBody, 0o600)
+	if b := pending(t, state); !b.Overfull {
+		t.Fatalf("the flood does not fill the window: %+v", b)
+	}
+	removed, calls := 0, 0
+	for ; calls < 100; calls++ {
+		n, err := SweepTemp(state, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		removed += n
+	}
+	if removed != total {
+		t.Fatalf("removed %d in %d calls, want %d", removed, calls, total)
+	}
+	b := pending(t, state)
+	if b.Overfull || len(b.Items) != 1 || !b.Items[0].Accepted() {
+		t.Fatalf("Pending is still blind: %+v", b)
+	}
+}
+
+func TestSweepTempToleranceEdge(t *testing.T) {
+	// A file dated ahead by exactly TempClockSkew is kept, by a nanosecond more
+	// it is removed; the age plays no part for a file dated ahead.
+	state := newState(t)
+	at := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	setNowFixed(t, at)
+	for name, ahead := range map[string]time.Duration{
+		"exact": TempClockSkew, "over": TempClockSkew + time.Nanosecond, "within": TempClockSkew - time.Nanosecond,
+	} {
+		p := plant(t, state, securefile.TempPrefix+name, "x", 0o600)
+		if err := os.Chtimes(p, at.Add(ahead), at.Add(ahead)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := SweepTemp(state, 1000*time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("removed %d, err %v; want 1", n, err)
+	}
+	rd := filepath.Join(state, DirName)
+	for name, want := range map[string]bool{"exact": true, "within": true, "over": false} {
+		_, err := os.Lstat(filepath.Join(rd, securefile.TempPrefix+name))
+		if (err == nil) != want {
+			t.Errorf("%s: present=%v, want %v", name, err == nil, want)
+		}
+	}
+}
+
+func TestRootsOwnLookIsJudged(t *testing.T) {
+	// The root is opened by path. A group-writable directory is swapped in
+	// before the root is opened and the trusted one is put back right after,
+	// so a look at the path (not at what the root holds) finds nothing wrong.
+	for name, op := range map[string]func(string) error{
+		"Submit":    func(s string) error { _, err := Submit(s, Request{Action: ActionAck, IncidentID: "a1"}); return err },
+		"Pending":   func(s string) error { _, err := Pending(s); return err },
+		"Remove":    func(s string) error { return Remove(s, fname(1)) },
+		"SweepTemp": func(s string) error { _, err := SweepTemp(s, time.Hour); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := newState(t)
+			rd := reqDir(t, state)
+			plant(t, state, fname(1), goodBody, 0o600)
+			oldDir, oldRoot := afterDirOpen, afterRootOpen
+			t.Cleanup(func() { afterDirOpen, afterRootOpen = oldDir, oldRoot })
+			afterDirOpen = func() {
+				afterDirOpen = func() {}
+				if err := os.Rename(rd, rd+".trusted"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(rd, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(rd, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			afterRootOpen = func() {
+				afterRootOpen = func() {}
+				if err := os.Rename(rd, rd+".bad"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(rd+".trusted", rd); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := op(state); !errors.Is(err, securefile.ErrUntrusted) {
+				t.Fatalf("got %v, want ErrUntrusted", err)
+			}
+			if ents, _ := os.ReadDir(rd + ".bad"); len(ents) != 0 {
+				t.Fatalf("the untrusted directory was written to: %v", ents)
+			}
+			if _, err := os.Stat(filepath.Join(rd, fname(1))); err != nil {
+				t.Fatalf("the request was touched: %v", err)
+			}
+		})
 	}
 }

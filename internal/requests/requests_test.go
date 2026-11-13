@@ -239,6 +239,13 @@ func TestValidIncidentID(t *testing.T) {
 }
 
 func TestLimitsArePinned(t *testing.T) {
+	// The limit in force starts at the documented one (tests lower it).
+	if maxExamined != MaxExamined {
+		t.Errorf("maxExamined = %d, documented %d", maxExamined, MaxExamined)
+	}
+	if TempClockSkew != 5*time.Minute {
+		t.Errorf("TempClockSkew = %s, documented 5m", TempClockSkew)
+	}
 	// The documented values, as literals: changing one is a decision, not an
 	// accident.
 	for name, c := range map[string][2]int{

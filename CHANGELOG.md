@@ -51,7 +51,9 @@ report.
   applied) and consumes. At most 100 request files are looked at per pass,
   other entries of the directory are reported apart (at most 20, never
   opened) so they cannot hold requests back, and at most 10000 directory
-  entries are examined per pass, with a flag when there are more.
+  entries are examined per pass, with a flag when there are more (while it is
+  set, order is kept among the examined entries only). Leftover temporary files
+  are swept by age, and those dated ahead of the clock are swept at once.
 
 ### Security
 
