@@ -152,6 +152,9 @@ const (
 	// ReasonSeq: Seq is not the previous Seq plus one (a gap, a repeat or a
 	// reorder), or the first record does not have Seq 1.
 	ReasonSeq Reason = "seq gap or reorder"
+	// ReasonRecovery: an audit_recovered record names a torn region, and no
+	// region stands in front of it (the region was cut out of the log).
+	ReasonRecovery Reason = "recovery record without its torn region"
 )
 
 // lineError describes why decodeLine refused a line.
@@ -267,13 +270,17 @@ func validate(r Record) error {
 	return nil
 }
 
+// tornSummaryPrefix starts the Summary of the record that follows a torn
+// region, and nothing else (completedSummary starts differently).
+const tornSummaryPrefix = "torn tail: "
+
 // tornSummary is the Summary of the record that follows a torn region: where
 // the region starts, how many bytes it has, whether its last byte is a
 // newline (when it is not, the writer added one before the record, and that
 // newline is not counted), and the SHA-256 of its bytes, so Verify can tell
 // this region from any other garbage.
 func tornSummary(offset, length int64, terminated bool, sum string) string {
-	return fmt.Sprintf("torn tail: offset=%d length=%d terminated=%t sha256=%s", offset, length, terminated, sum)
+	return fmt.Sprintf("%soffset=%d length=%d terminated=%t sha256=%s", tornSummaryPrefix, offset, length, terminated, sum)
 }
 
 // completedSummary is the Summary of the record noting that the last record,

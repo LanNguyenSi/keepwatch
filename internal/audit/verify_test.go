@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -465,6 +466,113 @@ func TestVerifyAcceptsAccountedTornRegion(t *testing.T) {
 	}
 }
 
+// A recovery record is the proof that its region is in the log. Cutting the
+// region out leaves a chain that is consistent in Seq, Prev and Hash, so the
+// record itself, with nothing in front of it, is what gives it away.
+func TestVerifyRefusesALogWithAnAccountedRegionCutOut(t *testing.T) {
+	for name, region := range map[string][]byte{
+		"unterminated": []byte(`{"seq":4,"time":"2026`),
+		"terminated":   []byte("{\"seq\":4,\n"),
+		"multi-line":   []byte("aaa\nbbb\nccc"),
+		"blank line":   []byte("\n"),
+		"over-long":    bytes.Repeat([]byte("z"), 2*MaxLineBytes),
+	} {
+		for _, keep := range []int{0, 3} {
+			log, off := recoveredLog(t, keep, region)
+			mustVerify(t, name+" in place", log)
+			end := int(off) + len(region)
+			if region[len(region)-1] != '\n' {
+				end++ // the newline that ends the region
+			}
+			cut := append(append([]byte(nil), log[:off]...), log[end:]...)
+			be := mustBreak(t, fmt.Sprintf("%s after %d records, region cut out", name, keep), cut)
+			if be.Reason != ReasonRecovery || be.Seq != uint64(keep+1) || be.Line != keep+1 || be.Offset != off {
+				t.Errorf("%s after %d records: %+v", name, keep, be)
+			}
+			// Show stops at the same place and hands out the records before.
+			var shown int
+			err := Show(bytes.NewReader(cut), Filter{}, func(Record) error { shown++; return nil })
+			var sbe *BreakError
+			if !errors.As(err, &sbe) || sbe.Reason != ReasonRecovery || shown != keep {
+				t.Errorf("%s after %d records: Show gave %d records and %v", name, keep, shown, err)
+			}
+		}
+	}
+}
+
+// The same with logs a writer made: regions Open found, with records written
+// after them, and two regions of which either one is cut out.
+func TestVerifyRefusesAWriterLogWithARegionCutOut(t *testing.T) {
+	d, p := newDir(t)
+	w, _ := openW(t, d, quiet)
+	put(t, w, 2)
+	w.Close()
+	type cutRegion struct{ off, end int }
+	var cuts []cutRegion
+	for i, tail := range [][]byte{[]byte("torn one"), []byte("torn\ntwo\n")} {
+		appendRaw(t, p, tail)
+		w, rec := openW(t, d, quiet)
+		if rec == nil {
+			t.Fatalf("region %d: no recovery", i)
+		}
+		end := int(rec.Offset + rec.Length)
+		if !rec.Terminated {
+			end++
+		}
+		cuts = append(cuts, cutRegion{int(rec.Offset), end})
+		put(t, w, 2)
+		w.Close()
+	}
+	full := readLog(t, p)
+	if res := mustVerify(t, "two regions", full); res.TornLines != 2 {
+		t.Fatalf("%+v", res)
+	}
+	for i, c := range cuts {
+		cut := append(append([]byte(nil), full[:c.off]...), full[c.end:]...)
+		be := mustBreak(t, fmt.Sprintf("region %d cut out", i), cut)
+		if be.Reason != ReasonRecovery || be.Offset != int64(c.off) {
+			t.Errorf("region %d: %+v", i, be)
+		}
+	}
+	// Both cut out.
+	c0, c1 := cuts[0], cuts[1]
+	both := append(append(append([]byte(nil), full[:c0.off]...), full[c0.end:c1.off]...), full[c1.end:]...)
+	if be := mustBreak(t, "both cut out", both); be.Reason != ReasonRecovery || be.Offset != int64(c0.off) {
+		t.Errorf("both: %+v", be)
+	}
+}
+
+// What the check must not take: a recovery record that does not name a torn
+// region, and a record of another kind that merely reads like one.
+func TestVerifyAcceptsRecordsThatOnlyLookLikeAnOrphanedRecovery(t *testing.T) {
+	tornForm := tornSummary(0, 4, false, sumHex([]byte("torn")))
+	for name, c := range map[string]struct {
+		kind    Kind
+		summary string
+	}{
+		"completed record":           {AuditRecovered, completedSummary(10, 1)},
+		"free text":                  {AuditRecovered, "recovered"},
+		"empty summary":              {AuditRecovered, ""},
+		"other kind, torn summary":   {IncidentUpdate, tornForm},
+		"other kind, prefix only":    {NotifySent, tornSummaryPrefix},
+		"recovery, prefix not first": {AuditRecovered, " " + tornForm},
+	} {
+		recs, ls := chainLines(sample(2))
+		r := Record{Seq: 3, Time: t0, Kind: c.kind, Prev: recs[1].Hash, Summary: c.summary}
+		r.Hash = hashOf(r)
+		if res := mustVerify(t, name, join(append(ls, encodeLine(r)))); res.Count != 3 || res.TornLines != 0 {
+			t.Errorf("%s: %+v", name, res)
+		}
+	}
+	// The prefix alone, as a recovery record's summary, is the orphaned form.
+	recs, ls := chainLines(sample(2))
+	r := Record{Seq: 3, Time: t0, Kind: AuditRecovered, Prev: recs[1].Hash, Summary: tornSummaryPrefix}
+	r.Hash = hashOf(r)
+	if be := mustBreak(t, "prefix only", join(append(ls, encodeLine(r)))); be.Reason != ReasonRecovery {
+		t.Errorf("%+v", be)
+	}
+}
+
 func TestVerifyTornRegionBound(t *testing.T) {
 	// One byte over the bound cannot be accounted for, in any of its forms.
 	for name, region := range map[string][]byte{
@@ -683,5 +791,56 @@ func TestVerifyLineCapDoesNotDependOnTheReader(t *testing.T) {
 		if res, err := Verify(mk(join([][]byte{line}))); err != nil || res.Count != 1 {
 			t.Errorf("worst-case record, %s: %+v %v", rname, res, err)
 		}
+	}
+}
+
+// fillReader yields n bytes 'x', then a newline if nl is set, without
+// allocating.
+type fillReader struct {
+	n  int64
+	nl bool
+}
+
+func (f *fillReader) Read(p []byte) (int, error) {
+	if f.n > 0 {
+		if int64(len(p)) > f.n {
+			p = p[:f.n]
+		}
+		for i := range p {
+			p[i] = 'x'
+		}
+		f.n -= int64(len(p))
+		return len(p), nil
+	}
+	if f.nl {
+		f.nl = false
+		p[0] = '\n'
+		return 1, nil
+	}
+	return 0, io.EOF
+}
+
+// A single line of megabytes is not held in memory: Verify keeps at most
+// MaxTornBytes of it, however long the line is and whether or not a newline
+// ends it, and still reports it as a break.
+func TestVerifyDoesNotBufferALongLine(t *testing.T) {
+	const lineBytes = 8 << 20
+	for _, nl := range []bool{false, true} {
+		t.Run(fmt.Sprintf("newline %t", nl), func(t *testing.T) {
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			_, err := Verify(&fillReader{n: lineBytes, nl: nl})
+			runtime.ReadMemStats(&after)
+			var be *BreakError
+			if !errors.As(err, &be) || be.Reason != ReasonMalformed || be.Seq != 1 || be.Line != 1 || be.Offset != 0 {
+				t.Fatalf("got %v", err)
+			}
+			// The buffer of the reader, the bytes kept of the line and the
+			// region built from them stay far below the length of the line.
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 512<<10 {
+				t.Fatalf("Verify of a %d MiB line allocated %d KiB", lineBytes>>20, alloc>>10)
+			}
+		})
 	}
 }

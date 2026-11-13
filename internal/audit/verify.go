@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Result is what Verify returns for a log whose chain is intact.
@@ -55,7 +56,9 @@ func (e *BreakError) Error() string {
 // (the torn tail the writer found when it reopened the log; see Open). A
 // region longer than MaxTornBytes, a recovery record that names it wrongly,
 // any other record after it and a region at the end of the log are breaks.
-// A line that looks like a record but has a wrong hash is a break, never
+// So is the reverse: an audit_recovered record of that form with no region in
+// front of it, which is what a log looks like from which a region was cut
+// out. A line that looks like a record but has a wrong hash is a break, never
 // part of a region.
 //
 // What Verify proves: the file is a consistent chain from its first record,
@@ -242,6 +245,11 @@ func walk(r io.Reader, emit func(Record) error) (Result, error) {
 			}
 			pending = nil
 			res.TornLines++
+		} else if rec.Kind == AuditRecovered && strings.HasPrefix(rec.Summary, tornSummaryPrefix) {
+			// A record that accounts for a torn region, with no region in
+			// front of it: the region was cut out of the log.
+			return res, &BreakError{Seq: expect, Line: lineNo, Offset: start, Reason: ReasonRecovery,
+				Detail: "the record names a torn region that is not in the log"}
 		}
 		if rec.Seq != expect {
 			return res, &BreakError{Seq: expect, Line: lineNo, Offset: start, Reason: ReasonSeq,

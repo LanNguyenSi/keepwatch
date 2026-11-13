@@ -612,9 +612,11 @@ func TestFIFOAndDirectoryEntries(t *testing.T) {
 	}
 }
 
-// A FIFO swapped in after the first look must not block the open.
+// A FIFO swapped in after the first look must not block the open, whatever
+// the access mode: the write-only open fails, the read-only and the
+// read-write opens succeed and the regular-file check rejects the file.
 func TestFIFOSwappedBeforeOpen(t *testing.T) {
-	for _, op := range []string{"read", "append"} {
+	for _, op := range []string{"read", "append", "append-readable"} {
 		t.Run(op, func(t *testing.T) {
 			d, p := newDir(t)
 			if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
@@ -635,7 +637,11 @@ func TestFIFOSwappedBeforeOpen(t *testing.T) {
 					_, err := d.ReadCapped("a", 10)
 					return err
 				}
-				f, _, err := d.OpenAppend("a", 10)
+				open := d.OpenAppend
+				if op == "append-readable" {
+					open = d.OpenAppendReadable
+				}
+				f, _, err := open("a", 10)
 				if f != nil {
 					f.Close()
 				}

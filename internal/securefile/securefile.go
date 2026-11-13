@@ -320,7 +320,11 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 // look and an exclusive create is retried as an existing file.
 //
 // O_NONBLOCK keeps an open of a FIFO swapped in after the first look from
-// blocking; the regular-file check then rejects it (a write open fails).
+// blocking. What happens next depends on the access mode: a write-only open
+// of a FIFO without a reader fails (ENXIO) and is reported as not a regular
+// file; a read-only or a read-write open succeeds, and the regular-file check
+// on the opened file then rejects it, so no FIFO is ever returned to the
+// caller.
 func (d *Dir) openChecked(name string, flag int, perm os.FileMode) (f *os.File, fi fs.FileInfo, created bool, err error) {
 	for range openAttempts {
 		li, lerr := d.root.Lstat(name)

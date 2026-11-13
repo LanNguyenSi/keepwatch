@@ -52,11 +52,13 @@ report.
   the log reads only its end, so a log of any size opens in constant memory.
   Whatever a crash left after the last intact record, also a crash while the
   log was being recovered, is kept as it is and accounted for by one recovery
-  record that names its offset, length and hash. The reader checks the whole
-  chain from the first record (content, order, links), refuses what the writer
-  could not have stored, and can filter records by kind, incident and time. It
-  does not notice a log that was cut off at its end, and anyone who can write
-  the file can rewrite all of it consistently; both limits are documented.
+  record that names its offset, length and hash, and only the log's own open
+  can write that record. The reader checks the whole chain from the first
+  record (content, order, links), refuses what the writer could not have
+  stored, notices a recovery record whose torn region was cut out of the log,
+  and can filter records by kind, incident and time. It does not notice a log
+  that was cut off at its end, and anyone who can write the file can rewrite
+  all of it consistently; both limits are documented.
 
 ### Security
 

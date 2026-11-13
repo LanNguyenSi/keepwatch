@@ -53,7 +53,8 @@ const (
 	PostureSeen     Kind = "posture_seen"
 	// JournalLineInvalid is used when a journal line cannot be parsed.
 	JournalLineInvalid Kind = "journal_line_invalid"
-	// AuditRecovered is used after torn-tail recovery of the audit log.
+	// AuditRecovered is used after torn-tail recovery of the audit log. Only
+	// the writer's Open appends it; Append refuses it from callers.
 	AuditRecovered Kind = "audit_recovered"
 	// InputError is used when the posture or baseline input fails to load.
 	InputError Kind = "input_error"

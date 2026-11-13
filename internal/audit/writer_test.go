@@ -180,6 +180,43 @@ func TestAppendRefusesWithoutWriting(t *testing.T) {
 	}
 }
 
+// Only Open writes the kind that accounts for a torn region; a caller that
+// could write it would be able to plant a record Verify takes as proof of a
+// region.
+func TestAppendRefusesTheRecoveryKind(t *testing.T) {
+	d, p := newDir(t)
+	w, _ := openW(t, d, Options{})
+	put(t, w, 2)
+	before := readLog(t, p)
+	for _, summary := range []string{"", "x", tornSummary(0, 4, false, sumHex([]byte("torn"))), completedSummary(0, 1)} {
+		r := sample(1)[0]
+		r.Kind = AuditRecovered
+		r.Summary = summary
+		if _, err := w.Append(r); !errors.Is(err, ErrInvalidRecord) {
+			t.Fatalf("summary %q: got %v", summary, err)
+		}
+	}
+	if !bytes.Equal(before, readLog(t, p)) {
+		t.Fatal("a refused record was written")
+	}
+	// The writer is not hurt by the refusals and Open still writes the kind.
+	if _, err := w.Append(sample(1)[0]); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	appendRaw(t, p, []byte("torn"))
+	w2, rec := openW(t, d, Options{})
+	defer w2.Close()
+	if rec == nil || rec.Seq != 4 {
+		t.Fatalf("%+v", rec)
+	}
+	var last Record
+	_ = Show(bytes.NewReader(readLog(t, p)), Filter{}, func(r Record) error { last = r; return nil })
+	if last.Kind != AuditRecovered {
+		t.Fatalf("%+v", last)
+	}
+}
+
 func TestReopenContinuesSeqAndPrev(t *testing.T) {
 	d, p := newDir(t)
 	w, _ := openW(t, d, Options{})
@@ -495,10 +532,12 @@ func TestSizeLimit(t *testing.T) {
 	})
 	t.Run("open of a log past the limit", func(t *testing.T) {
 		d, p := newDir(t)
-		w, _ := openW(t, d, Options{})
-		put(t, w, 3)
-		w.Close()
+		// More than the reserve, so that the limit under test is a valid one.
+		writeChain(t, logPath(p), 20, bigRecord)
 		before := readLog(t, p)
+		if len(before) <= ReserveBytes+1 {
+			t.Fatal("test bug: the log is not above the reserve")
+		}
 		_, _, err := Open(d, Options{MaxSize: int64(len(before)) - 1})
 		if !errors.Is(err, ErrFull) || !errors.Is(err, securefile.ErrTooLarge) {
 			t.Fatalf("got %v", err)
@@ -618,7 +657,7 @@ func TestTerminalRecordUsesTheReserveOnce(t *testing.T) {
 			}
 			// Only one: a second terminal record, of either kind, and any
 			// other record are refused.
-			for _, k := range []Kind{DaemonStop, DaemonError, IncidentClose, AuditRecovered} {
+			for _, k := range []Kind{DaemonStop, DaemonError, IncidentClose} {
 				x := r
 				x.Kind = k
 				if _, err := w.Append(x); !errors.Is(err, ErrFull) {
@@ -632,7 +671,7 @@ func TestTerminalRecordUsesTheReserveOnce(t *testing.T) {
 
 func TestOnlyTerminalKindsUseTheReserve(t *testing.T) {
 	r := sample(1)[0]
-	for _, kind := range []Kind{IncidentOpen, AuditRecovered, DaemonStart, NotifyDropped, Kind("daemon_stop2")} {
+	for _, kind := range []Kind{IncidentOpen, DaemonStart, NotifyDropped, Kind("daemon_stop2")} {
 		d, _ := newDir(t)
 		w, _ := openW(t, d, Options{MaxSize: sizedFor(10)})
 		x := r
@@ -643,38 +682,137 @@ func TestOnlyTerminalKindsUseTheReserve(t *testing.T) {
 	}
 }
 
+// prefilled returns a state directory whose log holds twenty long records,
+// more than the reserve, and the size of that log.
+func prefilled(t *testing.T) (*securefile.Dir, string, int64) {
+	t.Helper()
+	d, p := newDir(t)
+	_, _, size := writeChain(t, logPath(p), 20, bigRecord)
+	if size <= ReserveBytes+1 {
+		t.Fatal("test bug: the log is not above the reserve")
+	}
+	return d, p, size
+}
+
+// appendedSize is how many bytes r takes at the end of the prefilled log.
+func appendedSize(t *testing.T, r Record) int64 {
+	t.Helper()
+	d, _, size := prefilled(t)
+	w, _ := openW(t, d, Options{})
+	defer w.Close()
+	if _, err := w.Append(r); err != nil {
+		t.Fatal(err)
+	}
+	return w.Size() - size
+}
+
 func TestTerminalRecordUpperBoundAndRetry(t *testing.T) {
 	r := sample(1)[0]
 	r.Kind = DaemonError
-	exact := lineLenOf(t, r)
-	// MaxSize below the reserve: ordinary records never fit, a terminal one
-	// fits up to MaxSize exactly.
-	d, p := newDir(t)
-	w, _ := openW(t, d, Options{MaxSize: exact - 1})
+	exact := appendedSize(t, r)
+	// The log is past its ordinary limit: a terminal record fits up to
+	// MaxSize exactly.
+	d, p, size := prefilled(t)
+	w, _ := openW(t, d, Options{MaxSize: size + exact - 1})
+	before := readLog(t, p)
 	if _, err := w.Append(r); !errors.Is(err, ErrFull) {
 		t.Fatalf("one byte over MaxSize: %v", err)
 	}
+	if !bytes.Equal(before, readLog(t, p)) {
+		t.Fatal("the refused record was written")
+	}
 	w.Close()
-	os.Remove(logPath(p))
-	w2, _ := openW(t, d, Options{MaxSize: exact})
+	w2, _ := openW(t, d, Options{MaxSize: size + exact})
 	if _, err := w2.Append(r); err != nil {
 		t.Fatalf("exactly MaxSize: %v", err)
 	}
-	if w2.Size() != exact {
-		t.Fatalf("size %d, want %d", w2.Size(), exact)
+	if w2.Size() != w2.MaxSize() {
+		t.Fatalf("size %d, want %d", w2.Size(), w2.MaxSize())
 	}
 	w2.Close()
-	os.Remove(logPath(p))
 	// A refused terminal record does not use up the allowance.
 	small := r
 	small.Summary = ""
-	smallLen := lineLenOf(t, small)
-	w3, _ := openW(t, d, Options{MaxSize: smallLen})
+	smallLen := appendedSize(t, small)
+	if smallLen >= exact {
+		t.Fatal("test bug: the small record is not smaller")
+	}
+	d3, _, size3 := prefilled(t)
+	w3, _ := openW(t, d3, Options{MaxSize: size3 + smallLen})
 	if _, err := w3.Append(r); !errors.Is(err, ErrFull) {
 		t.Fatalf("too big: %v", err)
 	}
 	if _, err := w3.Append(small); err != nil {
 		t.Fatalf("smaller terminal record after a refused one: %v", err)
+	}
+}
+
+// The terminal allowance belongs to the first terminal record that needs the
+// reserve. A terminal-kind record that still fits below the ordinary limit
+// has not used it, however early it came, and neither has one that ends
+// exactly on the limit.
+func TestTerminalAllowanceIsUsedUpByTheReserveOnly(t *testing.T) {
+	r := sample(1)[0]
+	lineLen := lineLenOf(t, r)
+	term := r
+	term.Kind = DaemonError
+	for _, c := range []struct {
+		name string
+		// ordinary is the ordinary limit in lines; extra is added to it in
+		// bytes.
+		ordinary int64
+		extra    int64
+		// before is how many ordinary records precede the first terminal
+		// one.
+		before int
+		// wantFirstUsesReserve: the first terminal record ends above the
+		// ordinary limit, so a second one is refused at the full log.
+		wantFirstUsesReserve bool
+	}{
+		{"far below the limit", 3, 10, 0, false},
+		{"ends one byte below the limit", 3, 1, 2, false},
+		{"ends exactly on the limit", 3, 0, 2, false},
+		{"ends one byte above the limit", 3, -1, 2, true},
+		{"ends well above the limit", 2, 0, 2, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, _ := newDir(t)
+			w, _ := openW(t, d, Options{MaxSize: sizedFor(c.ordinary*lineLen + c.extra)})
+			for i := 0; i < c.before; i++ {
+				if _, err := w.Append(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := w.Append(term); err != nil {
+				t.Fatalf("first terminal record: %v", err)
+			}
+			// Fill the log up to its ordinary limit.
+			for {
+				if _, err := w.Append(r); err != nil {
+					if !errors.Is(err, ErrFull) {
+						t.Fatal(err)
+					}
+					break
+				}
+			}
+			inReserve := w.Size() > w.MaxSize()-ReserveBytes
+			if inReserve != c.wantFirstUsesReserve {
+				t.Fatalf("test bug: log in the reserve is %t, want %t", inReserve, c.wantFirstUsesReserve)
+			}
+			_, err := w.Append(term)
+			if c.wantFirstUsesReserve {
+				if !errors.Is(err, ErrFull) {
+					t.Fatalf("second terminal record after one that used the reserve: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("terminal record at the full log: %v", err)
+			}
+			if _, err := w.Append(term); !errors.Is(err, ErrFull) {
+				t.Fatalf("third terminal record: %v", err)
+			}
+		})
 	}
 }
 
@@ -685,13 +823,59 @@ func TestMaxSizeOption(t *testing.T) {
 		t.Fatalf("zero MaxSize: %d", w.MaxSize())
 	}
 	w.Close()
-	w2, _ := openW(t, d, Options{MaxSize: 12345})
-	if w2.MaxSize() != 12345 {
+	w2, _ := openW(t, d, Options{MaxSize: 123456})
+	if w2.MaxSize() != 123456 {
 		t.Fatalf("explicit MaxSize: %d", w2.MaxSize())
 	}
 	w2.Close()
-	if _, _, err := Open(d, Options{MaxSize: -1}); !errors.Is(err, securefile.ErrInvalidSize) {
-		t.Fatalf("negative MaxSize: %v", err)
+}
+
+// A MaxSize that is set must leave room for ordinary records above the
+// reserve: zero is the default, ReserveBytes+1 is the smallest valid value,
+// everything at or below ReserveBytes (a negative one too) is refused, and a
+// refusal leaves nothing behind.
+func TestMaxSizeMustBeAboveTheReserve(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		max  int64
+		ok   bool
+	}{
+		{"negative", -1, false},
+		{"one", 1, false},
+		{"one below the reserve", ReserveBytes - 1, false},
+		{"the reserve", ReserveBytes, false},
+		{"one above the reserve", ReserveBytes + 1, true},
+		{"default", 0, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, p := newDir(t)
+			w, _, err := Open(d, Options{MaxSize: c.max})
+			if c.ok {
+				if err != nil {
+					t.Fatal(err)
+				}
+				w.Close()
+				return
+			}
+			if !errors.Is(err, ErrInvalidSize) || w != nil {
+				t.Fatalf("got %v", err)
+			}
+			if _, serr := os.Stat(logPath(p)); !os.IsNotExist(serr) {
+				t.Fatalf("the refused Open left the log behind: %v", serr)
+			}
+		})
+	}
+	// The refusal also holds for a log that exists.
+	d, p := newDir(t)
+	w, _ := openW(t, d, Options{})
+	put(t, w, 2)
+	w.Close()
+	before := readLog(t, p)
+	if _, _, err := Open(d, Options{MaxSize: ReserveBytes}); !errors.Is(err, ErrInvalidSize) {
+		t.Fatalf("existing log: %v", err)
+	}
+	if !bytes.Equal(before, readLog(t, p)) {
+		t.Fatal("the log changed")
 	}
 }
 
@@ -929,7 +1113,9 @@ func TestFailedOpenReleasesTheFile(t *testing.T) {
 	})
 	t.Run("no room for the recovery record", func(t *testing.T) {
 		d, p := newDir(t)
-		appendRaw(t, p, append(join(lines[:1]), "torn"...))
+		// A log above the reserve with a torn tail and 5 bytes of room.
+		writeChain(t, logPath(p), 20, bigRecord)
+		appendRaw(t, p, []byte("torn"))
 		before := openFDs(t)
 		size := int64(len(readLog(t, p)))
 		if _, _, err := Open(d, Options{MaxSize: size + 5}); !errors.Is(err, ErrFull) {

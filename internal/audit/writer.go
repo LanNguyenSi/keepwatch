@@ -29,13 +29,18 @@ var (
 	ErrCorrupt = errors.New("audit log is damaged")
 	// ErrClosed is returned by Append after Close.
 	ErrClosed = errors.New("audit writer is closed")
+	// ErrInvalidSize is returned by Open for a MaxSize that is not zero and
+	// not above ReserveBytes: such a log could not take an ordinary record,
+	// and the reserve would no longer be a reserve.
+	ErrInvalidSize = errors.New("audit log size limit is not above the reserve")
 )
 
 // Options configures Open. The zero value is valid.
 type Options struct {
 	// MaxSize is the size in bytes of the file the writer never exceeds.
 	// Ordinary records stop at MaxSize-ReserveBytes. Zero means
-	// DefaultMaxSize; a negative value is refused by Open.
+	// DefaultMaxSize; any other value must be above ReserveBytes, or Open
+	// refuses it with ErrInvalidSize (a negative one included).
 	MaxSize int64
 	// Now is the clock for the record Open appends after a torn tail. Nil
 	// means time.Now.
@@ -57,12 +62,14 @@ type Recovery struct {
 	Offset int64
 	Length int64
 	Hash   string
-	// Terminated is true when the region already ended with a newline. When
-	// it is false Open added one, which says more than the region itself: a
-	// crash in the middle of a write leaves no newline, a region that ends
-	// in a newline was written by someone who finished a line. The caller
-	// should report every Recovery as security relevant: the bytes may hold
-	// a record that was erased, and the Seq of the erased record is reused.
+	// Terminated is true when the region already ended with a newline, false
+	// when Open added one. It is a hint and not a discriminator between a
+	// crash and tampering: a crash in the middle of a write leaves no
+	// newline, but a recovery interrupted right after its newline leaves a
+	// region that ends with one, and so can bytes that someone wrote. The
+	// caller should report every Recovery as security relevant whatever
+	// Terminated says: the bytes may hold a record that was erased, and the
+	// Seq of the erased record is reused.
 	Terminated bool
 	// Completed is true when the last line was a whole, intact record that
 	// only lacked its newline. It is then part of the chain (Open added the
@@ -85,8 +92,9 @@ type Recovery struct {
 // Size: ordinary records are refused with ErrFull once the file would pass
 // MaxSize-ReserveBytes. The reserve is for the last words: one terminal
 // record (kind DaemonError or DaemonStop) and the audit_recovered record
-// that Open appends may use it, up to MaxSize. A second terminal record is
-// an ordinary one. Nothing ever shrinks or rotates the file.
+// that Open appends may use it, up to MaxSize. The terminal allowance is
+// used up by the first terminal record that ends above MaxSize-ReserveBytes;
+// after that a terminal record is an ordinary one. Nothing ever shrinks or rotates the file.
 //
 // Failure: if a write or fsync fails, the Writer is unusable. Every later
 // Append returns the first error. The file may then end in a torn line, which
@@ -147,6 +155,8 @@ func Open(dir *securefile.Dir, opts Options) (*Writer, *Recovery, error) {
 	limit := opts.MaxSize
 	if limit == 0 {
 		limit = DefaultMaxSize
+	} else if limit <= ReserveBytes {
+		return nil, nil, fmt.Errorf("%w: %d bytes, the reserve alone is %d", ErrInvalidSize, limit, ReserveBytes)
 	}
 	now := opts.Now
 	if now == nil {
@@ -280,15 +290,26 @@ func (w *Writer) resume() (*torn, error) {
 // text); Append only refuses what it cannot store: a Summary over MaxSummary
 // bytes (ErrSummaryTooLong, never cut), other fields over their limit
 // (ErrFieldTooLong), and what ErrInvalidRecord names. A record that would
-// take the log past MaxSize-ReserveBytes gets ErrFull, except the first
-// record of kind DaemonError or DaemonStop, which may use the reserve up to
-// MaxSize.
+// take the log past MaxSize-ReserveBytes gets ErrFull, except a terminal
+// record (kind DaemonError or DaemonStop), which may use the reserve up to
+// MaxSize; the first terminal record whose write ends above MaxSize-
+// ReserveBytes uses the reserve up, an earlier one that fits below that does
+// not. The kind AuditRecovered is refused (ErrInvalidRecord): only Open
+// writes it, for a region it found, and Verify takes such a record as proof
+// that the region is in the log.
 func (w *Writer) Append(r Record) (Record, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if r.Kind == AuditRecovered {
+		return Record{}, fmt.Errorf("%w: kind %s is written by Open only", ErrInvalidRecord, r.Kind)
+	}
 	terminal := (r.Kind == DaemonError || r.Kind == DaemonStop) && !w.terminal
 	got, err := w.appendLocked(nil, r, terminal)
-	if err == nil && terminal {
+	// The allowance is used up by a terminal record that needed the reserve,
+	// one whose write ended above the ordinary limit (no other Append can
+	// end there); one that fit below it leaves the allowance for the last
+	// words.
+	if err == nil && w.size > w.max-ReserveBytes {
 		w.terminal = true
 	}
 	return got, err
