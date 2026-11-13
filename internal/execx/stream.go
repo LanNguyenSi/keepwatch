@@ -17,14 +17,14 @@ var _ Streamer = (*Real)(nil)
 // postExitMaxBytes bounds how many bytes Stream reads from the stdout pipe
 // after it saw the program exit. Only reads that begin after that moment
 // count (see pipeReader), whatever lines their bytes belong to. What the
-// program wrote and Stream had not read yet was inside the pipe when the
-// program exited, so it is at most the pipe's capacity: 16 pages on linux
-// (64 KiB with 4 KiB pages), and at most 64 KiB on darwin, which 16 pages
-// cover as well. A stream that reads more than this after the exit is fed by
-// a leftover process, not by the program, and is ended with IOIncomplete. Two
-// limits: a program that enlarged its own stdout pipe can leave more than
-// this behind, and the rest is then cut as if a leftover had written it; and
-// the bound is a volume, not a time, see Stream.
+// program wrote and Stream had not read yet was inside the pipe when it
+// exited, so it is at most the pipe's capacity: 16 pages on linux (64 KiB
+// with 4 KiB pages). A darwin pipe holds at most 64 KiB, so on darwin with
+// 16 KiB pages the bound is four times the pipe there. Reading more than
+// this after the exit means a leftover process feeds the stream, which is
+// then ended with IOIncomplete. Two limits: a program that enlarged its own
+// stdout pipe can leave more behind, and the rest is cut as if a leftover
+// had written it; and the bound is a volume, not a time, see Stream.
 var postExitMaxBytes = int64(16 * os.Getpagesize())
 
 // killProcessGroup is killGroup; a variable so a test can count the calls.

@@ -116,8 +116,9 @@ then reaches the grace period of `Run`, the same variable
 (`internal/execx/stream.go:260#"left := waitDelay"`), or when more than
 `postExitMaxBytes` bytes were read from the pipe after the exit was seen
 (`internal/execx/stream.go:237#"rd.postExit.Load() > postExitMaxBytes"`).
-That bound is what a pipe of the default size holds, 16 pages, which is
-64 KiB with 4 KiB pages (`internal/execx/stream.go:28#"var postExitMaxBytes"`).
+That bound is what a linux pipe of the default size holds, 16 pages, which is
+64 KiB with 4 KiB pages (`internal/execx/stream.go:28#"var postExitMaxBytes"`);
+on a darwin host with 16 KiB pages it is four times what a pipe holds there.
 Only reads that begin after the exit was seen count
 (`internal/execx/stream.go:369#"counts := p.lr.exitSeen.Load()"`), so a long
 line that was read while the program ran never does, however late the loop
