@@ -27,6 +27,23 @@ report.
 - Notification worker for the watch daemon: a bounded queue with its own
   goroutine, a per-incident and a global rate limit, reported drops, and an
   incident notice that is cleaned before it is cut.
+- A single-instance lock for the state directory: an exclusive non-blocking
+  `flock` on `watch.lock`, opened under the secure file rules (no symlink,
+  mode `0600`, trusted owner), so a second lock attempt on the same directory
+  reports that the lock is held instead of running twice; the lock file is
+  kept after release, and the lock is unsupported rather than silently absent
+  on platforms without `flock`.
+- An incident store for the watch daemon: signals are grouped by fingerprint
+  into incidents with a short stable id, and a repeated signal updates the
+  count and last-seen time, a closed incident reopens (and counts the
+  reopening), and a new or reopened incident asks for a notification that
+  stays pending until it is marked as sent. Incidents live in `incidents.json`
+  in the state directory (versioned, written atomically, at most 500). Open or
+  acked incidents idle for 7 days are closed, and when the store is full the
+  least severe incident is evicted for a signal that is at least as severe
+  (closed incidents go first), so a flood of low-severity incidents cannot
+  blind the daemon. A file that is corrupt or of another version is reported
+  and left as it is.
 - An audit log for the daemon: an append-only file in the state directory in
   which every record carries the SHA-256 of its own canonical bytes and of the
   record before it, synced to disk on every append, with a size limit at which
