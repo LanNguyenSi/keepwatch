@@ -1139,7 +1139,9 @@ func TestStreamCallbackTimeBeforeExitDoesNotExtendTheBudget(t *testing.T) {
 // back until well after the abort, so a Stream that did not wait would return
 // while the child is still a zombie.
 func TestStreamAbortWaitsForAHeldBackReap(t *testing.T) {
-	const held = 300 * time.Millisecond
+	// The limits leave the child time for its first line on a loaded host;
+	// the reap is released that much after the latest abort.
+	const limit, held = 300 * time.Millisecond, 600 * time.Millisecond
 	var gate chan struct{}
 	var hooked atomic.Int32
 	streamWaitHook = func() { hooked.Add(1); <-gate }
@@ -1152,36 +1154,43 @@ func TestStreamAbortWaitsForAHeldBackReap(t *testing.T) {
 	}{
 		{"cancel", StreamOpts{}, func(cancel func()) error { cancel(); return nil }},
 		{"callback error", StreamOpts{}, func(func()) error { return errors.New("stop") }},
-		{"timeout", StreamOpts{Timeout: 50 * time.Millisecond}, func(func()) error { return nil }},
-		{"idle timeout", StreamOpts{IdleTimeout: 50 * time.Millisecond}, func(func()) error { return nil }},
+		{"timeout", StreamOpts{Timeout: limit}, func(func()) error { return nil }},
+		{"idle timeout", StreamOpts{IdleTimeout: limit}, func(func()) error { return nil }},
 	}
 	for i, p := range paths {
-		gate = make(chan struct{})
-		release := gate
-		ctx, cancel := context.WithCancel(bg)
-		pid := 0
-		var aborted time.Time
-		_, err := callStream(t, r, ctx, []string{"sh", "-c", "echo $$; exec sleep 30"}, p.opts, func(l []byte) error {
-			pid, _ = strconv.Atoi(string(l))
-			aborted = time.Now()
-			time.AfterFunc(held, func() { close(release) })
-			return p.stop(cancel)
-		})
-		waited := time.Since(aborted)
-		zombie := pid != 0 && syscall.Kill(pid, 0) == nil
-		cancel()
-		if err == nil || pid == 0 {
-			t.Fatalf("%s: pid=%d err=%v", p.name, pid, err)
-		}
-		if zombie {
-			syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("%s: the child %d was not reaped when Stream returned", p.name, pid)
-		}
-		if waited < held {
-			t.Fatalf("%s: Stream returned %s after the abort, before the reap was released after %s", p.name, waited, held)
-		}
-		if int(hooked.Load()) != i+1 {
-			t.Fatalf("%s: the wait hook ran %d times, want %d", p.name, hooked.Load(), i+1)
-		}
+		func() {
+			gate = make(chan struct{})
+			var once sync.Once
+			release := gate
+			open := func() { once.Do(func() { close(release) }) }
+			// Also when the stream never got its first line and the test
+			// gives up: the held-back goroutine must not stay behind.
+			defer open()
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			pid := 0
+			var firstLine time.Time
+			_, err := callStream(t, r, ctx, []string{"sh", "-c", "echo $$; exec sleep 30"}, p.opts, func(l []byte) error {
+				pid, _ = strconv.Atoi(string(l))
+				firstLine = time.Now()
+				time.AfterFunc(held, open)
+				return p.stop(cancel)
+			})
+			waited := time.Since(firstLine)
+			zombie := pid != 0 && syscall.Kill(pid, 0) == nil
+			if err == nil || pid == 0 {
+				t.Fatalf("%s: pid=%d err=%v", p.name, pid, err)
+			}
+			if zombie {
+				syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatalf("%s: the child %d was not reaped when Stream returned", p.name, pid)
+			}
+			if waited < held {
+				t.Fatalf("%s: Stream returned %s after the first line, before the reap was released after %s", p.name, waited, held)
+			}
+			if int(hooked.Load()) != i+1 {
+				t.Fatalf("%s: the wait hook ran %d times, want %d", p.name, hooked.Load(), i+1)
+			}
+		}()
 	}
 }
