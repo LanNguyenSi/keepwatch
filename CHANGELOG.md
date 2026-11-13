@@ -20,6 +20,10 @@ report.
   least 1h for `learning_period`, 1m for `per_incident_interval` and
   1s for the windows, and at most 720h (30 days); the keys are
   documented in `docs/configuration.md`.
+- A posture source for the daemon: it compares each new timer run in the state
+  file with the one it saw before and turns alert-worthy changes into signals
+  that do not notify on their own, so `check --notify` stays the only
+  notification path for posture.
 
 ### Security
 
