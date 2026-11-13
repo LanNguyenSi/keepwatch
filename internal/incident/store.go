@@ -378,8 +378,10 @@ func validFingerprint(f event.Fingerprint) bool {
 
 // usableTime reports whether t is a time the store may record: not the zero
 // time, and with a year between 1 and 9999. Apply, MarkNotified and Sweep
-// reject any other time with ErrInvalidSignal rather than storing a time the
-// file format cannot round-trip.
+// reject a zero time or a year outside that range with ErrInvalidSignal. The
+// zone is not checked: callers pass times from journald or the daemon clock,
+// and a fixed zone offset of 24 hours or more, or one with seconds, would
+// still fail to encode or shift on reload.
 func usableTime(t time.Time) bool {
 	if t.IsZero() {
 		return false
