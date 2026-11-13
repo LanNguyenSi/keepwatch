@@ -355,3 +355,38 @@ func TestTransientRaceIsRetriedOnce(t *testing.T) {
 func diffChange(check, subject string) diff.Change {
 	return diff.Change{Kind: diff.SubjectNew, CheckID: check, Subject: subject}
 }
+
+// An exception removed between two runs lists the same item in both; the
+// signal still carries the item's raw key, not the display fallback.
+func TestExceptionRemovedKeepsRawKey(t *testing.T) {
+	kx := result.SubjectKey("raw-x")
+	ky := result.SubjectKey("raw-y")
+	p := state.Check{ID: "c", Kind: "k", Status: result.Fail, Severity: result.High,
+		Items: []state.Item{{Key: kx, Subject: "shown-x", Excepted: true}, {Key: ky, Subject: "shown-y"}}}
+	c := state.Check{ID: "c", Kind: "k", Status: result.Fail, Severity: result.High,
+		Items: []state.Item{{Key: kx, Subject: "shown-x"}, {Key: ky, Subject: "shown-y"}}}
+	s := seq(ok(st(t0, p)), ok(st(t0.Add(time.Hour), c)))
+	if _, err := s.Poll(t0); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Poll(t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := event.FingerprintOf(RuleID, "c", "subject_new", "key:"+kx)
+	for _, x := range g {
+		if x.Fingerprint == want {
+			return
+		}
+	}
+	t.Errorf("no signal with the raw key %s: %+v", want, g)
+}
+
+// The "disappeared" form of the load race is retried like the "changed" one.
+func TestDisappearedRaceIsRetried(t *testing.T) {
+	gone := state.LoadResult{Problem: "/x/state.json disappeared while it was being opened"}
+	s := seq(gone, state.LoadResult{Missing: true})
+	if g, err := s.Poll(t0); err != nil || g != nil {
+		t.Fatalf("got %v, %v; want nil, nil after one retry", g, err)
+	}
+}

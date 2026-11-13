@@ -41,9 +41,10 @@ func New(store *state.Store, min result.Severity) *Source {
 
 // Poll loads the state and returns the Signals of the changes since the last
 // run it saw. A load that races with a save is tried once more. A missing
-// state file is not an error and yields nothing. A state directory that cannot be trusted, or a file that cannot be used (unreadable,
-// foreign schema version), is returned as an error; the baseline is kept, so
-// the next good load is compared with it.
+// state file is not an error and yields nothing. A state directory that
+// cannot be trusted, or a file that cannot be used (unreadable, foreign
+// schema version), is returned as an error; the baseline is kept, so the
+// next good load is compared with it.
 func (s *Source) Poll(now time.Time) ([]event.Signal, error) {
 	lr, err := s.load()
 	if err == nil && transient(lr.Problem) {
