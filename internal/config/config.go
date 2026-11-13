@@ -188,14 +188,14 @@ type Watch struct {
 
 // WatchRule raises from this many events within a sliding window.
 type WatchRule struct {
-	Threshold int           // at least 1
-	Window    time.Duration // above 0 and at most watchMaxDuration
+	Threshold int           // 1 to watchMaxThreshold
+	Window    time.Duration // watchMinWindow to watchMaxDuration
 }
 
 // WatchNotify configures the watch daemon's notification queue.
 type WatchNotify struct {
 	Queue               int           // notifications kept waiting; 1 to watchMaxQueue
-	PerIncidentInterval time.Duration // least time between two notices of one incident; default 1h
+	PerIncidentInterval time.Duration // least time between two notices of one incident; default 1h, watchMinPerIncident to watchMaxDuration
 	GlobalPerMinute     int           // notices sent per minute, global; 1 to watchMaxPerMinute
 }
 

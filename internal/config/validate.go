@@ -600,13 +600,20 @@ const (
 	watchDefaultNotifyGlobalPerMin   = 6
 )
 
-// Ranges of the watch section: every window and period is above zero
-// and at most watchMaxDuration; queue is 1 to watchMaxQueue and
-// global_per_minute 1 to watchMaxPerMinute; thresholds are at least 1.
+// Ranges of the watch section: every duration is at least the minimum
+// of its key (watchMinWindow for the rule windows,
+// watchMinLearningPeriod for learning_period, watchMinPerIncident for
+// per_incident_interval) and at most watchMaxDuration; queue is 1 to
+// watchMaxQueue, global_per_minute 1 to watchMaxPerMinute and
+// thresholds 1 to watchMaxThreshold.
 const (
-	watchMaxDuration  = 720 * time.Hour // 30 days
-	watchMaxQueue     = 1000
-	watchMaxPerMinute = 60
+	watchMaxDuration       = 720 * time.Hour // 30 days
+	watchMaxQueue          = 1000
+	watchMaxPerMinute      = 60
+	watchMaxThreshold      = 10000
+	watchMinWindow         = time.Second
+	watchMinLearningPeriod = time.Hour
+	watchMinPerIncident    = time.Minute
 )
 
 // defaultWatch is the watch section of a configuration that does not
@@ -641,19 +648,19 @@ func (v *validator) watch(n *yaml.Node) Watch {
 				w.Enabled = b
 			}
 		case "learning_period":
-			v.watchDuration(val, "watch.learning_period", &w.LearningPeriod)
+			v.watchDuration(val, "watch.learning_period", watchMinLearningPeriod, &w.LearningPeriod)
 		case "ssh_bruteforce":
 			if isNull(val) { // a null rule counts as absent: its defaults stay
 				continue
 			}
 			v.watchRule(val, "watch.ssh_bruteforce", &w.SSHBruteforce)
 		case "restart_loop":
-			if isNull(val) {
+			if isNull(val) { // a null rule counts as absent: its defaults stay
 				continue
 			}
 			v.watchRule(val, "watch.restart_loop", &w.RestartLoop)
 		case "notify":
-			if isNull(val) {
+			if isNull(val) { // a null section counts as absent: its defaults stay
 				continue
 			}
 			v.watchNotify(val, &w.Notify)
@@ -676,14 +683,14 @@ func (v *validator) watchRule(n *yaml.Node, name string, r *WatchRule) {
 		switch k.Value {
 		case "threshold":
 			if t, present, ok := v.intVal(val, name+".threshold"); ok && present {
-				if t < 1 {
-					v.fail(val, name+".threshold: must be at least 1, got "+strconv.Itoa(t))
+				if t < 1 || t > watchMaxThreshold {
+					v.fail(val, name+".threshold: must be between 1 and "+strconv.Itoa(watchMaxThreshold)+", got "+strconv.Itoa(t))
 				} else {
 					r.Threshold = t
 				}
 			}
 		case "window":
-			v.watchDuration(val, name+".window", &r.Window)
+			v.watchDuration(val, name+".window", watchMinWindow, &r.Window)
 		default:
 			v.fail(k, name+": unknown key "+strconv.Quote(k.Value))
 		}
@@ -708,7 +715,7 @@ func (v *validator) watchNotify(n *yaml.Node, q *WatchNotify) {
 				}
 			}
 		case "per_incident_interval":
-			v.watchDuration(val, "watch.notify.per_incident_interval", &q.PerIncidentInterval)
+			v.watchDuration(val, "watch.notify.per_incident_interval", watchMinPerIncident, &q.PerIncidentInterval)
 		case "global_per_minute":
 			if x, present, ok := v.intVal(val, "watch.notify.global_per_minute"); ok && present {
 				if x < 1 || x > watchMaxPerMinute {
@@ -723,13 +730,16 @@ func (v *validator) watchNotify(n *yaml.Node, q *WatchNotify) {
 	}
 }
 
+// watchDurationFormat is the format sentence of the duration errors:
+// the grammar of parseWatchDuration, in one sentence.
+const watchDurationFormat = "want one number (no leading zeros, at most 5 digits) and one unit (s, m, h or d), for example 90m, 2h or 7d"
+
 // watchDuration validates one duration and stores it when it is in
-// range (above zero and at most watchMaxDuration). A duration is a
-// string such as "90m", "2h" or "7d"; a bare number is not a duration.
-// A null counts as absent and leaves the current value.
-func (v *validator) watchDuration(n *yaml.Node, path string, dst *time.Duration) {
+// range (at least min and at most watchMaxDuration). A null counts as
+// absent and leaves the current value.
+func (v *validator) watchDuration(n *yaml.Node, path string, min time.Duration, dst *time.Duration) {
 	if !isScalar(n) {
-		v.fail(n, path+": expected a duration such as 90m, 2h or 7d")
+		v.fail(n, path+": expected a duration: "+watchDurationFormat)
 		return
 	}
 	switch n.ShortTag() {
@@ -737,42 +747,55 @@ func (v *validator) watchDuration(n *yaml.Node, path string, dst *time.Duration)
 		return // absent: the current value stays
 	case "!!str":
 	default:
-		v.fail(n, path+": expected a duration such as 90m, 2h or 7d")
+		v.fail(n, path+": expected a duration: "+watchDurationFormat)
 		return
 	}
 	d, err := parseWatchDuration(n.Value)
 	if err != nil {
-		v.fail(n, path+": "+strconv.Quote(n.Value)+" is not a duration such as 90m, 2h or 7d")
+		v.fail(n, path+": "+strconv.Quote(n.Value)+" is not a duration: "+watchDurationFormat)
 		return
 	}
-	if d <= 0 || d > watchMaxDuration {
-		v.fail(n, path+": must be above 0 and at most "+watchMaxDuration.String()+", got "+d.String())
+	if d < min || d > watchMaxDuration {
+		v.fail(n, path+": must be between "+min.String()+" and "+watchMaxDuration.String()+", got "+d.String())
 		return
 	}
 	*dst = d
 }
 
-// parseWatchDuration parses a watch duration: time.ParseDuration's
-// form (units ns through h), optionally preceded by a whole number of
-// days, so "90m", "12h", "7d" and "1d12h" parse and a bare "7" does
-// not.
+// parseWatchDuration parses a watch duration with the grammar of
+// install.ParseInterval (that package is not imported here, to keep the
+// dependency one-way): one positive number without leading zeros, at
+// most five digits, and exactly one unit (s, m, h or d), lower case,
+// nothing else: no spaces, no sign, no fraction, no second unit. At
+// most five digits, so no conversion overflows; the range check is the
+// caller's.
 func parseWatchDuration(s string) (time.Duration, error) {
-	if i := strings.IndexByte(s, 'd'); i >= 0 {
-		days, err := strconv.Atoi(s[:i])
-		if err != nil {
-			return 0, fmt.Errorf("%q is not a whole number of days", s[:i])
-		}
-		total := time.Duration(days) * 24 * time.Hour
-		if i == len(s)-1 {
-			return total, nil
-		}
-		rest, err := time.ParseDuration(s[i+1:])
-		if err != nil {
-			return 0, err
-		}
-		return total + rest, nil
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
 	}
-	return time.ParseDuration(s)
+	num, unit := s[:i], s[i:]
+	if num == "" || len(num) > 5 || num[0] == '0' {
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	var scale time.Duration
+	switch unit {
+	case "s":
+		scale = time.Second
+	case "m":
+		scale = time.Minute
+	case "h":
+		scale = time.Hour
+	case "d":
+		scale = 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	return time.Duration(n) * scale, nil
 }
 
 // checkTokenFile validates the token file's existence, type, size,

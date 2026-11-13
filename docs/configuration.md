@@ -93,8 +93,10 @@ More rules, all reported with `file:line`:
 `watch` is the top-level section the watch daemon and `install` read.
 Every key is optional and may appear in `conf.d` like any other
 section (mappings merge per key, later files win, a null counts as
-absent). Durations are written as a Go duration (`45s`, `90m`, `2h`)
-optionally preceded by a whole number of days (`7d`, `1d12h`).
+absent). A duration is one number (no leading zeros, at most five
+digits) and one unit of `s`, `m`, `h` or `d` (`45s`, `90m`, `2h`,
+`7d`); signs (`+3d`), fractions (`1.5h`), other units (`500ms`) and
+combined forms (`1d12h`) are not durations.
 `ssh_bruteforce` and `restart_loop` are rules: `threshold` events
 within `window` raise a finding; `learning_period` is the start-up
 period during which findings are held back; `notify.queue` is how many
@@ -106,13 +108,13 @@ the global notice rate. The ranges are checked, each error naming
 | key | default | range |
 | --- | --- | --- |
 | `watch.enabled` | `false` | `true` or `false` |
-| `watch.learning_period` | `7d` | above 0, at most 720h (30 days) |
-| `watch.ssh_bruteforce.threshold` | `5` | at least 1 |
-| `watch.ssh_bruteforce.window` | `10m` | above 0, at most 720h (30 days) |
-| `watch.restart_loop.threshold` | `3` | at least 1 |
-| `watch.restart_loop.window` | `15m` | above 0, at most 720h (30 days) |
+| `watch.learning_period` | `7d` | 1h to 720h (30 days) |
+| `watch.ssh_bruteforce.threshold` | `5` | 1 to 10000 |
+| `watch.ssh_bruteforce.window` | `10m` | 1s to 720h (30 days) |
+| `watch.restart_loop.threshold` | `3` | 1 to 10000 |
+| `watch.restart_loop.window` | `15m` | 1s to 720h (30 days) |
 | `watch.notify.queue` | `100` | 1 to 1000 |
-| `watch.notify.per_incident_interval` | `1h` | above 0, at most 720h (30 days) |
+| `watch.notify.per_incident_interval` | `1h` | 1m to 720h (30 days) |
 | `watch.notify.global_per_minute` | `6` | 1 to 60 |
 
 ```sh

@@ -80,9 +80,11 @@ exceptions:
 
 # Watch mode (read by the watch daemon and by install). All values shown
 # are the defaults; every key is optional. learning_period, the windows
-# and per_incident_interval are durations: a Go duration (45s, 90m, 2h)
-# optionally preceded by a whole number of days (7d, 1d12h), above zero
-# and at most 720h. threshold counts events within window. queue is the
+# and per_incident_interval are durations: one number (no leading zeros,
+# at most 5 digits) and one unit (s, m, h or d), for example 45s, 90m,
+# 2h, 7d; at most 720h, and at least 1s for the windows, 1h for
+# learning_period and 1m for per_incident_interval. threshold counts
+# events within window (1 to 10000). queue is the
 # number of notifications kept waiting (1 to 1000),
 # per_incident_interval the least time between two notices of one
 # incident, and global_per_minute the global notice rate (1 to 60).

@@ -101,7 +101,7 @@ func TestWatchAllKeysInMain(t *testing.T) {
 	// Every key set in the main file at once: each value applies.
 	yaml := `watch:
   enabled: true
-  learning_period: 1d12h
+  learning_period: 36h
   ssh_bruteforce:
     threshold: 9
     window: 30m
@@ -119,7 +119,7 @@ func TestWatchAllKeysInMain(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	checkWatch(t, cfg, wantWatch{
-		enabled: true, learningPeriod: "1d12h",
+		enabled: true, learningPeriod: "36h",
 		sshThreshold: 9, sshWindow: "30m",
 		restartThreshold: 4, restartWindow: "2h",
 		queue: 7, perIncidentInterval: "45m", globalPerMinute: 2,
@@ -127,14 +127,13 @@ func TestWatchAllKeysInMain(t *testing.T) {
 }
 
 func TestWatchDurationForms(t *testing.T) {
-	// A duration is a Go duration or a whole number of days, optionally
-	// combined; quoting changes nothing and a bare number is not one.
+	// Accepted duration forms through Load; quoting changes nothing.
+	// A 1s is tested on a window (learning_period has a 1h minimum).
 	for _, tc := range []struct{ in, want string }{
-		{"45s", "45s"}, {"90m", "90m"}, {"2h", "2h"},
-		{"7d", "168h"}, {"1d12h", "36h"}, {"30d", "720h"},
+		{"90m", "90m"}, {"12h", "12h"}, {"7d", "168h"}, {"30d", "720h"},
 		{"\"7d\"", "168h"},
 	} {
-		t.Run(tc.in, func(t *testing.T) {
+		t.Run("learning_period "+tc.in, func(t *testing.T) {
 			_, main := setup(t, map[string]string{"keepwatch.yaml": "watch:\n  learning_period: " + tc.in + "\n"})
 			cfg, err := Load(main)
 			if err != nil {
@@ -149,6 +148,94 @@ func TestWatchDurationForms(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ssh_bruteforce.window 1s", func(t *testing.T) {
+		_, main := setup(t, map[string]string{"keepwatch.yaml": "watch:\n  ssh_bruteforce:\n    window: 1s\n"})
+		cfg, err := Load(main)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Watch.SSHBruteforce.Window != time.Second {
+			t.Errorf("Window = %v, want 1s", cfg.Watch.SSHBruteforce.Window)
+		}
+	})
+}
+
+func TestWatchDurationGrammar(t *testing.T) {
+	// The parser's grammar: one positive number without leading zeros,
+	// at most five digits, and one unit of s, m, h or d, nothing else.
+	// At most five digits, so the day multiplication cannot overflow.
+	for _, s := range []string{
+		"213504d", "106752d", "9223372036854775807d", // would overflow
+		"100000d", // six digits
+		"+3d", "-1d", "1d12h", "1h1h", "1.5h", "00007d",
+		"0d", "0s", "0", "7", "500ms", "7D", " 7d", "7d ", "", "d",
+	} {
+		if d, err := parseWatchDuration(s); err == nil {
+			t.Errorf("parseWatchDuration(%q) = %v, want rejection", s, d)
+		}
+	}
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"1s", time.Second},
+		{"1m", time.Minute},
+		{"1h", time.Hour},
+		{"90m", 90 * time.Minute},
+		{"12h", 12 * time.Hour},
+		{"7d", 7 * 24 * time.Hour},
+		{"30d", 30 * 24 * time.Hour},
+		{"99999s", 99999 * time.Second},
+	} {
+		if d, err := parseWatchDuration(tc.in); err != nil || d != tc.want {
+			t.Errorf("parseWatchDuration(%q) = %v, %v, want %v", tc.in, d, err, tc.want)
+		}
+	}
+}
+
+func TestWatchDurationRejectedNamesFileAndLine(t *testing.T) {
+	// Through config.Load: the error names the file, the line and the
+	// new grammar.
+	_, main := setup(t, map[string]string{"keepwatch.yaml": "watch:\n  learning_period: 1d12h\n"})
+	errs := errsOf(t, main)
+	want := main + `:2: watch.learning_period: "1d12h" is not a duration: want one number`
+	if !containsSub(errs, want) {
+		t.Errorf("errors %q lack %q", errs, want)
+	}
+}
+
+func TestWatchMinimumsAccepted(t *testing.T) {
+	// Exactly at the per-key minimum: a 1s window, a 1h
+	// learning_period and a 1m per_incident_interval.
+	_, main := setup(t, map[string]string{"keepwatch.yaml": `watch:
+  learning_period: 1h
+  ssh_bruteforce:
+    window: 1s
+  restart_loop:
+    window: 1s
+  notify:
+    per_incident_interval: 1m
+`})
+	cfg, err := Load(main)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	checkWatch(t, cfg, wantWatch{learningPeriod: "1h", sshWindow: "1s", restartWindow: "1s", perIncidentInterval: "1m"})
+}
+
+func TestWatchThresholdMaximumAccepted(t *testing.T) {
+	// Exactly at the threshold maximum, for both rules.
+	_, main := setup(t, map[string]string{"keepwatch.yaml": `watch:
+  ssh_bruteforce:
+    threshold: 10000
+  restart_loop:
+    threshold: 10000
+`})
+	cfg, err := Load(main)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	checkWatch(t, cfg, wantWatch{sshThreshold: 10000, restartThreshold: 10000})
 }
 
 func TestWatchConfDPrefix(t *testing.T) {
@@ -355,12 +442,22 @@ func TestWatchNegative(t *testing.T) {
 		{
 			name: "threshold 0 rejected",
 			yaml: "watch:\n  ssh_bruteforce:\n    threshold: 0\n",
-			want: "watch.ssh_bruteforce.threshold: must be at least 1, got 0",
+			want: "watch.ssh_bruteforce.threshold: must be between 1 and 10000, got 0",
 		},
 		{
 			name: "negative threshold rejected",
 			yaml: "watch:\n  restart_loop:\n    threshold: -3\n",
-			want: "watch.restart_loop.threshold: must be at least 1, got -3",
+			want: "watch.restart_loop.threshold: must be between 1 and 10000, got -3",
+		},
+		{
+			name: "threshold above the maximum rejected",
+			yaml: "watch:\n  ssh_bruteforce:\n    threshold: 10001\n",
+			want: "watch.ssh_bruteforce.threshold: must be between 1 and 10000, got 10001",
+		},
+		{
+			name: "restart_loop threshold above the maximum rejected",
+			yaml: "watch:\n  restart_loop:\n    threshold: 10001\n",
+			want: "watch.restart_loop.threshold: must be between 1 and 10000, got 10001",
 		},
 		{
 			name: "threshold is not a string",
@@ -370,27 +467,37 @@ func TestWatchNegative(t *testing.T) {
 		{
 			name: "window 0 rejected",
 			yaml: "watch:\n  ssh_bruteforce:\n    window: 0m\n",
-			want: "watch.ssh_bruteforce.window: must be above 0 and at most",
+			want: `watch.ssh_bruteforce.window: "0m" is not a duration`,
 		},
 		{
 			name: "negative window rejected",
 			yaml: "watch:\n  restart_loop:\n    window: -5m\n",
-			want: "watch.restart_loop.window: must be above 0 and at most",
+			want: `watch.restart_loop.window: "-5m" is not a duration`,
+		},
+		{
+			name: "sub-second window rejected",
+			yaml: "watch:\n  ssh_bruteforce:\n    window: 500ms\n",
+			want: `watch.ssh_bruteforce.window: "500ms" is not a duration`,
 		},
 		{
 			name: "window above the maximum rejected",
 			yaml: "watch:\n  restart_loop:\n    window: 721h\n",
-			want: "watch.restart_loop.window: must be above 0 and at most 720h0m0s, got 721h0m0s",
+			want: "watch.restart_loop.window: must be between 1s and 720h0m0s, got 721h0m0s",
 		},
 		{
 			name: "learning period 0 rejected",
 			yaml: "watch:\n  learning_period: 0s\n",
-			want: "watch.learning_period: must be above 0 and at most",
+			want: `watch.learning_period: "0s" is not a duration`,
+		},
+		{
+			name: "learning period below the minimum rejected",
+			yaml: "watch:\n  learning_period: 59m\n",
+			want: "watch.learning_period: must be between 1h0m0s and 720h0m0s, got 59m0s",
 		},
 		{
 			name: "learning period above the maximum rejected",
 			yaml: "watch:\n  learning_period: 31d\n",
-			want: "watch.learning_period: must be above 0 and at most 720h0m0s, got 744h0m0s",
+			want: "watch.learning_period: must be between 1h0m0s and 720h0m0s, got 744h0m0s",
 		},
 		{
 			name: "duration must not be a bare number",
@@ -410,7 +517,12 @@ func TestWatchNegative(t *testing.T) {
 		{
 			name: "per_incident_interval 0 rejected",
 			yaml: "watch:\n  notify:\n    per_incident_interval: 0s\n",
-			want: "watch.notify.per_incident_interval: must be above 0 and at most",
+			want: `watch.notify.per_incident_interval: "0s" is not a duration`,
+		},
+		{
+			name: "per_incident_interval below the minimum rejected",
+			yaml: "watch:\n  notify:\n    per_incident_interval: 59s\n",
+			want: "watch.notify.per_incident_interval: must be between 1m0s and 720h0m0s, got 59s",
 		},
 		{
 			name: "queue 0 rejected",

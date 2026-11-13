@@ -112,6 +112,30 @@ func TestNullInConfDLeavesMainSectionIntact(t *testing.T) {
 	}
 }
 
+func TestNullWatchKeysInSingleFileKeepDefaults(t *testing.T) {
+	// A null or bare ssh_bruteforce, restart_loop or notify in one
+	// main file counts as absent: the rule and notify defaults stay.
+	// Each key alone and all three together.
+	for _, tc := range []struct{ name, yaml string }{
+		{"null ssh_bruteforce", "watch:\n  ssh_bruteforce: ~\n"},
+		{"bare ssh_bruteforce", "watch:\n  ssh_bruteforce:\n"},
+		{"null restart_loop", "watch:\n  restart_loop: ~\n"},
+		{"bare restart_loop", "watch:\n  restart_loop:\n"},
+		{"null notify", "watch:\n  notify: ~\n"},
+		{"bare notify", "watch:\n  notify:\n"},
+		{"all three null", "watch:\n  ssh_bruteforce: ~\n  restart_loop: ~\n  notify: ~\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, main := setup(t, map[string]string{"keepwatch.yaml": tc.yaml})
+			cfg, err := Load(main)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			checkWatch(t, cfg, wantWatch{})
+		})
+	}
+}
+
 func TestNullInMainDoesNotBlockConfD(t *testing.T) {
 	// The other direction: a null in an earlier file does not block a
 	// later file, whose value applies.
