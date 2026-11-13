@@ -44,6 +44,31 @@ report.
   (closed incidents go first), so a flood of low-severity incidents cannot
   blind the daemon. A file that is corrupt or of another version is reported
   and left as it is.
+- A request spool for the watch daemon: acknowledging or closing an incident
+  is asked for by dropping a small file into `requests/` in the state
+  directory, which the daemon reads with owner, mode, size and schema checks
+  (a file that fails one is reported with its reason instead of being
+  applied) and consumes. At most 100 request files are looked at per pass,
+  other entries of the directory are reported apart (at most 20, never
+  opened) so they cannot hold requests back, and at most 10000 directory
+  entries are examined per pass, with a flag when there are more (while it is
+  set, order is kept among the examined entries only). Leftover temporary files
+  are swept by age, and those dated ahead of the clock are swept at once.
+- An audit log for the daemon: an append-only file in the state directory in
+  which every record carries the SHA-256 of its own canonical bytes and of the
+  record before it, synced to disk on every append, with a size limit at which
+  it refuses to write; ordinary records stop a little earlier, so that one
+  last record (a stop or an error) and the recovery record still fit. Opening
+  the log reads only its end, so a log of any size opens in constant memory.
+  Whatever a crash left after the last intact record, also a crash while the
+  log was being recovered, is kept as it is and accounted for by one recovery
+  record that names its offset, length and hash, and only the log's own open
+  can write that record. The reader checks the whole chain from the first
+  record (content, order, links), refuses what the writer could not have
+  stored, notices a recovery record whose torn region was cut out of the log,
+  and can filter records by kind, incident and time. It does not notice a log
+  that was cut off at its end, and anyone who can write the file can rewrite
+  all of it consistently; both limits are documented.
 - Rules for the daemon that turn journal events into signals: an ssh brute
   force rule (failed and invalid-user logins, plus refused pre-auth
   connections, per source address or IPv6 /64), a restart loop rule (systemd
