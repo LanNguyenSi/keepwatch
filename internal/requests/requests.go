@@ -266,7 +266,8 @@ var (
 	now     = time.Now
 	// maxExamined is MaxExamined; tests make it small.
 	maxExamined = MaxExamined
-	// afterList runs between listing the names and looking at them.
+	// afterList runs between listing the names and looking at them (in Pending
+	// and in SweepTemp).
 	afterList = func() {}
 	// afterDirOpen runs between the trust check of the requests directory and
 	// the second look at it.
@@ -504,7 +505,8 @@ func openExisting(stateDir string) (*handle, error) {
 	return h, err
 }
 
-// listing is what one pass over the directory found, each list sorted by name.
+// listing is what one pass over the directory found. The requests and the
+// stray names are sorted; the temporary files are in directory order.
 type listing struct {
 	requests []string // named as Submit names them
 	stray    []string // any other name
@@ -560,7 +562,6 @@ func list(root *os.Root) (listing, error) {
 	}
 	sort.Strings(l.requests)
 	sort.Strings(l.stray)
-	sort.Strings(l.temps)
 	return l, nil
 }
 
@@ -635,9 +636,8 @@ func parse(data []byte) (Request, *Rejection) {
 		return bad(ReasonMalformed, "%v", err)
 	}
 	var w wireRequest
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&w); err != nil {
+	// Unknown keys were refused by checkKeys.
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&w); err != nil {
 		return bad(ReasonMalformed, "does not have the shape of a request")
 	}
 	if w.Action != string(ActionAck) && w.Action != string(ActionClose) {
@@ -709,10 +709,8 @@ func Remove(stateDir, name string) error {
 		return err
 	}
 	defer h.Close()
-	if err := h.root.RemoveAll(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	// RemoveAll reports an entry that is already gone as success.
+	return h.root.RemoveAll(name)
 }
 
 // SweepTemp removes the temporary files (securefile.TempPrefix) of the
@@ -737,6 +735,7 @@ func SweepTemp(stateDir string, olderThan time.Duration) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	afterList()
 	cutoff := now().Add(-olderThan)
 	removed := 0
 	var errs []error
@@ -752,11 +751,10 @@ func SweepTemp(stateDir string, olderThan time.Duration) (int, error) {
 		if !fi.ModTime().Before(cutoff) {
 			continue
 		}
-		switch err := h.root.RemoveAll(name); {
-		case err == nil:
-			removed++
-		case !errors.Is(err, fs.ErrNotExist):
+		if err := h.root.RemoveAll(name); err != nil {
 			errs = append(errs, err)
+		} else {
+			removed++
 		}
 	}
 	return removed, errors.Join(errs...)

@@ -733,3 +733,102 @@ func TestSweepTempKindsAndEdges(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestsPathIsNotADirectory(t *testing.T) {
+	for label, c := range map[string]struct {
+		make func(path string) error
+		want string
+	}{
+		"regular file": {func(p string) error { return os.WriteFile(p, []byte("x"), 0o600) }, "must be a directory"},
+		"symlink":      {func(p string) error { return os.Symlink(t.TempDir(), p) }, "it is a symlink"},
+	} {
+		for opName, op := range map[string]func(string) error{
+			"Submit":  func(s string) error { _, err := Submit(s, Request{Action: ActionAck, IncidentID: "a1"}); return err },
+			"Pending": func(s string) error { _, err := Pending(s); return err },
+			"Remove":  func(s string) error { return Remove(s, fname(1)) },
+		} {
+			t.Run(label+"/"+opName, func(t *testing.T) {
+				state := newState(t)
+				if err := c.make(filepath.Join(state, DirName)); err != nil {
+					t.Fatal(err)
+				}
+				err := op(state)
+				if !errors.Is(err, securefile.ErrUntrusted) || !strings.Contains(err.Error(), c.want) {
+					t.Fatalf("got %v, want ErrUntrusted saying %q", err, c.want)
+				}
+			})
+		}
+	}
+}
+
+func TestOwnerErrorOnRequestsDirIsReturned(t *testing.T) {
+	// A failing owner lookup is not "trusted" and not swallowed, at either of
+	// the looks that are made here (calls 3 and 6, see ownerSequence).
+	boom := errors.New("no owner")
+	for _, at := range []int{3, 6} {
+		for name, op := range map[string]func(string) error{
+			"Pending": func(s string) error { _, err := Pending(s); return err },
+			"Remove":  func(s string) error { return Remove(s, fname(1)) },
+		} {
+			t.Run(fmt.Sprintf("%s/call %d", name, at), func(t *testing.T) {
+				state := newState(t)
+				plant(t, state, fname(1), goodBody, 0o600)
+				calls := 0
+				setOwner(t, func(fi fs.FileInfo) (int, error) {
+					calls++
+					if calls == at {
+						return 0, boom
+					}
+					return securefile.DefaultOwnerOf(fi)
+				})
+				if err := op(state); !errors.Is(err, boom) {
+					t.Fatalf("got %v, want the owner error", err)
+				}
+				if _, err := os.Lstat(filepath.Join(state, DirName, fname(1))); err != nil {
+					t.Fatalf("request touched: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestCheckKeysDirect(t *testing.T) {
+	// parse only hands checkKeys data that is valid JSON; the function itself
+	// still refuses what is not an object.
+	for label, data := range map[string]string{
+		"empty": ``, "array": `[1]`, "string": `"x"`, "number": `1`, "null": `null`,
+		"cut after key": `{"action"`, "cut in value": `{"action":"ac`, "cut after colon": `{"action":`,
+		"syntax error in key": `{action:"ack"}`, "syntax error in value": `{"note":}`, "unterminated": `{"note":"x"`,
+	} {
+		if err := checkKeys([]byte(data)); err == nil {
+			t.Errorf("%s: %q accepted", label, data)
+		}
+	}
+	for label, data := range map[string]string{
+		"empty object": `{}`, "all keys": `{"schema_version":1,"action":"ack","incident_id":"a1","note":"","requested_at":"x"}`,
+		"nested values": `{"note":{"a":[1,2,{"action":1}]},"action":[1]}`,
+	} {
+		if err := checkKeys([]byte(data)); err != nil {
+			t.Errorf("%s: %v", label, err)
+		}
+	}
+}
+
+func TestSweepTempSkipsVanishedFile(t *testing.T) {
+	state := newState(t)
+	rd := reqDir(t, state)
+	old := time.Now().Add(-3 * time.Hour)
+	for _, n := range []string{"a", "b"} {
+		p := plant(t, state, securefile.TempPrefix+n, "x", 0o600)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := afterList
+	t.Cleanup(func() { afterList = prev })
+	afterList = func() { _ = os.Remove(filepath.Join(rd, securefile.TempPrefix+"a")) }
+	n, err := SweepTemp(state, time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("removed %d, err %v; want 1 and no error (the other file vanished)", n, err)
+	}
+}
