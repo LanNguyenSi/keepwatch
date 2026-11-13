@@ -54,6 +54,11 @@ report.
   entries are examined per pass, with a flag when there are more (while it is
   set, order is kept among the examined entries only). Leftover temporary files
   are swept by age, and those dated ahead of the clock are swept at once.
+- Streaming execution for long-running commands such as `journalctl --follow`:
+  stdout is delivered line by line to a callback with a per-line cap, an idle
+  and a total timeout, and cancellation; after the program exits, its pipe
+  backlog is drained within a bounded time and byte volume, and a stream cut
+  short is reported as incomplete instead of silently losing lines.
 
 ### Security
 
