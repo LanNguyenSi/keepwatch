@@ -1,13 +1,14 @@
 ---
 type: module
 title: execx, the only seam that starts a program
-description: The execution layer's contract as its callers must know it - fixed program table, its own pipe copies, the two incomplete-output signals, and the process-group kill that no os/exec default gives.
+description: The execution layer's contract as its callers must know it - fixed program table, its own pipe copies, the two incomplete-output signals, the process-group kill that no os/exec default gives, and the streaming sibling of Run for long-lived programs.
 tags: [execx, probes, sandbox]
 timestamp: 2026-11-12T14:30:28Z
 sources:
   - internal/execx/execx.go
   - internal/execx/real.go
   - internal/execx/kill_unix.go
+  - internal/execx/stream.go
   - internal/engine/engine.go
   - internal/probes/probes.go
   - internal/doctor/doctor.go
@@ -71,3 +72,39 @@ context's error, never `ErrTimeout` (`internal/execx/real.go:257-258#"never ErrT
 distinguish it from `ErrNotAllowed`, which means "refused" and must produce
 an error result, never a skip (`internal/execx/execx.go:26-27#"ErrNotAllowed"`;
 the skip rule is the package comment of `internal/probes/probes.go`).
+
+**Stream is Run's sibling for a program that does not end.** `Streamer`
+(`internal/execx/execx.go:94#"type Streamer interface"`) hands the caller a
+long-lived program's stdout line by line, on the caller's goroutine, while
+`Run` and `Runner` stay as they were. `Real.Stream` goes through the same
+`resolve` as `Run`, so the allowlist, the trusted directories and the typed
+errors are identical (`internal/execx/stream.go:55#"r.resolve(argv[0])"`),
+and it uses the same minimal environment, its own pipes and the same
+process-group setup (`internal/execx/stream.go:84#"configureKill(cmd)"`). It
+is not a way around the allowlist: a program that is not in the table cannot
+be streamed either. What differs is the bound. There is no default timeout,
+because a follow stream is meant to run until the caller cancels it; a total
+`Timeout` (`ErrTimeout`) and an `IdleTimeout` (`ErrIdleTimeout`) exist but
+only when asked for (`internal/execx/execx.go:114#"IdleTimeout, when positive"`).
+Memory is bounded per line, not per run: a line longer than `MaxLine`
+(`DefaultMaxLine`, 64 KiB) is never delivered, not even cut, it is dropped and
+counted in `StreamResult.DroppedLines` and the stream goes on
+(`internal/execx/stream.go:274#"if len(acc)+len(data) > max"`). stderr is
+drained concurrently into a buffer capped like `Run`'s output, so a chatty
+child cannot block on a full pipe
+(`internal/execx/stream.go:112#"errC := startCopy(errR, &stderr)"`).
+The stream ends, and the process group is SIGKILLed on every path, when the
+context ends (the context's error is returned, never `ErrTimeout`), when the
+callback returns an error (that error is returned), on an opt-in timeout, and
+after the program exited by itself
+(`internal/execx/stream.go:104#"terminate := func() {"`); no goroutine started
+by `Stream` outlives the call. The grace period for a leftover child holding
+stdout is the same variable as `Run`'s, and the signal is the same: a stream
+whose pipes had to be cut sets `StreamResult.IOIncomplete`, and after a
+successful exit also returns `ErrIOTimeout`
+(`internal/execx/stream.go:169#"grace = time.NewTimer(waitDelay)"`). Callers
+of a stream that ended by an error other than their own must treat the lines
+they got as a prefix, not as a complete log. Nothing in the engine or the
+probes streams yet: the check allowlist from `engine.Programs` is untouched,
+and a streamed program such as `journalctl` joins a runner only by being
+named in the allowlist of the runner that streams it.
