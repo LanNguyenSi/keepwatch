@@ -54,6 +54,31 @@ report.
   entries are examined per pass, with a flag when there are more (while it is
   set, order is kept among the examined entries only). Leftover temporary files
   are swept by age, and those dated ahead of the clock are swept at once.
+- An audit log for the daemon: an append-only file in the state directory in
+  which every record carries the SHA-256 of its own canonical bytes and of the
+  record before it, synced to disk on every append, with a size limit at which
+  it refuses to write; ordinary records stop a little earlier, so that one
+  last record (a stop or an error) and the recovery record still fit. Opening
+  the log reads only its end, so a log of any size opens in constant memory.
+  Whatever a crash left after the last intact record, also a crash while the
+  log was being recovered, is kept as it is and accounted for by one recovery
+  record that names its offset, length and hash, and only the log's own open
+  can write that record. The reader checks the whole chain from the first
+  record (content, order, links), refuses what the writer could not have
+  stored, notices a recovery record whose torn region was cut out of the log,
+  and can filter records by kind, incident and time. It does not notice a log
+  that was cut off at its end, and anyone who can write the file can rewrite
+  all of it consistently; both limits are documented.
+- Rules for the daemon that turn journal events into signals: an ssh brute
+  force rule (failed and invalid-user logins, plus refused pre-auth
+  connections, per source address or IPv6 /64), a restart loop rule (systemd
+  automatic restarts per unit) and an OOM kill rule (kernel and systemd lines,
+  by unit where the unit is known, otherwise by command name). They count only
+  lines whose sender journald vouches for (sshd as root in the ssh unit, PID
+  1, the kernel), so a local user cannot inject lines, and a name a user can
+  choose inside a genuine line (a cgroup name, a command name, an ssh user
+  name) does not decide which unit or address a signal names. They keep a
+  capped amount of state per rule.
 - Streaming execution for long-running commands such as `journalctl --follow`:
   stdout is delivered line by line to a callback with a per-line cap, an idle
   and a total timeout, and cancellation; after the program exits, its pipe
