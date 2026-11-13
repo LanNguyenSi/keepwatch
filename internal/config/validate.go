@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -29,7 +30,7 @@ type validator struct {
 
 func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt options) (*Config, Errors) {
 	v := &validator{origins: origins, main: main, ownerOf: opt.ownerOf}
-	cfg := &Config{StateDir: DefaultStateDir, ownerOf: opt.ownerOf}
+	cfg := &Config{StateDir: DefaultStateDir, Watch: defaultWatch(), ownerOf: opt.ownerOf}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		k, val := root.Content[i], root.Content[i+1]
 		switch k.Value {
@@ -55,6 +56,8 @@ func validate(root *yaml.Node, origins map[*yaml.Node]string, main string, opt o
 			cfg.Notify = v.notify(val)
 		case "redact":
 			cfg.Redact = v.redact(val)
+		case "watch":
+			cfg.Watch = v.watch(val)
 		default:
 			v.fail(k, "unknown key "+strconv.Quote(k.Value))
 		}
@@ -581,6 +584,218 @@ func (v *validator) ntfyURL(n *yaml.Node, raw string) {
 	if err := notify.ValidateURL(raw); err != nil {
 		v.fail(n, err.Error())
 	}
+}
+
+// Defaults of the watch section, the parameters the watch rules use
+// when a key is absent. docs/configuration.md lists every key with its
+// default and range.
+const (
+	watchDefaultLearningPeriod       = 7 * 24 * time.Hour
+	watchDefaultBruteforceThreshold  = 5
+	watchDefaultBruteforceWindow     = 10 * time.Minute
+	watchDefaultRestartLoopThreshold = 3
+	watchDefaultRestartLoopWindow    = 15 * time.Minute
+	watchDefaultNotifyQueue          = 100
+	watchDefaultNotifyPerIncident    = time.Hour
+	watchDefaultNotifyGlobalPerMin   = 6
+)
+
+// Ranges of the watch section: every duration is at least the minimum
+// of its key (watchMinWindow for the rule windows,
+// watchMinLearningPeriod for learning_period, watchMinPerIncident for
+// per_incident_interval) and at most watchMaxDuration; queue is 1 to
+// watchMaxQueue, global_per_minute 1 to watchMaxPerMinute and
+// thresholds 1 to watchMaxThreshold.
+const (
+	watchMaxDuration       = 720 * time.Hour // 30 days
+	watchMaxQueue          = 1000
+	watchMaxPerMinute      = 60
+	watchMaxThreshold      = 10000
+	watchMinWindow         = time.Second
+	watchMinLearningPeriod = time.Hour
+	watchMinPerIncident    = time.Minute
+)
+
+// defaultWatch is the watch section of a configuration that does not
+// mention it, or that nulls the section or one of its nested mappings.
+func defaultWatch() Watch {
+	return Watch{
+		LearningPeriod: watchDefaultLearningPeriod,
+		SSHBruteforce:  WatchRule{Threshold: watchDefaultBruteforceThreshold, Window: watchDefaultBruteforceWindow},
+		RestartLoop:    WatchRule{Threshold: watchDefaultRestartLoopThreshold, Window: watchDefaultRestartLoopWindow},
+		Notify: WatchNotify{
+			Queue:               watchDefaultNotifyQueue,
+			PerIncidentInterval: watchDefaultNotifyPerIncident,
+			GlobalPerMinute:     watchDefaultNotifyGlobalPerMin,
+		},
+	}
+}
+
+func (v *validator) watch(n *yaml.Node) Watch {
+	w := defaultWatch()
+	if isNull(n) { // a null section counts as absent
+		return w
+	}
+	if !isMapping(n) {
+		v.fail(n, "watch: expected a mapping")
+		return w
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, val := n.Content[i], n.Content[i+1]
+		switch k.Value {
+		case "enabled":
+			if b, present, ok := v.boolVal(val, "watch.enabled"); ok && present {
+				w.Enabled = b
+			}
+		case "learning_period":
+			v.watchDuration(val, "watch.learning_period", watchMinLearningPeriod, &w.LearningPeriod)
+		case "ssh_bruteforce":
+			if isNull(val) { // a null rule counts as absent: its defaults stay
+				continue
+			}
+			v.watchRule(val, "watch.ssh_bruteforce", &w.SSHBruteforce)
+		case "restart_loop":
+			if isNull(val) { // a null rule counts as absent: its defaults stay
+				continue
+			}
+			v.watchRule(val, "watch.restart_loop", &w.RestartLoop)
+		case "notify":
+			if isNull(val) { // a null section counts as absent: its defaults stay
+				continue
+			}
+			v.watchNotify(val, &w.Notify)
+		default:
+			v.fail(k, "watch: unknown key "+strconv.Quote(k.Value))
+		}
+	}
+	return w
+}
+
+// watchRule validates one threshold/window rule mapping; *r holds the
+// rule's defaults, which stay for keys that are absent or null.
+func (v *validator) watchRule(n *yaml.Node, name string, r *WatchRule) {
+	if !isMapping(n) {
+		v.fail(n, name+": expected a mapping")
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, val := n.Content[i], n.Content[i+1]
+		switch k.Value {
+		case "threshold":
+			if t, present, ok := v.intVal(val, name+".threshold"); ok && present {
+				if t < 1 || t > watchMaxThreshold {
+					v.fail(val, name+".threshold: must be between 1 and "+strconv.Itoa(watchMaxThreshold)+", got "+strconv.Itoa(t))
+				} else {
+					r.Threshold = t
+				}
+			}
+		case "window":
+			v.watchDuration(val, name+".window", watchMinWindow, &r.Window)
+		default:
+			v.fail(k, name+": unknown key "+strconv.Quote(k.Value))
+		}
+	}
+}
+
+// watchNotify validates the watch notify mapping; *q holds its defaults.
+func (v *validator) watchNotify(n *yaml.Node, q *WatchNotify) {
+	if !isMapping(n) {
+		v.fail(n, "watch.notify: expected a mapping")
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, val := n.Content[i], n.Content[i+1]
+		switch k.Value {
+		case "queue":
+			if x, present, ok := v.intVal(val, "watch.notify.queue"); ok && present {
+				if x < 1 || x > watchMaxQueue {
+					v.fail(val, "watch.notify.queue: must be between 1 and "+strconv.Itoa(watchMaxQueue)+", got "+strconv.Itoa(x))
+				} else {
+					q.Queue = x
+				}
+			}
+		case "per_incident_interval":
+			v.watchDuration(val, "watch.notify.per_incident_interval", watchMinPerIncident, &q.PerIncidentInterval)
+		case "global_per_minute":
+			if x, present, ok := v.intVal(val, "watch.notify.global_per_minute"); ok && present {
+				if x < 1 || x > watchMaxPerMinute {
+					v.fail(val, "watch.notify.global_per_minute: must be between 1 and "+strconv.Itoa(watchMaxPerMinute)+", got "+strconv.Itoa(x))
+				} else {
+					q.GlobalPerMinute = x
+				}
+			}
+		default:
+			v.fail(k, "watch.notify: unknown key "+strconv.Quote(k.Value))
+		}
+	}
+}
+
+// watchDurationFormat is the format sentence of the duration errors:
+// the grammar of parseWatchDuration, in one sentence.
+const watchDurationFormat = "want one number (no leading zeros, at most 5 digits) and one unit (s, m, h or d), for example 90m, 2h or 7d"
+
+// watchDuration validates one duration and stores it when it is in
+// range (at least min and at most watchMaxDuration). A null counts as
+// absent and leaves the current value.
+func (v *validator) watchDuration(n *yaml.Node, path string, min time.Duration, dst *time.Duration) {
+	if !isScalar(n) {
+		v.fail(n, path+": expected a duration: "+watchDurationFormat)
+		return
+	}
+	switch n.ShortTag() {
+	case "!!null":
+		return // absent: the current value stays
+	case "!!str":
+	default:
+		v.fail(n, path+": expected a duration: "+watchDurationFormat)
+		return
+	}
+	d, err := parseWatchDuration(n.Value)
+	if err != nil {
+		v.fail(n, path+": "+strconv.Quote(n.Value)+" is not a duration: "+watchDurationFormat)
+		return
+	}
+	if d < min || d > watchMaxDuration {
+		v.fail(n, path+": must be between "+min.String()+" and "+watchMaxDuration.String()+", got "+d.String())
+		return
+	}
+	*dst = d
+}
+
+// parseWatchDuration parses a watch duration with the grammar of
+// install.ParseInterval (that package is not imported here, to keep the
+// dependency one-way): one positive number without leading zeros, at
+// most five digits, and exactly one unit (s, m, h or d), lower case,
+// nothing else: no spaces, no sign, no fraction, no second unit. At
+// most five digits, so no conversion overflows; the range check is the
+// caller's.
+func parseWatchDuration(s string) (time.Duration, error) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	num, unit := s[:i], s[i:]
+	if num == "" || len(num) > 5 || num[0] == '0' {
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	var scale time.Duration
+	switch unit {
+	case "s":
+		scale = time.Second
+	case "m":
+		scale = time.Minute
+	case "h":
+		scale = time.Hour
+	case "d":
+		scale = 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("%q is not a duration", s)
+	}
+	return time.Duration(n) * scale, nil
 }
 
 // checkTokenFile validates the token file's existence, type, size,
