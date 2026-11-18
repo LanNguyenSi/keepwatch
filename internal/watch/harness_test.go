@@ -232,7 +232,14 @@ func (r *running) wait(t *testing.T) error {
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	waitForWithin(t, 10*time.Second, what, cond)
+}
+
+// waitForWithin is waitFor with its own deadline, for a test whose work takes
+// long under the race detector on a busy machine.
+func waitForWithin(t *testing.T, limit time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

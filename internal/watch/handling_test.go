@@ -258,10 +258,11 @@ func TestRetryBookkeepingStaysWithinTheBoundInsideOneGap(t *testing.T) {
 }
 
 func TestAlertParamsTakeTheLimitsFromTheOptions(t *testing.T) {
-	if got := (Options{}).AlertParams(8, time.Second); got.PerIncidentInterval != time.Hour || got.QueueSize != 8 || got.GlobalPerMinute != DefaultGlobalPerMinute || got.SendTimeout != time.Second {
+	// The worker's global limit is the daemon's plus the room for its notices.
+	if got := (Options{}).AlertParams(8, time.Second); got.PerIncidentInterval != time.Hour || got.QueueSize != 8 || got.GlobalPerMinute != DefaultGlobalPerMinute+maxNotices || got.SendTimeout != time.Second {
 		t.Fatalf("params = %+v", got)
 	}
-	if got := (Options{PerIncidentInterval: 5 * time.Minute, GlobalPerMinute: 3}).AlertParams(1, 0); got.PerIncidentInterval != 5*time.Minute || got.GlobalPerMinute != 3 {
+	if got := (Options{PerIncidentInterval: 5 * time.Minute, GlobalPerMinute: 3}).AlertParams(1, 0); got.PerIncidentInterval != 5*time.Minute || got.GlobalPerMinute != 3+maxNotices {
 		t.Fatalf("params = %+v", got)
 	}
 }

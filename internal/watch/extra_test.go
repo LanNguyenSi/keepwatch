@@ -154,6 +154,17 @@ func TestNewChecksDeps(t *testing.T) {
 			t.Errorf("New without %s succeeded", name)
 		}
 	}
+	for name, opt := range map[string]Options{
+		"a negative GlobalPerMinute": {GlobalPerMinute: -1},
+		"a negative AuditBudget":     {AuditBudget: -1},
+	} {
+		if _, err := New(good, opt); err == nil {
+			t.Errorf("New with %s succeeded", name)
+		}
+	}
+	if _, err := New(good, Options{GlobalPerMinute: 1, AuditBudget: 1}); err != nil {
+		t.Errorf("New with the smallest limits: %v", err)
+	}
 	d := good
 	d.Clock = nil
 	if dm, err := New(d, Options{}); err != nil || dm.deps.Clock == nil {

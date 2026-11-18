@@ -53,11 +53,13 @@ func (d *Daemon) resultLoop(done chan<- struct{}) {
 	defer close(done)
 	for r := range d.results {
 		d.mu.Lock()
-		err := d.handleResult(r)
-		d.mu.Unlock()
-		if err != nil {
+		// The failure is recorded before the lock is released, so the drain at
+		// shutdown, which waits for this result under the lock, cannot go on
+		// without seeing it.
+		if err := d.handleResult(r); err != nil {
 			d.fail(err)
 		}
+		d.mu.Unlock()
 	}
 }
 
@@ -125,15 +127,18 @@ func (d *Daemon) enqueue(j alert.Job) alert.DropReason {
 	if reason == alert.NotDropped {
 		d.inflight[j.Fingerprint]++
 		d.inflightTotal++
-		d.attempts = append(d.attempts, d.now())
 	}
 	return reason
 }
 
-// attemptsLastMinute is how many jobs the worker accepted in the last minute.
-// The worker gives the slot of its global limit back when a send fails, so
-// its limit does not bound attempts against a notifier that keeps failing;
-// this count does.
+// attemptsLastMinute is how many incident notifications the worker accepted
+// in the last minute. The worker gives the slot of its global limit back when
+// a send fails, so its limit does not bound attempts against a notifier that
+// keeps failing; this count does. Daemon notices are not counted: they are
+// sent again on every pass until one was sent, and would otherwise use up
+// the limit of the incidents. Only notifyIncident adds to the list, after it
+// dropped the expired entries and found fewer than GlobalPerMinute, so the
+// list never holds more than GlobalPerMinute entries.
 func (d *Daemon) attemptsLastMinute() int {
 	cut := d.now().Add(-time.Minute)
 	kept := d.attempts[:0]
@@ -148,7 +153,7 @@ func (d *Daemon) attemptsLastMinute() int {
 
 // noticeWaiting reports whether a daemon notice waits to be sent. Notices go
 // first: while one waits, no incident notification is handed to the worker,
-// so incidents cannot take the slots of the global limit it needs.
+// so incidents cannot take the place in the queue it needs.
 func (d *Daemon) noticeWaiting() bool {
 	for fp := range d.notices {
 		if d.inflight[fp] == 0 {
@@ -194,7 +199,9 @@ func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error
 		st := d.tries[fp]
 		st.notBefore = now.Add(d.gap(st.failures))
 		d.setTry(fp, st)
-		reason = d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)})
+		if reason = d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)}); reason == alert.NotDropped {
+			d.attempts = append(d.attempts, now)
+		}
 	} else if err := d.noise("notify_dropped:"+string(alert.DropGlobal), audit.NotifyDropped, "notification dropped: "+string(alert.DropGlobal)); err != nil {
 		return false, err
 	}
@@ -261,6 +268,11 @@ func (d *Daemon) noticeSent(fp string) {
 // the bound is never reached in practice.
 const maxNotices = 8
 
+// noticeFingerprint is the fingerprint of the daemon notice of key.
+func noticeFingerprint(key string) string {
+	return string(event.FingerprintOf("daemon", key))
+}
+
 // alertEvent notifies a security-relevant event of the daemon itself (not an
 // incident), at high priority. The notice stays pending until it was sent:
 // every housekeeping pass sends it again while it is not in flight, so a
@@ -271,7 +283,7 @@ func (d *Daemon) alertEvent(key, title, body string) {
 	if d.deps.Worker == nil {
 		return
 	}
-	fp := string(event.FingerprintOf("daemon", key))
+	fp := noticeFingerprint(key)
 	if _, ok := d.notices[fp]; !ok && len(d.notices) >= maxNotices {
 		return
 	}
@@ -282,14 +294,18 @@ func (d *Daemon) alertEvent(key, title, body string) {
 	}
 }
 
-func (d *Daemon) sendNotice(fp string) {
+// sendNotice hands the pending notice of fp to the worker and reports whether
+// the worker accepted it.
+func (d *Daemon) sendNotice(fp string) bool {
 	n := d.notices[fp]
-	if d.enqueue(alert.Job{Fingerprint: fp, Msg: notify.Message{
+	reason := d.enqueue(alert.Job{Fingerprint: fp, Msg: notify.Message{
 		Title: n.title, Body: n.body,
 		Priority: notify.PriorityOf(result.High), Tags: []string{"keepwatch", string(result.High)},
-	}}) == alert.DropIncident {
+	}})
+	if reason == alert.DropIncident {
 		delete(d.notices, fp)
 	}
+	return reason == alert.NotDropped
 }
 
 // reconcileNotifications sends the daemon notices that are not in flight,

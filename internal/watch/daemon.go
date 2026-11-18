@@ -51,8 +51,9 @@
 //     incident whose notification the worker accepted is written even over
 //     the budget, so nothing is sent for an incident the log does not
 //     mention; such records are bounded by GlobalPerMinute, which the daemon
-//     counts itself (sent or failed), as the worker gives a slot back when a
-//     send fails. An incident is marked as mentioned only when its record was
+//     counts itself for incident notifications (sent or failed), as the
+//     worker gives a slot back when a send fails. An incident is marked as
+//     mentioned only when its record was
 //     written, so the takeover record covers the ones over the budget.
 //     The incident store is unchanged; only the audit volume is bounded.
 //     Worst case per NoiseInterval (1m) at the defaults, with R = 4 rules,
@@ -78,9 +79,13 @@
 //     stop records of a process. The daemon sends one high-priority notice
 //     when the log passes 80 % of its limit (once per process) and one when
 //     it stops because the log is full, from whichever step found it full
-//     (a line, a stream end, the flush at shutdown); the second is queued
-//     before the terminal record is written into the reserve and before the
-//     worker is stopped, and is sent within DrainTimeout.
+//     (a line, a stream end, the flush at shutdown); the second is handed to
+//     the worker before the terminal record is written into the reserve and
+//     before the worker is stopped. While the worker's queue is full it is
+//     handed on again, for at most DrainTimeout, and the worker's global
+//     limit has room for it (see Notifications). It is still lost when its
+//     one send fails or the queue does not clear within DrainTimeout; the
+//     terminal record says why the daemon stopped either way.
 //   - Audit start: Run does not verify the chain. Open resumes from the last
 //     intact record, and a full verification would read up to the whole log on
 //     every start of a restart loop; `keepwatch audit verify` and doctor are
@@ -103,8 +108,14 @@
 //     entries of all its files from one counter, so a seqnum (i=) that is
 //     not the saved one plus one is audited as journal_gap (no
 //     notification). The seqnum id (s=) alone says nothing, as each journal
-//     file (system, each user) has its own; with a changed one and a seqnum
-//     that does not follow, the record says the journal was replaced. After
+//     file (system, each user) has its own. The record counts missing
+//     entries only for the same seqnum id with a seqnum further ahead. In
+//     every other case it says that the seqnum does not follow the saved
+//     cursor and that entries may be missing or the journal files were
+//     replaced, because the daemon cannot tell: journald of systemd 249
+//     starts its files with a new seqnum id and a seqnum of 1 after it was
+//     killed, without losing an entry, so on such a host a journal_gap
+//     record after a journald crash is no proof of a loss. After
 //     MaxRestarts consecutive failures without progress, or when journalctl
 //     cannot be started at all, Run returns an error, so the process exits
 //     non-zero and the service manager restarts it. Run returns nil only
@@ -123,7 +134,13 @@
 //     sent; every housekeeping pass sends the ones not in flight. They go
 //     first: while one waits to be sent, no incident notification is handed
 //     to the worker (those stay unnotified for the housekeeping retry), so
-//     incidents cannot take the slots of the global limit a notice needs.
+//     incidents cannot take the place in the queue a notice needs. Notices
+//     are not counted against GlobalPerMinute, so one that keeps failing
+//     cannot use up the limit of the incidents; their own bound is
+//     maxNotices per pass. The worker's global limit is GlobalPerMinute +
+//     maxNotices (AlertParams): incident notifications hold at most
+//     GlobalPerMinute of its slots, and each notice key at most one, as
+//     long as PerIncidentInterval is at least a minute.
 //   - Cursor saves are throttled: a line that produced a signal saves at once,
 //     other lines at most once per CursorInterval, and the stream end, the
 //     housekeeping pass and the shutdown save what is pending.
@@ -224,11 +241,12 @@ type Options struct {
 	// counted into one record per rule and interval. Zero selects
 	// DefaultAuditBudget.
 	AuditBudget int
-	// GlobalPerMinute is how many notification jobs the worker may accept per
-	// minute, sent or failed. The worker has the same limit but gives a slot
-	// back when a send fails, so the daemon keeps its own count; the wiring
-	// sets it once here and builds the worker's Params with AlertParams. Zero
-	// selects DefaultGlobalPerMinute.
+	// GlobalPerMinute is how many incident notifications the worker may accept
+	// per minute, sent or failed. The worker has a limit of its own but gives
+	// a slot back when a send fails, so the daemon keeps its own count; the
+	// wiring sets it once here and builds the worker's Params with
+	// AlertParams. Zero selects DefaultGlobalPerMinute; New refuses a negative
+	// value, and a negative AuditBudget.
 	GlobalPerMinute int
 	// TempAge and TempSweepInterval govern the sweep of stale temporary
 	// request files.
@@ -277,12 +295,16 @@ func (o Options) withDefaults() Options {
 }
 
 // AlertParams returns the worker parameters whose per-incident interval and
-// global limit are the daemon's, so both are set in one place.
+// global limit follow the daemon's, so both are set in one place. The
+// worker's global limit is GlobalPerMinute + maxNotices: the daemon itself
+// keeps incident notifications at GlobalPerMinute, and the rest is room for
+// its own notices, so a notice (the stop notice above all) is not dropped
+// because incident notifications used the limit up.
 func (o Options) AlertParams(queueSize int, sendTimeout time.Duration) alert.Params {
 	o = o.withDefaults()
 	return alert.Params{
 		QueueSize: queueSize, PerIncidentInterval: o.PerIncidentInterval,
-		GlobalPerMinute: o.GlobalPerMinute, SendTimeout: sendTimeout,
+		GlobalPerMinute: o.GlobalPerMinute + maxNotices, SendTimeout: sendTimeout,
 	}
 }
 
@@ -349,6 +371,9 @@ func New(deps Deps, opt Options) (*Daemon, error) {
 		return nil, errors.New("watch: no audit writer")
 	case deps.Cursor == nil:
 		return nil, errors.New("watch: no cursor store")
+	}
+	if opt.GlobalPerMinute < 0 || opt.AuditBudget < 0 {
+		return nil, errors.New("watch: GlobalPerMinute and AuditBudget must not be negative")
 	}
 	if deps.Clock == nil {
 		deps.Clock = time.Now
@@ -419,7 +444,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.mu.Unlock()
 	var loopErr error
 	if err != nil {
-		d.fail(err)
 		loopErr = err
 		close(hkDone)
 	} else {
@@ -432,9 +456,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Shutdown: a clean stop lets queued notifications finish, then the
 	// pending cursor and counts are written. A stop because the audit log is
-	// full, found by any step (a line, a stream end, the flush here), sends
-	// one notice before the worker is stopped. Each wait is bounded by
-	// DrainTimeout.
+	// full, found by any step (a line, a stream end, the flush here), hands
+	// one notice to the worker before the worker is stopped. Each wait is
+	// bounded by DrainTimeout.
 	stopErr := d.failure()
 	if stopErr == nil {
 		stopErr = loopErr
@@ -443,8 +467,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.drain()
 	}
 	stopErr = d.flushAtStop(stopErr)
-	if d.stopNotice(stopErr) {
-		d.drain()
+	if errors.Is(stopErr, ErrAuditFull) {
+		d.deliverStopNotice()
 	}
 	workerCancel()
 	<-workerDone
@@ -471,18 +495,37 @@ func (d *Daemon) flushAtStop(err error) error {
 	return err
 }
 
-// stopNotice queues the notice of a stop because the audit log is full and
-// reports whether it did. The terminal record is written after it, into the
-// log's reserve.
-func (d *Daemon) stopNotice(err error) bool {
-	if !errors.Is(err, ErrAuditFull) {
-		return false
-	}
+// stopNoticeKey is the key of the notice of a stop because the audit log is
+// full.
+const stopNoticeKey = "audit_full"
+
+// deliverStopNotice hands the notice of a stop because the audit log is full
+// to the worker and waits until nothing is in flight, at most DrainTimeout.
+// While the worker has not accepted the notice (its queue is full) it is
+// handed on again. A notice the worker accepted is not handed on a second
+// time, whatever became of its send. The terminal record is written after
+// this, into the log's reserve.
+func (d *Daemon) deliverStopNotice() {
+	fp := noticeFingerprint(stopNoticeKey)
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.alertEvent("audit_full", "keepwatch: audit log is full, the watch daemon stopped",
+	d.alertEvent(stopNoticeKey, "keepwatch: audit log is full, the watch daemon stopped",
 		"The audit log reached its size limit and the watch daemon stopped, because it does not run without auditing. Move the log aside as described in the audit documentation and start the daemon again.")
-	return true
+	accepted := d.inflight[fp] > 0
+	d.mu.Unlock()
+	deadline := time.Now().Add(d.opt.DrainTimeout)
+	for {
+		d.mu.Lock()
+		_, pending := d.notices[fp]
+		if pending && !accepted {
+			accepted = d.sendNotice(fp)
+		}
+		waiting := d.inflightTotal > 0 || (pending && !accepted)
+		d.mu.Unlock()
+		if !waiting || !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // drain waits until no notification is in flight, but at most DrainTimeout.

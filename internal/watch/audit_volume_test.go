@@ -202,16 +202,20 @@ func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 			}
 		}, oomPid(next(), at, 9000+i, "worker"))
 		items = append(items, func() {
-			waitFor(t, "no job in flight", func() bool { h.d.mu.Lock(); defer h.d.mu.Unlock(); return h.d.inflightTotal == 0 })
+			waitForWithin(t, time.Minute, "no job in flight", func() bool { h.d.mu.Lock(); defer h.d.mu.Unlock(); return h.d.inflightTotal == 0 })
 			h.clk.add(time.Minute)
 			housekeepOnce(t, h)
-			waitFor(t, "no job in flight", func() bool { h.d.mu.Lock(); defer h.d.mu.Unlock(); return h.d.inflightTotal == 0 })
+			waitForWithin(t, time.Minute, "no job in flight", func() bool { h.d.mu.Lock(); defer h.d.mu.Unlock(); return h.d.inflightTotal == 0 })
 		})
 	}
 	h.steps(items...)
-	if err := h.runUntil("flood", func() bool {
+	// The flood rewrites a full incident store for every signal, which takes
+	// longer than the usual wait under the race detector on a busy machine.
+	r := h.start()
+	waitForWithin(t, 2*time.Minute, "flood", func() bool {
 		return h.savedCursor() == cur(itoa(int64(n))) && h.clk.now().Equal(t0.Add(intervals*time.Minute))
-	}); err != nil {
+	})
+	if err := r.stop(t); err != nil {
 		t.Fatal(err)
 	}
 	bytes := map[int]int{}
@@ -536,5 +540,69 @@ func TestTakeoverRecordsAreBudgeted(t *testing.T) {
 	}
 	if n < DefaultAuditBudget || n > DefaultAuditBudget+g {
 		t.Fatalf("takeover records = %d, want between %d and %d", n, DefaultAuditBudget, DefaultAuditBudget+g)
+	}
+}
+
+// A limited update does not use up the budget of its rule: after a flood of
+// updates of one incident, new incidents of the same rule still get their
+// open records.
+func TestLimitedUpdatesLeaveTheRuleBudget(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	var items []any
+	n := 0
+	next := func() string { n++; return cur(itoa(int64(n))) }
+	for i := 0; i < 3*DefaultAuditBudget; i++ {
+		items = append(items, oomPid(next(), t0, 100+i, "worker"))
+	}
+	const fresh = DefaultAuditBudget - 2
+	for i := 0; i < fresh; i++ {
+		items = append(items, oomPid(next(), t0, 500+i, fmt.Sprintf("other%d", i)))
+	}
+	h.steps(items...)
+	if err := h.runUntil("flood", func() bool { return h.savedCursor() == cur(itoa(int64(n))) }); err != nil {
+		t.Fatal(err)
+	}
+	opens, updates := 0, 0
+	for _, r := range h.records() {
+		switch {
+		case r.IncidentID == "":
+		case r.Kind == audit.IncidentOpen:
+			opens++
+		case r.Kind == audit.IncidentUpdate:
+			updates++
+		}
+	}
+	// The flooded incident has its open and its one update of the interval;
+	// the rest of the budget went to the new incidents, not to the updates
+	// the limit kept out.
+	if opens != 1+fresh || updates != 1 {
+		t.Fatalf("opens = %d, updates = %d, want %d and 1: %v", opens, updates, 1+fresh, h.kinds())
+	}
+}
+
+// The closes one signal causes share the budget of the signal's rule: an
+// Apply that closes more idle incidents than the budget allows writes the
+// budget and counts the rest.
+func TestAutoClosesOfOneSignalShareTheRuleBudget(t *testing.T) {
+	const idle = DefaultAuditBudget + 5
+	h := newHarness(t, hopts{noWorker: true, store: []incident.Option{incident.WithIdleClose(time.Hour)}, setup: func(h *harness) {
+		writeIncidents(t, h, idle, result.Low, t0.Add(-2*time.Hour))
+	}})
+	h.steps(sshLine(cur("1"), t0, "203.0.113.9"))
+	if err := h.runUntil("line", func() bool { return h.savedCursor() == cur("1") }); err != nil {
+		t.Fatal(err)
+	}
+	closes, counted := 0, false
+	for _, r := range h.records() {
+		if r.Kind == audit.IncidentClose {
+			closes++
+		}
+		// The closes over the budget and the open record of the signal itself.
+		if strings.HasPrefix(r.Summary, itoa(int64(idle-DefaultAuditBudget+1))+" more within") {
+			counted = true
+		}
+	}
+	if closes != DefaultAuditBudget || !counted {
+		t.Fatalf("close records = %d, counted = %v: %v", closes, counted, h.kinds())
 	}
 }

@@ -143,9 +143,13 @@ func seqFields(cursor string) (id string, seq uint64, ok bool) {
 // counter, so the seqnum (i=) of the first line is the saved one plus one.
 // The seqnum id (s=) may differ even then: each journal file (the system
 // file, each user's file) has its own. So only a seqnum that does not follow
-// is a gap: with the same seqnum id, the entries in between are missing
-// (vacuumed or deleted); with another one, the journal was replaced. It
-// returns "" when there is no gap or a cursor does not parse.
+// is reported. The record claims a loss only for the same seqnum id with a
+// seqnum further ahead: the entries in between are missing (vacuumed or
+// deleted). In every other case it says only what is known, that the seqnum
+// does not follow: journald of systemd 249 starts its files with a new
+// seqnum id and a seqnum of 1 after it was killed, with no entry lost, and a
+// replaced journal looks the same. It returns "" when the seqnum follows or
+// a cursor does not parse.
 func journalGap(saved, first string) string {
 	sid, sseq, ok1 := seqFields(saved)
 	fid, fseq, ok2 := seqFields(first)
@@ -154,16 +158,18 @@ func journalGap(saved, first string) string {
 		return ""
 	case fseq == sseq+1:
 		return ""
-	case sid != fid:
-		return "the journal's seqnum id changed and its seqnum does not follow the saved cursor, so it was replaced and its older entries are gone"
-	case fseq > sseq+1:
+	case sid == fid && fseq > sseq+1:
 		return fmt.Sprintf("%d journal entries between the saved cursor and the first line after the restart are missing", fseq-sseq-1)
 	}
-	return "the journal's seqnum does not follow the saved cursor, so entries may be missing"
+	return gapUnknown
 }
 
-// checkGap compares the first decoded line of a stream that resumed from a
-// saved cursor with that cursor, once per stream.
+// gapUnknown is the text of a gap record that cannot say what happened.
+const gapUnknown = "the journal's seqnum does not follow the saved cursor; entries may be missing or the journal files were replaced"
+
+// checkGap compares the cursor of the first line of a stream that resumed
+// from a saved cursor with that cursor, once per stream. The line may be one
+// that cannot be decoded, as long as it names a usable cursor (see badLine).
 func (d *Daemon) checkGap(first string) error {
 	saved := d.gapFrom
 	d.gapFrom = ""

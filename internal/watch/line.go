@@ -71,8 +71,15 @@ func (d *Daemon) handleLine(line []byte) error {
 }
 
 // badLine audits a line that cannot be used (rate limited) and moves the
-// cursor past it when it named one.
+// cursor past it when it named one. A bad line with a usable cursor is as
+// good a first line for the gap check as any other: without the check here,
+// the line after it would be compared and one entry reported missing.
 func (d *Daemon) badLine(err error, cursor string) error {
+	if cursor != "" {
+		if err := d.checkGap(cursor); err != nil {
+			return err
+		}
+	}
 	if err := d.noise("journal_line_invalid", audit.JournalLineInvalid, "journal line skipped: "+d.safe(err.Error())); err != nil {
 		return err
 	}

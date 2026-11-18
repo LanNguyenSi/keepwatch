@@ -38,11 +38,14 @@ func TestJournalGapAfterRestart(t *testing.T) {
 		{"one entry missing", curS("1", "5"), curS("1", "7"), "1 journal entries"},
 		{"hex numbers, one missing", curS("1", "a"), curS("1", "c"), "1 journal entries"},
 		{"many missing", curS("1", "13d"), curS("1", "146"), "8 journal entries"},
-		{"same entry", curS("1", "5"), curS("1", "5"), "does not follow"},
-		{"seqnum goes back", curS("1", "5"), curS("1", "2"), "does not follow"},
+		{"same entry", curS("1", "5"), curS("1", "5"), gapUnknown},
+		{"seqnum goes back", curS("1", "5"), curS("1", "2"), gapUnknown},
 		{"next entry in another journal file", curS("1", "5"), curS("2", "6"), ""},
-		{"journal replaced, seqnum starts over", curS("1", "5"), curS("2", "1"), "was replaced"},
-		{"journal replaced, seqnum ahead", curS("1", "5"), curS("2", "9"), "was replaced"},
+		// Another seqnum id: a replaced journal and journald of systemd 249
+		// after a kill look the same, so the record claims no loss.
+		{"another seqnum id, seqnum starts over", curS("1", "5"), curS("2", "1"), gapUnknown},
+		{"another seqnum id, seqnum ahead", curS("1", "5"), curS("2", "9"), gapUnknown},
+		{"another seqnum id, same seqnum", curS("1", "5"), curS("2", "5"), gapUnknown},
 		{"saved cursor without i", "s=1;b=2", curS("1", "9"), ""},
 		{"first cursor without s", curS("1", "5"), "i=9;b=2", ""},
 	}
@@ -65,6 +68,10 @@ func TestJournalGapAfterRestart(t *testing.T) {
 			}
 			if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 				t.Fatalf("journal_gap record = %q, want %q", got, c.want)
+			}
+			// Only a counted jump under the same seqnum id claims a loss.
+			if c.want == gapUnknown && (strings.Contains(got, "are missing") || strings.Contains(got, "gone")) {
+				t.Fatalf("journal_gap record = %q claims a loss it cannot know", got)
 			}
 			if len(h.notif.sent()) != 0 {
 				t.Fatal("a gap is audited, not notified")
@@ -153,5 +160,44 @@ func TestSleepErrorEndsTheLoopWithThatError(t *testing.T) {
 	}
 	if h.count(audit.DaemonStop) != 0 || h.count(audit.DaemonError) != 1 {
 		t.Fatalf("kinds = %v", h.kinds())
+	}
+}
+
+// The first line after a resume may be one that cannot be decoded. Its cursor
+// is compared like any other, so the line after it is not taken for the
+// first one (which would report one entry missing).
+func TestJournalGapIsCheckedOnABadFirstLine(t *testing.T) {
+	bad := func(c string) string { return jline(c, t0, map[string]string{"_PID": "x", "MESSAGE": "m"}) }
+	for name, c := range map[string]struct {
+		first string
+		want  string
+	}{
+		"the bad line follows the saved cursor":   {curS("1", "6"), ""},
+		"entries are missing before the bad line": {curS("1", "8"), "2 journal entries"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			saved := curS("1", "5")
+			h := newHarness(t, hopts{setup: func(h *harness) {
+				if err := h.cursor.Save(saved); err != nil {
+					t.Fatal(err)
+				}
+			}})
+			h.script(saved, fake.Script{Follow: true, Lines: []string{bad(c.first), plainLine(curS("1", "9"), t0)}})
+			if err := h.runUntil("lines", func() bool { return h.savedCursor() == curS("1", "9") }); err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range h.records() {
+				if r.Kind == KindJournalGap {
+					got = append(got, r.Summary)
+				}
+			}
+			if h.count(audit.JournalLineInvalid) != 1 {
+				t.Fatalf("the first line was not a bad line: %v", h.kinds())
+			}
+			if (c.want == "" && len(got) != 0) || (c.want != "" && (len(got) != 1 || !strings.Contains(got[0], c.want))) {
+				t.Fatalf("journal_gap records = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

@@ -369,9 +369,13 @@ func TestOneCleanCallSite(t *testing.T) {
 	}
 }
 
-// Incident records reach the audit log only through admit: no other call
-// names an incident kind, and writeSig, which writes them, is called only by
-// admit.
+// Incident records reach the audit log only through admit. writeSig, which
+// writes them, is called only by admit. Every other call of a writer of the
+// package names its kind as a constant that is not an incident kind, so a
+// kind in a variable cannot carry an incident kind past admit. The audit
+// writer itself is called by appendRecord and finish only. The calls that
+// hand a kind on (a wrapper passing its own parameter, and the count record
+// of a rule's window in allow) are listed by name.
 func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -379,9 +383,26 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	incidentKinds := map[string]bool{"IncidentOpen": true, "IncidentUpdate": true, "IncidentReopen": true, "IncidentClose": true}
-	writers := map[string]bool{"record": true, "appendRecord": true, "recordNoise": true, "noise": true, "noiseN": true}
+	// kindArg is the position of the kind argument of each writer.
+	kindArg := map[string]int{"record": 0, "appendRecord": 0, "recordNoise": 0, "noise": 1, "noiseN": 2, "take": 2}
+	// handsOn are the calls, as caller>callee, that pass a kind on.
+	handsOn := map[string]bool{
+		"writeSig>record": false, "record>appendRecord": false, "recordNoise>appendRecord": false,
+		"noise>noiseN": false, "noiseN>take": false, "noiseN>recordNoise": false, "flushOne>recordNoise": false,
+		"allow>take": false,
+	}
+	constKind := func(e ast.Expr) bool {
+		switch k := e.(type) {
+		case *ast.SelectorExpr:
+			x, ok := k.X.(*ast.Ident)
+			return ok && x.Name == "audit" && !incidentKinds[k.Sel.Name]
+		case *ast.Ident:
+			return k.Name == "KindJournalGap"
+		}
+		return false
+	}
 	var bad []string
-	writeSigCalls := 0
+	writeSigCalls, checked := 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -404,25 +425,43 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if sel.Sel.Name == "writeSig" {
+				pos, name := fset.Position(c.Pos()).String(), sel.Sel.Name
+				if name == "writeSig" {
 					writeSigCalls++
 					if fn.Name.Name != "admit" {
-						bad = append(bad, fset.Position(c.Pos()).String()+": writeSig outside admit")
+						bad = append(bad, pos+": writeSig outside admit")
 					}
 				}
-				if !writers[sel.Sel.Name] {
+				if x, ok := sel.X.(*ast.SelectorExpr); ok && name == "Append" && x.Sel.Name == "Audit" &&
+					fn.Name.Name != "appendRecord" && fn.Name.Name != "finish" {
+					bad = append(bad, pos+": Audit.Append outside appendRecord and finish")
+				}
+				i, ok := kindArg[name]
+				if !ok {
 					return true
 				}
-				for _, a := range c.Args {
-					if k, ok := a.(*ast.SelectorExpr); ok && incidentKinds[k.Sel.Name] {
-						bad = append(bad, fset.Position(c.Pos()).String()+": "+sel.Sel.Name+" with audit."+k.Sel.Name)
+				if edge := fn.Name.Name + ">" + name; !constKindCall(c, i, constKind) {
+					if _, listed := handsOn[edge]; !listed {
+						bad = append(bad, pos+": "+name+" in "+fn.Name.Name+" with a kind that is not a constant non-incident kind")
 					}
+					handsOn[edge] = true
+				} else {
+					checked++
 				}
 				return true
 			})
 		}
 	}
-	if len(bad) > 0 || writeSigCalls == 0 {
-		t.Fatalf("incident records outside admit: %v (writeSig calls %d)", bad, writeSigCalls)
+	for edge, seen := range handsOn {
+		if !seen {
+			bad = append(bad, "the listed call "+edge+" does not exist any more")
+		}
 	}
+	if len(bad) > 0 || writeSigCalls == 0 || checked == 0 {
+		t.Fatalf("incident records outside admit: %v (writeSig calls %d, writer calls with a constant kind %d)", bad, writeSigCalls, checked)
+	}
+}
+
+func constKindCall(c *ast.CallExpr, i int, constKind func(ast.Expr) bool) bool {
+	return i < len(c.Args) && constKind(c.Args[i])
 }
