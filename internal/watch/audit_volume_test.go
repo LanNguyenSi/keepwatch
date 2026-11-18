@@ -297,6 +297,10 @@ func TestSameFingerprintFloodWritesOneUpdatePerInterval(t *testing.T) {
 	var items []any
 	for i := 0; i < 30; i++ {
 		items = append(items, oomPid(cur(itoa(int64(i+1))), t0, 100+i, "worker"))
+		if i == 15 {
+			// A pass inside the interval does not lift the limit.
+			items = append(items, func() { housekeepOnce(t, h) })
+		}
 	}
 	items = append(items, func() { h.clk.add(time.Minute); housekeepOnce(t, h) })
 	for i := 30; i < 60; i++ {
@@ -322,6 +326,14 @@ func TestSameFingerprintFloodWritesOneUpdatePerInterval(t *testing.T) {
 	// One open and one update in the first interval, one update in the second.
 	if opens != 1 || updates[0] != 1 || updates[1] != 1 || len(updates) != 2 {
 		t.Fatalf("opens = %d, updates by minute = %v, kinds = %v", opens, updates, h.kinds())
+	}
+	// Update times that limit nothing any more are forgotten.
+	h.clk.add(2 * time.Minute)
+	housekeepOnce(t, h)
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	if n := len(h.d.updated); n != 0 {
+		t.Fatalf("update times kept = %d", n)
 	}
 }
 
