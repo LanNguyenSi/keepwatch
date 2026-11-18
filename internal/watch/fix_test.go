@@ -753,3 +753,44 @@ func TestAlertParamsTakeTheIntervalFromTheOptions(t *testing.T) {
 		t.Fatalf("params = %+v", got)
 	}
 }
+
+// The takeover record is written once per incident and process, also when the
+// notification fails and is retried.
+func TestTakeoverRecordIsWrittenOncePerIncident(t *testing.T) {
+	h := newHarness(t, hopts{setup: func(h *harness) { writeSeeds(t, h, []seed{{incident.StateOpen, true, false}}) }})
+	h.notif.fail = func(int) error { return errTransient }
+	h.script("", fake.Script{Follow: true})
+	r := h.start()
+	waitFor(t, "start", func() bool { return len(h.fs.Calls()) == 1 })
+	h.clk.add(3 * time.Hour)
+	housekeepOnce(t, h)
+	waitFor(t, "failed", func() bool { return h.count(audit.NotifyFailed) == 1 })
+	h.clk.add(3 * time.Hour)
+	housekeepOnce(t, h)
+	waitFor(t, "failed again", func() bool { return h.count(audit.NotifyFailed) == 2 })
+	if err := r.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, rec := range h.records() {
+		if rec.Kind == audit.IncidentUpdate {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("takeover records = %d, want 1", n)
+	}
+}
+
+// Pending daemon notices are bounded.
+func TestPendingNoticesAreBounded(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	for i := 0; i < maxNotices+5; i++ {
+		h.d.alertEvent("k"+itoa(int64(i)), "t", "b")
+	}
+	if n := len(h.d.notices); n != maxNotices {
+		t.Fatalf("pending notices = %d, want %d", n, maxNotices)
+	}
+}
