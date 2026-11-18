@@ -372,7 +372,7 @@ func TestRetryBookkeepingIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.d.notifyIncident(res.Incident, false); err != nil {
+	if _, err := h.d.notifyIncident(res.Incident, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(h.d.tries); n != 1 {

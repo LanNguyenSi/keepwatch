@@ -125,8 +125,37 @@ func (d *Daemon) enqueue(j alert.Job) alert.DropReason {
 	if reason == alert.NotDropped {
 		d.inflight[j.Fingerprint]++
 		d.inflightTotal++
+		d.attempts = append(d.attempts, d.now())
 	}
 	return reason
+}
+
+// attemptsLastMinute is how many jobs the worker accepted in the last minute.
+// The worker gives the slot of its global limit back when a send fails, so
+// its limit does not bound attempts against a notifier that keeps failing;
+// this count does.
+func (d *Daemon) attemptsLastMinute() int {
+	cut := d.now().Add(-time.Minute)
+	kept := d.attempts[:0]
+	for _, t := range d.attempts {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	d.attempts = kept
+	return len(kept)
+}
+
+// noticeWaiting reports whether a daemon notice waits to be sent. Notices go
+// first: while one waits, no incident notification is handed to the worker,
+// so incidents cannot take the slots of the global limit it needs.
+func (d *Daemon) noticeWaiting() bool {
+	for fp := range d.notices {
+		if d.inflight[fp] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) markNotified(id string, at time.Time) error {
@@ -137,37 +166,50 @@ func (d *Daemon) markNotified(id string, at time.Time) error {
 	return fmt.Errorf("watch: incident store: %w", err)
 }
 
-// notifyIncident hands the notification of in to the worker. A refused
-// signal (no stored incident) is sent under the per-fingerprint limit but
-// never marked. Without a notifier, and when a rate limit drops the send, the
-// incident counts as notified: the limit already decided there will be no
-// message for it now.
-func (d *Daemon) notifyIncident(in incident.Incident, refused bool) error {
+// notifyIncident hands the notification of in to the worker and reports
+// whether the worker accepted it. A refused signal (no stored incident) is
+// sent under the per-fingerprint limit but never marked. Without a notifier,
+// and when a rate limit drops the send, the incident counts as notified: the
+// limit already decided there will be no message for it now. While a daemon
+// notice waits, nothing is handed on and the incident stays unnotified for
+// the housekeeping retry.
+func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error) {
 	now := d.now()
 	fp := string(in.Fingerprint)
 	if d.deps.Worker == nil {
 		if refused {
-			return nil
+			return false, nil
 		}
-		return d.markNotified(in.ID, now)
+		return false, d.markNotified(in.ID, now)
+	}
+	if d.noticeWaiting() {
+		return false, nil
 	}
 	id := in.ID
 	if refused {
 		id = ""
 	}
-	st := d.tries[fp]
-	st.notBefore = now.Add(d.gap(st.failures))
-	d.setTry(fp, st)
-	switch d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)}) {
+	reason := alert.DropGlobal
+	if d.attemptsLastMinute() < d.opt.GlobalPerMinute {
+		st := d.tries[fp]
+		st.notBefore = now.Add(d.gap(st.failures))
+		d.setTry(fp, st)
+		reason = d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)})
+	} else if err := d.noise("notify_dropped:"+string(alert.DropGlobal), audit.NotifyDropped, "notification dropped: "+string(alert.DropGlobal)); err != nil {
+		return false, err
+	}
+	switch reason {
+	case alert.NotDropped:
+		return true, nil
 	case alert.DropIncident, alert.DropGlobal:
 		if !refused {
 			// The limit decided there is no message now: the incident counts as
 			// notified and its pacing entry goes.
 			delete(d.tries, fp)
-			return d.markNotified(in.ID, now)
+			return false, d.markNotified(in.ID, now)
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // setTry stores the pacing of fp. At maxTries entries it first drops the
@@ -215,13 +257,16 @@ func (d *Daemon) noticeSent(fp string) {
 }
 
 // maxNotices bounds the pending daemon notices; their keys are a small fixed
-// set, so the bound is never reached in practice.
-const maxNotices = 16
+// set (an audit recovery, the fill and the full audit log, a full spool), so
+// the bound is never reached in practice.
+const maxNotices = 8
 
 // alertEvent notifies a security-relevant event of the daemon itself (not an
 // incident), at high priority. The notice stays pending until it was sent:
-// the housekeeping pass retries it under the same gap pacing as an incident,
-// so a failed send, a limit and a full queue do not lose it.
+// every housekeeping pass sends it again while it is not in flight, so a
+// failed send, the global limit and a full queue do not lose it. Only the
+// worker's per-incident limit ends it unsent: the same notice went out within
+// that interval.
 func (d *Daemon) alertEvent(key, title, body string) {
 	if d.deps.Worker == nil {
 		return
@@ -239,40 +284,47 @@ func (d *Daemon) alertEvent(key, title, body string) {
 
 func (d *Daemon) sendNotice(fp string) {
 	n := d.notices[fp]
-	st := d.tries[fp]
-	st.notBefore = d.now().Add(d.gap(st.failures))
-	d.setTry(fp, st)
-	d.enqueue(alert.Job{Fingerprint: fp, Msg: notify.Message{
+	if d.enqueue(alert.Job{Fingerprint: fp, Msg: notify.Message{
 		Title: n.title, Body: n.body,
 		Priority: notify.PriorityOf(result.High), Tags: []string{"keepwatch", string(result.High)},
-	}})
+	}}) == alert.DropIncident {
+		delete(d.notices, fp)
+	}
 }
 
-// reconcileNotifications retries the incidents that want a notification and
-// have none recorded: a failed or dropped send, or a crash before the
-// enqueue. Attempts are paced by gap.
+// reconcileNotifications sends the daemon notices that are not in flight,
+// and then retries the incidents that want a notification and have none
+// recorded: a failed or dropped send, a notice that went first, or a crash
+// before the enqueue. Incident attempts are paced by gap.
 func (d *Daemon) reconcileNotifications() error {
 	for fp := range d.notices {
-		if d.due(fp) {
+		if d.inflight[fp] == 0 {
 			d.sendNotice(fp)
 		}
 	}
+	if d.noticeWaiting() {
+		return nil
+	}
 	for _, in := range d.deps.Incidents.List() {
 		if in.State == incident.StateOpen && in.Notify && in.NotifiedAt.IsZero() && d.due(string(in.Fingerprint)) {
-			// An incident the log does not mention (its record was lost in a
-			// crash, or a replayed line gave no signal) is mentioned before
-			// anything is sent for it.
-			if !d.logged[in.ID] {
-				if err := d.record(audit.IncidentUpdate, in.ID, string(in.Fingerprint),
-					fmt.Sprintf("found without a recorded notification: [%s] %s: %s", in.Severity, in.Title, in.Summary)); err != nil {
-					return err
-				}
-				d.markLogged(in.ID)
-			}
-			if err := d.notifyIncident(in, false); err != nil {
+			if err := d.takeOver(in); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// takeOver notifies an incident from the housekeeping pass. An incident the
+// log does not mention (its record was lost in a crash, a replayed line gave
+// no signal, or its record was over the budget) is mentioned with its
+// notification, through admit.
+func (d *Daemon) takeOver(in incident.Incident) error {
+	send := func() (bool, error) { return d.notifyIncident(in, false) }
+	if d.logged[in.ID] {
+		_, err := send()
+		return err
+	}
+	return d.admit(sigRecord{rule: in.RuleID, kind: audit.IncidentUpdate, in: in,
+		summary: fmt.Sprintf("found without a recorded notification: [%s] %s: %s", in.Severity, in.Title, in.Summary)}, send)
 }

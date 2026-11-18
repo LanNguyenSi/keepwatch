@@ -112,10 +112,10 @@ func (d *Daemon) streamEnded(res execx.StreamResult, serr error, cur string) (re
 }
 
 // cursorRejected reports whether journalctl's stderr says it could not use
-// the cursor. Measured on systemd 249 and 255: journalctl refuses only a
-// malformed cursor, with "Failed to seek to cursor: Invalid argument" and
-// exit 1; a cursor whose entry is gone is not an error. The check is the word,
-// as no exit code separates this failure from others.
+// the cursor. journalctl refuses only a malformed cursor, with "Failed to
+// seek to cursor: Invalid argument" and exit 1; a cursor whose entry is gone
+// is not an error. The check is the word, as no exit code separates this
+// failure from others.
 func cursorRejected(stderr []byte) bool {
 	return strings.Contains(strings.ToLower(string(stderr)), "cursor")
 }
@@ -139,25 +139,27 @@ func seqFields(cursor string) (id string, seq uint64, ok bool) {
 
 // journalGap compares the saved cursor with the cursor of the first line
 // delivered after a restart. Entries written while the daemon was down are
-// delivered, so the seqnum of the first line follows the saved one; a changed
-// seqnum id (the journal was replaced) or a jump means entries are gone
-// (vacuumed or deleted). It measured clean on systemd 249 and 255 across
-// interleaved sources (logger, systemd-cat, other uids, a burst), a journald
-// restart, a vacuum and a wipe. Per-user journal files and kernel messages
-// were not measured. It returns "" when there is no gap or a cursor does not
-// parse.
+// delivered, and journald numbers the entries of all its files from one
+// counter, so the seqnum (i=) of the first line is the saved one plus one.
+// The seqnum id (s=) may differ even then: each journal file (the system
+// file, each user's file) has its own. So only a seqnum that does not follow
+// is a gap: with the same seqnum id, the entries in between are missing
+// (vacuumed or deleted); with another one, the journal was replaced. It
+// returns "" when there is no gap or a cursor does not parse.
 func journalGap(saved, first string) string {
 	sid, sseq, ok1 := seqFields(saved)
 	fid, fseq, ok2 := seqFields(first)
 	switch {
 	case !ok1 || !ok2:
 		return ""
+	case fseq == sseq+1:
+		return ""
 	case sid != fid:
-		return "the journal's seqnum id changed since the saved cursor, so it was replaced and its older entries are gone"
+		return "the journal's seqnum id changed and its seqnum does not follow the saved cursor, so it was replaced and its older entries are gone"
 	case fseq > sseq+1:
 		return fmt.Sprintf("%d journal entries between the saved cursor and the first line after the restart are missing", fseq-sseq-1)
 	}
-	return ""
+	return "the journal's seqnum does not follow the saved cursor, so entries may be missing"
 }
 
 // checkGap compares the first decoded line of a stream that resumed from a

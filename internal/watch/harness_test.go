@@ -173,6 +173,10 @@ func newHarness(t *testing.T, o hopts) *harness {
 	if opt.CursorInterval == 0 {
 		opt.CursorInterval = -1
 	}
+	if opt.GlobalPerMinute == 0 {
+		// Tests that do not look at the limit must not run into it.
+		opt.GlobalPerMinute = 1 << 20
+	}
 	if opt.Sleep == nil {
 		opt.Sleep = func(_ context.Context, d time.Duration) error {
 			h.mu.Lock()

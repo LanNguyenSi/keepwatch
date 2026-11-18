@@ -16,14 +16,18 @@ type refusal struct{ err error }
 func (r refusal) Error() string { return r.err.Error() }
 func (r refusal) Unwrap() error { return r.err }
 
-// appendRecord writes one audit record. Summary is cut to the audit limit;
+// maxRecordSummary is the longest summary of an ordinary record; it bounds a
+// record line (see the audit volume in the package comment).
+const maxRecordSummary = 512
+
+// appendRecord writes one audit record. Summary is cut to maxRecordSummary;
 // it must already be cleaned. A full log is ErrAuditFull (finish then writes
 // the one terminal record into the reserve); a record the log refuses is a
 // refusal; any other failure is fatal.
 func (d *Daemon) appendRecord(kind audit.Kind, incidentID, fingerprint, summary string) error {
 	_, err := d.deps.Audit.Append(audit.Record{
 		Time: d.now(), Kind: kind, IncidentID: incidentID, Fingerprint: fingerprint,
-		Summary: cutBytes(summary, audit.MaxSummary),
+		Summary: cutBytes(summary, maxRecordSummary),
 	})
 	switch {
 	case err == nil:
@@ -58,33 +62,36 @@ type noiseState struct {
 
 // noise writes a repeating kind of record at most once per NoiseInterval:
 // the first one of a window at once, the rest as one record with their
-// count when the window ends (flushNoise). key names the kind of event and
-// is always one of a small fixed set, never host text.
+// count when the window ends (flushNoise, or the next event of the key after
+// the end). key names the kind of event and is always one of a small fixed
+// set, never host text.
 func (d *Daemon) noise(key string, kind audit.Kind, summary string) error {
 	return d.noiseN(key, 1, kind, summary)
 }
 
 func (d *Daemon) noiseN(key string, n int, kind audit.Kind, summary string) error {
-	return d.limited(key, 1, n, kind, summary, func() error { return d.recordNoise(kind, summary) })
+	st, ok, err := d.take(key, 1, kind, summary)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		st.extra += n
+		return nil
+	}
+	st.extra += n - 1
+	return d.recordNoise(kind, summary)
 }
 
-// recordLimited writes a record of an event that an outsider can repeat at
-// will (a new incident, an eviction): at most AuditBudget records per key and
-// NoiseInterval, the rest counted into one record per interval.
-func (d *Daemon) recordLimited(key string, kind audit.Kind, incidentID, fingerprint, summary, agg string) error {
-	return d.limited(key, d.opt.AuditBudget, 1, kind, agg, func() error { return d.record(kind, incidentID, fingerprint, summary) })
-}
-
-// limited counts n events of key in the current window and calls write for
-// them while fewer than budget records were written in it. The state is
-// stored before write runs, so a write that reports a refusal through the
-// limiter finds the window open.
-func (d *Daemon) limited(key string, budget, n int, kind audit.Kind, agg string, write func() error) error {
+// take returns the current window of key, after writing the count of a
+// window that ended, and takes one of its budget records when one is left
+// (ok). The window is stored before the caller writes, so a write that
+// reports a refusal through the limiter finds it open.
+func (d *Daemon) take(key string, budget int, kind audit.Kind, agg string) (st *noiseState, ok bool, err error) {
 	now := d.now()
-	st := d.noisy[key]
+	st = d.noisy[key]
 	if st != nil && now.Sub(st.start) >= d.opt.NoiseInterval {
 		if err := d.flushOne(key, st); err != nil {
-			return err
+			return nil, false, err
 		}
 		st = nil
 	}
@@ -93,12 +100,10 @@ func (d *Daemon) limited(key string, budget, n int, kind audit.Kind, agg string,
 		d.noisy[key] = st
 	}
 	if st.written >= budget {
-		st.extra += n
-		return nil
+		return st, false, nil
 	}
 	st.written++
-	st.extra += n - 1
-	return write()
+	return st, true, nil
 }
 
 // recordNoise writes a noise record; a refusal is dropped (the record is
@@ -121,8 +126,9 @@ func (d *Daemon) flushOne(key string, st *noiseState) error {
 }
 
 // flushNoise writes the counts of the windows that ended (all of them when
-// all is set, at shutdown).
+// all is set, at shutdown) and forgets update times that limit nothing.
 func (d *Daemon) flushNoise(all bool) error {
+	d.pruneUpdated(d.now())
 	if n := d.lost.Swap(0); n > 0 {
 		if err := d.noiseN("results_lost", int(n), audit.NotifyDropped, "notification results were lost because the result queue was full"); err != nil {
 			return err
@@ -141,19 +147,14 @@ func (d *Daemon) flushNoise(all bool) error {
 
 // finish writes the last audit record and returns what Run returns: the
 // first fatal error (after a terminal daemon_error), or nil after daemon_stop.
-func (d *Daemon) finish(loopErr error) error {
+// stopErr is what flushAtStop and the last flush returned; a failure recorded
+// after them (by the result loop while draining) also counts.
+func (d *Daemon) finish(stopErr error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	ferr := d.failure()
+	ferr := stopErr
 	if ferr == nil {
-		ferr = loopErr
-	}
-	cerr := d.flushCursor()
-	if ferr == nil && cerr != nil {
-		ferr = cerr
-	}
-	if ferr == nil {
-		ferr = d.flushNoise(true)
+		ferr = d.failure()
 	}
 	if ferr != nil {
 		// The terminal record may use the audit log's reserve, so it can say

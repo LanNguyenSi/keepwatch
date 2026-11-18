@@ -13,7 +13,7 @@ import (
 func (d *Daemon) now() time.Time { return d.deps.Clock() }
 
 // handleSignal applies one signal to the incident store, audits the outcome
-// and hands the notification on.
+// through admit and hands the notification on.
 func (d *Daemon) handleSignal(sig event.Signal) error {
 	if now := d.now(); sig.Time.After(now.Add(d.opt.ClockSkew)) {
 		if err := d.noise("clock_clamp", audit.InputError,
@@ -31,7 +31,8 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		if res.Incident.Notify && d.due(string(res.Incident.Fingerprint)) {
 			inc := res.Incident
 			inc.ID = "refused"
-			return d.notifyIncident(inc, true)
+			_, err := d.notifyIncident(inc, true)
+			return err
 		}
 		return nil
 	case errors.Is(err, incident.ErrInvalidSignal):
@@ -40,13 +41,13 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		return fmt.Errorf("watch: incident store: %w", err)
 	}
 	for _, in := range res.AutoClosed {
-		if err := d.record(audit.IncidentClose, in.ID, string(in.Fingerprint), "closed automatically after being idle"); err != nil {
+		if err := d.admit(sigRecord{rule: sig.RuleID, kind: audit.IncidentClose, in: in, summary: "closed automatically after being idle"}, nil); err != nil {
 			return err
 		}
 	}
 	for _, ev := range res.Evicted {
-		if err := d.recordLimited("incident_evicted", audit.IncidentClose, ev.ID, string(ev.Fingerprint),
-			fmt.Sprintf("evicted to make room, it was %s", ev.State), "incidents were evicted to make room, not audited one by one"); err != nil {
+		in := incident.Incident{ID: ev.ID, Fingerprint: ev.Fingerprint}
+		if err := d.admit(sigRecord{rule: sig.RuleID, kind: audit.IncidentClose, in: in, summary: fmt.Sprintf("evicted to make room, it was %s", ev.State)}, nil); err != nil {
 			return err
 		}
 	}
@@ -58,31 +59,9 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		kind = audit.IncidentReopen
 	}
 	in := res.Incident
-	text := fmt.Sprintf("[%s] %s: %s", in.Severity, in.Title, in.Summary)
-	if kind == audit.IncidentOpen {
-		err = d.recordLimited("incident_open", kind, in.ID, string(in.Fingerprint), text, "incidents were opened for new fingerprints, not audited one by one")
-	} else {
-		err = d.record(kind, in.ID, string(in.Fingerprint), text)
-	}
-	if err != nil {
-		return err
-	}
-	d.markLogged(in.ID)
+	var send func() (bool, error)
 	if res.Notify || (res.Pending && d.due(string(in.Fingerprint))) {
-		return d.notifyIncident(in, false)
+		send = func() (bool, error) { return d.notifyIncident(in, false) }
 	}
-	return nil
+	return d.admit(sigRecord{rule: sig.RuleID, kind: kind, in: in, summary: fmt.Sprintf("[%s] %s: %s", in.Severity, in.Title, in.Summary)}, send)
 }
-
-// markLogged remembers that the audit log mentions the incident, so the
-// housekeeping retry does not have to say so (see reconcileNotifications).
-func (d *Daemon) markLogged(id string) {
-	if len(d.logged) >= maxLogged {
-		clear(d.logged)
-	}
-	d.logged[id] = true
-}
-
-// maxLogged bounds the set of logged incident ids; at the bound the set starts
-// over, which costs at most one extra record per incident.
-const maxLogged = 4096

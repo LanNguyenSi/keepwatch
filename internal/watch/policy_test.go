@@ -333,7 +333,7 @@ func TestRateLimitedSendMarksNotified(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := h.d.notifyIncident(res.Incident, false); err != nil {
+				if _, err := h.d.notifyIncident(res.Incident, false); err != nil {
 					t.Fatal(err)
 				}
 				return res.Incident
@@ -346,7 +346,7 @@ func TestRateLimitedSendMarksNotified(t *testing.T) {
 				second = apply("2")
 			} else {
 				h.d.mu.Lock()
-				err := h.d.notifyIncident(first, false)
+				_, err := h.d.notifyIncident(first, false)
 				h.d.mu.Unlock()
 				if err != nil {
 					t.Fatal(err)

@@ -65,7 +65,7 @@ func (d *Daemon) housekeep() error {
 		return fmt.Errorf("watch: incident store: %w", err)
 	}
 	for _, in := range closed {
-		if err := d.record(audit.IncidentClose, in.ID, string(in.Fingerprint), "closed automatically after being idle"); err != nil {
+		if err := d.admit(sigRecord{rule: in.RuleID, kind: audit.IncidentClose, in: in, summary: "closed automatically after being idle"}, nil); err != nil {
 			return err
 		}
 	}
