@@ -201,3 +201,61 @@ func TestJournalGapIsCheckedOnABadFirstLine(t *testing.T) {
 		})
 	}
 }
+
+// A first line that names no usable cursor leaves the comparison to the line
+// after it. That line cannot tell how many entries came in between, so its
+// record does not count any.
+func TestJournalGapAfterAFirstLineWithoutCursor(t *testing.T) {
+	saved := curS("1", "5")
+	firsts := map[string]string{
+		"not json":                   "garbage-not-json",
+		"json without a cursor":      `{"MESSAGE":"m","_PID":"x"}`,
+		"a cursor that is not saved": plainLine("s=1;i=6;b=a b", t0),
+	}
+	for name, first := range firsts {
+		for next, want := range map[string]string{"7": gapUnknown, "6": ""} {
+			t.Run(name+", next entry "+next, func(t *testing.T) {
+				h := newHarness(t, hopts{setup: func(h *harness) {
+					if err := h.cursor.Save(saved); err != nil {
+						t.Fatal(err)
+					}
+				}})
+				h.script(saved, fake.Script{Follow: true, Lines: []string{first, plainLine(curS("1", next), t0)}})
+				if err := h.runUntil("lines", func() bool { return h.savedCursor() == curS("1", next) }); err != nil {
+					t.Fatal(err)
+				}
+				if h.count(audit.JournalLineInvalid) != 1 {
+					t.Fatalf("the first line was not a bad line: %v", h.kinds())
+				}
+				var got []string
+				for _, r := range h.records() {
+					if r.Kind == KindJournalGap {
+						got = append(got, r.Summary)
+					}
+				}
+				switch {
+				case want == "" && len(got) != 0:
+					t.Fatalf("journal_gap records = %q, want none: the seqnum follows", got)
+				case want != "" && (len(got) != 1 || !strings.Contains(got[0], want) || strings.Contains(got[0], "are missing")):
+					t.Fatalf("journal_gap records = %q, want one that counts nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// A line without a cursor in one stream says nothing about the next stream:
+// its first line is compared and counted as usual.
+func TestLineWithoutCursorDoesNotOutliveItsStream(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.script("", fake.Script{Err: errors.New("x"), Lines: []string{plainLine(curS("1", "5"), t0), "garbage-not-json"}})
+	h.script(curS("1", "5"), fake.Script{Follow: true, Lines: []string{plainLine(curS("1", "9"), t0)}})
+	if err := h.runUntil("lines", func() bool { return h.savedCursor() == curS("1", "9") && h.count(KindJournalGap) == 1 }); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range h.records() {
+		if r.Kind == KindJournalGap && !strings.Contains(r.Summary, "3 journal entries") {
+			t.Fatalf("journal_gap record = %q, want the count of the second stream", r.Summary)
+		}
+	}
+}

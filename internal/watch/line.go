@@ -79,6 +79,10 @@ func (d *Daemon) badLine(err error, cursor string) error {
 		if err := d.checkGap(cursor); err != nil {
 			return err
 		}
+	} else {
+		// The check stays pending for the next line, which can no longer
+		// count what is missing (see checkGap).
+		d.gapSkipped = true
 	}
 	if err := d.noise("journal_line_invalid", audit.JournalLineInvalid, "journal line skipped: "+d.safe(err.Error())); err != nil {
 		return err

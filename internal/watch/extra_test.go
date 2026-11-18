@@ -165,6 +165,15 @@ func TestNewChecksDeps(t *testing.T) {
 	if _, err := New(good, Options{GlobalPerMinute: 1, AuditBudget: 1}); err != nil {
 		t.Errorf("New with the smallest limits: %v", err)
 	}
+	// PerIncidentInterval: zero selects the default, and a set value is at
+	// least one minute.
+	for iv, ok := range map[time.Duration]bool{
+		0: true, time.Nanosecond: false, time.Minute - time.Nanosecond: false, time.Minute: true, time.Hour: true,
+	} {
+		if _, err := New(good, Options{PerIncidentInterval: iv}); (err == nil) != ok {
+			t.Errorf("New with PerIncidentInterval %s: err = %v, want ok = %v", iv, err, ok)
+		}
+	}
 	d := good
 	d.Clock = nil
 	if dm, err := New(d, Options{}); err != nil || dm.deps.Clock == nil {

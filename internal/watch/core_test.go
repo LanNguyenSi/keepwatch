@@ -371,18 +371,22 @@ func TestOneCleanCallSite(t *testing.T) {
 
 // Incident records reach the audit log only through admit. writeSig, which
 // writes them, is called only by admit. Every other call of a writer of the
-// package names its kind as a constant that is not an incident kind, so a
-// kind in a variable cannot carry an incident kind past admit. The audit
-// writer itself is called by appendRecord and finish only. The calls that
-// hand a kind on (a wrapper passing its own parameter, and the count record
-// of a rule's window in allow) are listed by name.
+// package names its kind as a constant that is not an incident kind (any
+// audit.Incident* name counts as one), so a kind in a variable cannot carry
+// an incident kind past admit. The audit writer itself (the Audit field of
+// the deps) is named by appendRecord and finish only, apart from the nil
+// check in New and calls of Size and MaxSize; so it cannot be reached
+// through an alias either. The calls that hand a kind on (a wrapper passing
+// its own parameter, and the count record of a rule's window in allow) are
+// listed by name.
 func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	incidentKinds := map[string]bool{"IncidentOpen": true, "IncidentUpdate": true, "IncidentReopen": true, "IncidentClose": true}
+	// auditUsers are the functions that may name the audit writer.
+	auditUsers := map[string]bool{"appendRecord": true, "finish": true, "New": true}
 	// kindArg is the position of the kind argument of each writer.
 	kindArg := map[string]int{"record": 0, "appendRecord": 0, "recordNoise": 0, "noise": 1, "noiseN": 2, "take": 2}
 	// handsOn are the calls, as caller>callee, that pass a kind on.
@@ -395,14 +399,14 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 		switch k := e.(type) {
 		case *ast.SelectorExpr:
 			x, ok := k.X.(*ast.Ident)
-			return ok && x.Name == "audit" && !incidentKinds[k.Sel.Name]
+			return ok && x.Name == "audit" && !strings.HasPrefix(k.Sel.Name, "Incident")
 		case *ast.Ident:
 			return k.Name == "KindJournalGap"
 		}
 		return false
 	}
 	var bad []string
-	writeSigCalls, checked := 0, 0
+	writeSigCalls, checked, audits := 0, 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -416,7 +420,24 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 			if !ok {
 				continue
 			}
+			// sizeOf are the Audit selectors that are the receiver of a Size or
+			// MaxSize call; every other one is a use of the writer.
+			sizeOf := map[ast.Node]bool{}
 			ast.Inspect(fn, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Size" || sel.Sel.Name == "MaxSize") {
+						sizeOf[sel.X] = true
+					}
+				}
+				return true
+			})
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "Audit" {
+					audits++
+					if !sizeOf[s] && !auditUsers[fn.Name.Name] {
+						bad = append(bad, fset.Position(s.Pos()).String()+": the audit writer named in "+fn.Name.Name+", outside appendRecord and finish")
+					}
+				}
 				c, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -432,10 +453,7 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 						bad = append(bad, pos+": writeSig outside admit")
 					}
 				}
-				if x, ok := sel.X.(*ast.SelectorExpr); ok && name == "Append" && x.Sel.Name == "Audit" &&
-					fn.Name.Name != "appendRecord" && fn.Name.Name != "finish" {
-					bad = append(bad, pos+": Audit.Append outside appendRecord and finish")
-				}
+
 				i, ok := kindArg[name]
 				if !ok {
 					return true
@@ -457,8 +475,8 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 			bad = append(bad, "the listed call "+edge+" does not exist any more")
 		}
 	}
-	if len(bad) > 0 || writeSigCalls == 0 || checked == 0 {
-		t.Fatalf("incident records outside admit: %v (writeSig calls %d, writer calls with a constant kind %d)", bad, writeSigCalls, checked)
+	if len(bad) > 0 || writeSigCalls == 0 || checked == 0 || audits == 0 {
+		t.Fatalf("incident records outside admit: %v (writeSig calls %d, writer calls with a constant kind %d, places that name the audit writer %d)", bad, writeSigCalls, checked, audits)
 	}
 }
 

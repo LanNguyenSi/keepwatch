@@ -33,7 +33,7 @@ func (d *Daemon) streamLoop(ctx context.Context) error {
 			return fmt.Errorf("watch: %w", err)
 		}
 		d.mu.Lock()
-		d.gapFrom = cur
+		d.gapFrom, d.gapSkipped = cur, false
 		d.mu.Unlock()
 		res, serr := d.deps.Streamer.Stream(ctx, append([]string{d.opt.Program}, args...), execx.StreamOpts{}, d.onLine)
 		if f := d.failure(); f != nil {
@@ -170,14 +170,22 @@ const gapUnknown = "the journal's seqnum does not follow the saved cursor; entri
 // checkGap compares the cursor of the first line of a stream that resumed
 // from a saved cursor with that cursor, once per stream. The line may be one
 // that cannot be decoded, as long as it names a usable cursor (see badLine).
+// A line that names none leaves the check to the line after it; that line
+// cannot tell how many entries came in between, so its record counts none.
 func (d *Daemon) checkGap(first string) error {
 	saved := d.gapFrom
 	d.gapFrom = ""
 	if saved == "" {
 		return nil
 	}
-	if msg := journalGap(saved, first); msg != "" {
-		return d.noise("journal_gap", KindJournalGap, "journal gap: "+msg)
+	msg := journalGap(saved, first)
+	if msg == "" {
+		return nil
 	}
-	return nil
+	// Lines without a usable cursor came before this one. They may be the
+	// entries in between, so nothing is counted.
+	if d.gapSkipped {
+		msg = gapUnknown
+	}
+	return d.noise("journal_gap", KindJournalGap, "journal gap: "+msg)
 }

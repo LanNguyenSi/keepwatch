@@ -199,7 +199,8 @@ type Deps struct {
 	Incidents *incident.Store
 	Audit     *audit.Writer
 	// Worker delivers notifications; nil means no notifier is configured.
-	// New installs the daemon's own OnResult on it.
+	// New installs the daemon's own OnResult on it. It must be built with
+	// Options.AlertParams (see there for what other limits cost).
 	Worker *alert.Worker
 	Cursor *CursorStore
 	// Recovery is what audit.Open returned for a torn tail; the daemon
@@ -246,7 +247,8 @@ type Options struct {
 	// a slot back when a send fails, so the daemon keeps its own count; the
 	// wiring sets it once here and builds the worker's Params with
 	// AlertParams. Zero selects DefaultGlobalPerMinute; New refuses a negative
-	// value, and a negative AuditBudget.
+	// value, a negative AuditBudget, and a PerIncidentInterval between zero
+	// and one minute.
 	GlobalPerMinute int
 	// TempAge and TempSweepInterval govern the sweep of stale temporary
 	// request files.
@@ -300,6 +302,12 @@ func (o Options) withDefaults() Options {
 // keeps incident notifications at GlobalPerMinute, and the rest is room for
 // its own notices, so a notice (the stop notice above all) is not dropped
 // because incident notifications used the limit up.
+//
+// Deps.Worker must be built with these parameters. The daemon counts on
+// them: with a lower global limit in the worker, its notices use up the
+// slots of the incident notifications, which are then dropped as rate
+// limited and marked notified without a message. So a worker with other
+// limits loses incident notifications, not only notices.
 func (o Options) AlertParams(queueSize int, sendTimeout time.Duration) alert.Params {
 	o = o.withDefaults()
 	return alert.Params{
@@ -341,9 +349,10 @@ type Daemon struct {
 	notices       map[string]notice    // daemon notices not yet sent, by fingerprint
 	logged        map[string]bool      // incident ids the audit log mentions in this process
 	updated       map[string]time.Time // time of the last incident_update record, by incident id
-	attempts      []time.Time          // when the worker accepted a job, last minute
+	attempts      []time.Time          // when the worker accepted an incident notification, last minute
 	fillNoticed   bool
 	gapFrom       string // saved cursor to compare the first line of a stream with
+	gapSkipped    bool   // a line of the current stream named no usable cursor
 
 	results   chan alert.Result
 	resMu     sync.RWMutex
@@ -374,6 +383,11 @@ func New(deps Deps, opt Options) (*Daemon, error) {
 	}
 	if opt.GlobalPerMinute < 0 || opt.AuditBudget < 0 {
 		return nil, errors.New("watch: GlobalPerMinute and AuditBudget must not be negative")
+	}
+	// The room for notices in the worker's limit (see AlertParams) is one
+	// slot per notice key and minute, which a shorter interval does not keep.
+	if opt.PerIncidentInterval > 0 && opt.PerIncidentInterval < time.Minute {
+		return nil, errors.New("watch: PerIncidentInterval must be at least one minute")
 	}
 	if deps.Clock == nil {
 		deps.Clock = time.Now

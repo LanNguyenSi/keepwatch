@@ -12,6 +12,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/alert"
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
 	"github.com/LanNguyenSi/keepwatch/internal/notify"
 )
@@ -210,17 +211,7 @@ func TestStopNoticeWhenIncidentsUsedTheGlobalLimit(t *testing.T) {
 		h := stopAtLimit(t, opt, opt.AlertParams(16, 0))
 		var d drops
 		d.watch(h)
-		h.worker.Notifier = notifierFunc(func(ctx context.Context, m notify.Message) error {
-			if strings.Contains(m.Title, "audit log is full") {
-				// A send that takes a while and ends with the worker.
-				select {
-				case <-time.After(50 * time.Millisecond):
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			return h.notif.Send(ctx, m)
-		})
+		h.worker.Notifier = slowStopNotice(h)
 		if err := h.start().wait(t); !errors.Is(err, ErrAuditFull) {
 			t.Fatalf("Run = %v, kinds = %v", err, h.kinds())
 		}
@@ -236,6 +227,9 @@ func TestStopNoticeWhenIncidentsUsedTheGlobalLimit(t *testing.T) {
 	// and goes out as soon as the limit has room.
 	t.Run("handed on again when the worker dropped it", func(t *testing.T) {
 		h := stopAtLimit(t, opt, bare)
+		var d drops
+		d.watch(h)
+		h.worker.Notifier = slowStopNotice(h)
 		r := h.start()
 		waitFor(t, "the stop notice is pending", pendingStop(h))
 		if n := h.countTitle("audit log is full"); n != 0 {
@@ -247,6 +241,11 @@ func TestStopNoticeWhenIncidentsUsedTheGlobalLimit(t *testing.T) {
 		}
 		if n := h.countTitle("audit log is full"); n != 1 {
 			t.Fatalf("stop notices = %d (titles %v)", n, h.titles())
+		}
+		// Once the worker accepted it inside the loop, the notice is not handed
+		// on again while its send runs: every drop is one of the global limit.
+		if all, global := len(d.reasons), d.count(alert.DropGlobal); global == 0 || all != global {
+			t.Fatalf("drops = %v, want only drops by the global limit", d.reasons)
 		}
 	})
 
@@ -292,13 +291,13 @@ func TestStopNoticeWhenTheQueueIsFull(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	h.worker.Notifier = notifierFunc(func(ctx context.Context, m notify.Message) error {
-		once.Do(func() { close(entered); <-release })
+		once.Do(func() { close(entered); blockUntil(ctx, release) })
 		return h.notif.Send(ctx, m)
 	})
 	var d drops
 	d.watch(h)
 	// The first notification is being sent and the second fills the queue.
-	h.steps(lines[0], func() { <-entered }, lines[1], lines[2])
+	h.steps(lines[0], func() { recv(t, entered, "the first send") }, lines[1], lines[2])
 	r := h.start()
 	waitFor(t, "the notice was dropped", func() bool { return d.count(alert.DropQueueFull) >= 1 })
 	close(release)
@@ -308,6 +307,9 @@ func TestStopNoticeWhenTheQueueIsFull(t *testing.T) {
 	ts := h.titles()
 	if len(ts) != 3 || !strings.Contains(ts[2], "audit log is full") {
 		t.Fatalf("titles = %v, want two incidents and then the stop notice", ts)
+	}
+	if n := d.count(alert.DropIncident); n != 0 {
+		t.Fatalf("the accepted notice was handed on again (%d drops by the per-incident limit)", n)
 	}
 }
 
@@ -327,7 +329,7 @@ func TestStopNoticeWhenAResultFillsTheLogDuringTheDrain(t *testing.T) {
 	entered, release, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	h.worker.Notifier = notifierFunc(func(ctx context.Context, m notify.Message) error {
-		once.Do(func() { close(entered); <-release })
+		once.Do(func() { close(entered); blockUntil(ctx, release) })
 		return h.notif.Send(ctx, m)
 	})
 	h.d.deps.Streamer = streamFunc(func(ctx context.Context, _ []string, _ execx.StreamOpts, on func([]byte) error) (execx.StreamResult, error) {
@@ -339,9 +341,9 @@ func TestStopNoticeWhenAResultFillsTheLogDuringTheDrain(t *testing.T) {
 		return execx.StreamResult{}, ctx.Err()
 	})
 	r := h.start()
-	<-entered
+	recv(t, entered, "the send")
 	r.cancel()
-	<-ended
+	recv(t, ended, "the end of the stream")
 	// The stream has ended without an error; give Run the time to reach the
 	// wait for the queue before the send returns.
 	time.Sleep(100 * time.Millisecond)
@@ -357,5 +359,143 @@ func TestStopNoticeWhenAResultFillsTheLogDuringTheDrain(t *testing.T) {
 	}
 	if in := h.store.List(); len(in) != 1 || in[0].State != incident.StateOpen {
 		t.Fatalf("store = %+v", in)
+	}
+}
+
+// slowStopNotice is a notifier whose send of the stop notice takes a while
+// and ends with the worker, so the daemon's wait loop runs while it is in
+// flight.
+func slowStopNotice(h *harness) notify.Notifier {
+	return notifierFunc(func(ctx context.Context, m notify.Message) error {
+		if strings.Contains(m.Title, "audit log is full") {
+			select {
+			case <-time.After(50 * time.Millisecond):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return h.notif.Send(ctx, m)
+	})
+}
+
+// blockUntil waits for release or the end of the send's context.
+func blockUntil(ctx context.Context, release <-chan struct{}) {
+	select {
+	case <-release:
+	case <-ctx.Done():
+	}
+}
+
+// recv waits for ch, at most as long as waitFor waits.
+func recv(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// An incident notification the worker refuses (its queue is full) is no
+// attempt: it does not count against GlobalPerMinute, so a later incident of
+// the same minute is still sent.
+func TestRefusedEnqueueIsNotCounted(t *testing.T) {
+	const g = 4
+	opt := Options{GlobalPerMinute: g, PerIncidentInterval: 40 * time.Minute}
+	h := newHarness(t, hopts{params: opt.AlertParams(1, 0), opt: opt})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.worker.Notifier = notifierFunc(func(ctx context.Context, m notify.Message) error {
+		once.Do(func() { close(entered); blockUntil(ctx, release) })
+		return h.notif.Send(ctx, m)
+	})
+	var d drops
+	d.watch(h)
+	line := func(i int) string { return sshLine(cur(itoa(int64(i))), t0, ipN("203.0.113", i)) }
+	// The first notification is being sent, the second fills the queue of
+	// one, and the next three are refused. With them counted, the limit of
+	// four would be used up.
+	h.steps(line(1), func() { recv(t, entered, "the first send") }, line(2), line(3), line(4), line(5), func() {
+		if n := d.count(alert.DropQueueFull); n != 3 {
+			t.Errorf("refused by the full queue = %d, want 3", n)
+		}
+		close(release)
+		waitFor(t, "two sent", func() bool { return h.count(audit.NotifySent) == 2 })
+	}, line(6))
+	if err := h.runUntil("the sixth incident", func() bool { return h.savedCursor() == cur("6") && h.count(audit.NotifySent) == 3 }); err != nil {
+		t.Fatal(err)
+	}
+	if ts := h.titles(); len(ts) != 3 || !strings.Contains(ts[2], "203.0.113.6") {
+		t.Fatalf("titles = %v, want the sixth incident sent in the same minute", ts)
+	}
+	if n := len(h.d.attempts); n != 3 {
+		t.Fatalf("counted attempts = %d, want the 3 the worker accepted", n)
+	}
+}
+
+// A stop because the audit log is full without a notifier: there is no
+// notice to wait for.
+func TestAuditFullStopWithoutAWorker(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true, auditMax: audit.ReserveBytes + 600, opt: Options{DrainTimeout: 5 * time.Second}})
+	h.steps(sshLine(cur("1"), t0, "203.0.113.9"), sshLine(cur("2"), t0, "203.0.113.10"))
+	began := time.Now()
+	if err := h.start().wait(t); !errors.Is(err, ErrAuditFull) {
+		t.Fatalf("Run = %v, kinds = %v", err, h.kinds())
+	}
+	if took := time.Since(began); took >= 5*time.Second {
+		t.Fatalf("Run took %s: it waited for a notice nobody sends", took)
+	}
+	if k := h.kinds(); k[len(k)-1] != audit.DaemonError {
+		t.Fatalf("kinds = %v", k)
+	}
+}
+
+// A stop notice the worker's per-incident limit ends (the same notice went
+// out within the interval) is over: it is not handed on again and Run does
+// not wait for it.
+func TestStopNoticeEndedByThePerIncidentLimit(t *testing.T) {
+	probe := newHarness(t, hopts{})
+	probe.steps()
+	if err := probe.runUntil("start", func() bool { return probe.count(audit.DaemonStart) == 1 }); err != nil {
+		t.Fatal(err)
+	}
+	// Only the start record fits: the record of the first sent notice fills
+	// the log.
+	h := newHarness(t, hopts{auditMax: audit.ReserveBytes + lineSizes(probe)[0] + 10, opt: Options{DrainTimeout: 5 * time.Second}})
+	var d drops
+	d.watch(h)
+	h.steps(func() {
+		h.d.mu.Lock()
+		h.d.alertEvent(stopNoticeKey, "an earlier notice of the same key", "body")
+		h.d.mu.Unlock()
+	})
+	began := time.Now()
+	if err := h.start().wait(t); !errors.Is(err, ErrAuditFull) {
+		t.Fatalf("Run = %v, kinds = %v", err, h.kinds())
+	}
+	if took := time.Since(began); took >= 5*time.Second {
+		t.Fatalf("Run took %s: it waited for a notice that had ended", took)
+	}
+	if n := d.count(alert.DropIncident); n != 1 || len(d.reasons) != 1 {
+		t.Fatalf("drops = %v, want one drop by the per-incident limit", d.reasons)
+	}
+	if ts := h.titles(); len(ts) != 1 || h.countTitle("audit log is full") != 0 {
+		t.Fatalf("titles = %v, want the earlier notice only", ts)
+	}
+}
+
+// A fatal stop for another reason sends no notice about a full audit log.
+func TestOtherFatalStopSendsNoAuditFullNotice(t *testing.T) {
+	h := newHarness(t, hopts{opt: Options{MaxRestarts: 1}})
+	h.script("", fake.Script{Result: execx.StreamResult{ExitCode: 1}})
+	err := h.start().wait(t)
+	if !errors.Is(err, ErrStreamEnded) || errors.Is(err, ErrAuditFull) {
+		t.Fatalf("Run = %v, want ErrStreamEnded", err)
+	}
+	if ts := h.titles(); len(ts) != 0 {
+		t.Fatalf("titles = %v, want no notification", ts)
+	}
+	if k := h.kinds(); k[len(k)-1] != audit.DaemonError {
+		t.Fatalf("kinds = %v", k)
 	}
 }
