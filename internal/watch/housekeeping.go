@@ -1,0 +1,170 @@
+package watch
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/LanNguyenSi/keepwatch/internal/audit"
+	"github.com/LanNguyenSi/keepwatch/internal/execx"
+	"github.com/LanNguyenSi/keepwatch/internal/incident"
+	"github.com/LanNguyenSi/keepwatch/internal/requests"
+)
+
+// RequestOps are the operations on the request spool the housekeeping pass
+// uses; StateRequests binds them to a state directory, tests replace them.
+type RequestOps struct {
+	Pending   func() (requests.Batch, error)
+	Remove    func(name string) error
+	SweepTemp func(olderThan time.Duration) (int, error)
+}
+
+// StateRequests returns the operations on the spool below stateDir.
+func StateRequests(stateDir string) *RequestOps {
+	return &RequestOps{
+		Pending:   func() (requests.Batch, error) { return requests.Pending(stateDir) },
+		Remove:    func(name string) error { return requests.Remove(stateDir, name) },
+		SweepTemp: func(older time.Duration) (int, error) { return requests.SweepTemp(stateDir, older) },
+	}
+}
+
+func (d *Daemon) housekeepLoop(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	t := time.NewTicker(d.opt.HousekeepingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			d.mu.Lock()
+			err := d.housekeep()
+			d.mu.Unlock()
+			if err != nil {
+				d.fail(err)
+				return
+			}
+		}
+	}
+}
+
+// housekeep is the periodic pass: save the cursor, write the counts of ended
+// noise windows, close idle incidents, retry notifications and look after
+// the request spool.
+func (d *Daemon) housekeep() error {
+	if err := d.flushCursor(); err != nil {
+		return err
+	}
+	if err := d.flushNoise(false); err != nil {
+		return err
+	}
+	closed, err := d.deps.Incidents.Sweep(d.now())
+	switch {
+	case errors.Is(err, incident.ErrInvalidSignal):
+	case err != nil:
+		return fmt.Errorf("watch: incident store: %w", err)
+	}
+	for _, in := range closed {
+		if err := d.record(audit.IncidentClose, in.ID, string(in.Fingerprint), "closed automatically after being idle"); err != nil {
+			return err
+		}
+	}
+	if err := d.reconcileNotifications(); err != nil {
+		return err
+	}
+	return d.requestsPass()
+}
+
+// requestsPass handles what is wrong in the spool: a rejected entry is
+// audited once per name and removed (a name that is still listed on the next
+// pass, because Remove failed, is not audited again; a name that has left the
+// listing is forgotten); a directory with more entries than one
+// listing examines is audited and notified once per episode; stale temporary
+// files are swept now and then. Accepted requests are left for the stage that
+// applies them.
+func (d *Daemon) requestsPass() error {
+	ops := d.deps.Requests
+	if ops == nil {
+		return nil
+	}
+	b, err := ops.Pending()
+	if err != nil {
+		return d.noise("requests_pending", audit.InputError, "cannot list the request spool: "+d.safe(err.Error()))
+	}
+	seen := map[string]bool{}
+	for _, it := range append(append([]requests.Item(nil), b.Items...), b.Stray...) {
+		if it.Accepted() {
+			continue
+		}
+		seen[it.Name] = true
+		if !d.rejAudited[it.Name] {
+			d.rejAudited[it.Name] = true
+			if err := d.record(audit.RequestRejected, "", "", fmt.Sprintf("request %s rejected (%s): %s", d.safe(it.Name), it.Rejection.Reason, d.safe(it.Rejection.Detail))); err != nil {
+				return err
+			}
+		}
+		// A failed Remove is tried again on the next pass, without a new record.
+		_ = ops.Remove(it.Name)
+	}
+	for name := range d.rejAudited {
+		if !seen[name] {
+			delete(d.rejAudited, name)
+		}
+	}
+	switch {
+	case b.Overfull && !d.overfull:
+		d.overfull = true
+		msg := fmt.Sprintf("the request spool holds more than %d entries; the rest is not looked at until it is cleared", requests.MaxExamined)
+		if err := d.record(audit.RequestRejected, "", "", msg); err != nil {
+			return err
+		}
+		d.alertEvent("requests_overfull", "keepwatch: request spool is full", msg)
+	case !b.Overfull:
+		d.overfull = false
+	}
+	if now := d.now(); now.Sub(d.lastTempSweep) >= d.opt.TempSweepInterval {
+		d.lastTempSweep = now
+		if _, err := ops.SweepTemp(d.opt.TempAge); err != nil {
+			return d.noise("requests_sweep", audit.InputError, "cannot sweep stale request files: "+d.safe(err.Error()))
+		}
+	}
+	return nil
+}
+
+// streamEnded handles the end of one journalctl run: it saves the cursor,
+// counts the over-long lines that were dropped, and decides whether the
+// saved cursor was refused (reset) or the run is an ordinary failure to retry.
+func (d *Daemon) streamEnded(res execx.StreamResult, serr error, cur string) (reset, progress bool, err error) {
+	progress = d.delivered > 0
+	if err := d.flushCursor(); err != nil {
+		return false, progress, err
+	}
+	if res.DroppedLines > 0 {
+		if err := d.noiseN("line_too_long", res.DroppedLines, audit.JournalLineInvalid, "journal lines over the size limit were dropped"); err != nil {
+			return false, progress, err
+		}
+	}
+	if cur != "" && !progress && cursorRejected(res.Stderr) {
+		d.cur, d.saved = "", ""
+		if err := d.deps.Cursor.Save(""); err != nil {
+			return false, progress, fmt.Errorf("watch: cannot reset the cursor: %w", err)
+		}
+		return true, progress, d.record(audit.CursorReset, "", "", "journalctl refused the saved cursor (the journal was rotated or vacuumed); starting at now")
+	}
+	why := fmt.Sprintf("exit %d", res.ExitCode)
+	if serr != nil {
+		why += ", " + d.safe(serr.Error())
+	}
+	return false, progress, d.noise("stream_restart", audit.InputError,
+		fmt.Sprintf("journalctl ended (%s); restarting from the saved cursor. stderr: %s", why, d.safe(cutBytes(string(res.Stderr), 300))))
+}
+
+// cursorRejected reports whether journalctl's stderr says it could not use
+// the cursor. journalctl reports "Failed to seek to cursor: ..." for a cursor
+// the journal no longer holds; the check is the word, as no exit code
+// separates this failure from others.
+func cursorRejected(stderr []byte) bool {
+	return strings.Contains(strings.ToLower(string(stderr)), "cursor")
+}
