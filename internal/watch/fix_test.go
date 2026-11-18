@@ -152,6 +152,11 @@ func TestFillNoticeAtEightyPercentOncePerProcess(t *testing.T) {
 	if n := h2.countTitle("80% full"); n != 1 {
 		t.Fatalf("fill notices = %d, want 1 per process", n)
 	}
+	// A second notice would run into the worker's per-incident limit and show
+	// up as a dropped notification.
+	if n := h2.count(audit.NotifyDropped); n != 0 {
+		t.Fatalf("notify_dropped records = %d: the fill notice was raised more than once", n)
+	}
 	for _, m := range h2.notif.sent() {
 		if strings.Contains(m.Title, "80% full") && m.Priority != 4 {
 			t.Errorf("priority = %d, want high", m.Priority)
