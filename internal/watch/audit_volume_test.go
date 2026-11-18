@@ -606,3 +606,25 @@ func TestAutoClosesOfOneSignalShareTheRuleBudget(t *testing.T) {
 		t.Fatalf("close records = %d, counted = %v: %v", closes, counted, h.kinds())
 	}
 }
+
+// The update limit of an incident ends exactly one NoiseInterval after its
+// last update record, also without a housekeeping pass in between.
+func TestUpdateAtTheEndOfTheIntervalIsWritten(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	h.steps(oomPid(cur("1"), t0, 100, "worker"), oomPid(cur("2"), t0, 101, "worker"), oomPid(cur("3"), t0, 102, "worker"),
+		func() { h.clk.add(DefaultNoiseInterval) }, oomPid(cur("4"), t0.Add(DefaultNoiseInterval), 103, "worker"))
+	if err := h.runUntil("lines", func() bool { return h.savedCursor() == cur("4") }); err != nil {
+		t.Fatal(err)
+	}
+	updates := 0
+	for _, r := range h.records() {
+		if r.Kind == audit.IncidentUpdate && r.IncidentID != "" {
+			updates++
+		}
+	}
+	// The second line, and the fourth at the end of the interval; the third
+	// came inside it.
+	if updates != 2 {
+		t.Fatalf("incident_update records = %d, want 2: %v", updates, h.kinds())
+	}
+}
