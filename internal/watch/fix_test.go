@@ -134,7 +134,7 @@ func fillAudit(t *testing.T, h *harness, max, target int64) {
 func TestFillNoticeAtEightyPercentOncePerProcess(t *testing.T) {
 	const max = 200_000
 	h := newHarness(t, hopts{auditMax: max, setup: func(h *harness) { fillAudit(t, h, max, 158_000) }})
-	h.steps(floodLines("198.51.100", 1, 3)...)
+	h.script("", fake.Script{Follow: true})
 	r := h.start()
 	waitFor(t, "start", func() bool { return h.count(audit.DaemonStart) == 1 })
 	time.Sleep(50 * time.Millisecond)
@@ -143,7 +143,7 @@ func TestFillNoticeAtEightyPercentOncePerProcess(t *testing.T) {
 	}
 	r.cancel()
 	_ = r.wait(t)
-	// A second process with more incidents crosses the line and sends once.
+	// A second process that writes more records crosses the line and sends once.
 	h2 := newHarness(t, hopts{auditMax: max, setup: func(h *harness) { fillAudit(t, h, max, 158_000) }})
 	h2.steps(append(floodLines("198.51.100", 1, 8), func() { h2.clk.add(2 * time.Minute) }, sshLine(cur("20"), t0, "203.0.113.50"))...)
 	if err := h2.runUntil("notice", func() bool { return h2.countTitle("80% full") >= 1 && h2.savedCursor() == cur("20") }); err != nil {
