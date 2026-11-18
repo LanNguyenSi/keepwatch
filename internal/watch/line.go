@@ -43,10 +43,18 @@ func (d *Daemon) handleLine(line []byte) error {
 	if err != nil {
 		var le *journal.LineError
 		cursor := ""
-		if errors.As(err, &le) {
+		if errors.As(err, &le) && validCursor(le.Cursor) {
 			cursor = le.Cursor
 		}
 		return d.badLine(err, cursor)
+	}
+	// A cursor the store would refuse must not reach the save: the line is a
+	// bad line and the cursor stays where it is.
+	if !validCursor(ev.Cursor) {
+		return d.badLine(errors.New("the line has a cursor the daemon cannot save"), "")
+	}
+	if err := d.checkGap(ev.Cursor); err != nil {
+		return err
 	}
 	if ev.Time.IsZero() {
 		return d.badLine(errors.New("the line has no __REALTIME_TIMESTAMP"), ev.Cursor)

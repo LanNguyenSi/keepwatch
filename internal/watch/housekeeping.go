@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
-	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
 	"github.com/LanNguyenSi/keepwatch/internal/requests"
 )
@@ -131,40 +129,4 @@ func (d *Daemon) requestsPass() error {
 		}
 	}
 	return nil
-}
-
-// streamEnded handles the end of one journalctl run: it saves the cursor,
-// counts the over-long lines that were dropped, and decides whether the
-// saved cursor was refused (reset) or the run is an ordinary failure to retry.
-func (d *Daemon) streamEnded(res execx.StreamResult, serr error, cur string) (reset, progress bool, err error) {
-	progress = d.delivered > 0
-	if err := d.flushCursor(); err != nil {
-		return false, progress, err
-	}
-	if res.DroppedLines > 0 {
-		if err := d.noiseN("line_too_long", res.DroppedLines, audit.JournalLineInvalid, "journal lines over the size limit were dropped"); err != nil {
-			return false, progress, err
-		}
-	}
-	if cur != "" && !progress && cursorRejected(res.Stderr) {
-		d.cur, d.saved = "", ""
-		if err := d.deps.Cursor.Save(""); err != nil {
-			return false, progress, fmt.Errorf("watch: cannot reset the cursor: %w", err)
-		}
-		return true, progress, d.record(audit.CursorReset, "", "", "journalctl refused the saved cursor (the journal was rotated or vacuumed); starting at now")
-	}
-	why := fmt.Sprintf("exit %d", res.ExitCode)
-	if serr != nil {
-		why += ", " + d.safe(serr.Error())
-	}
-	return false, progress, d.noise("stream_restart", audit.InputError,
-		fmt.Sprintf("journalctl ended (%s); restarting from the saved cursor. stderr: %s", why, d.safe(cutBytes(string(res.Stderr), 300))))
-}
-
-// cursorRejected reports whether journalctl's stderr says it could not use
-// the cursor. journalctl reports "Failed to seek to cursor: ..." for a cursor
-// the journal no longer holds; the check is the word, as no exit code
-// separates this failure from others.
-func cursorRejected(stderr []byte) bool {
-	return strings.Contains(strings.ToLower(string(stderr)), "cursor")
 }

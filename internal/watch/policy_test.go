@@ -213,6 +213,10 @@ func TestFailedSendIsRetriedAtTheDaemonsPace(t *testing.T) {
 	if h.store.List()[0].NotifiedAt.IsZero() {
 		t.Fatal("the incident is not marked notified after the retry succeeded")
 	}
+	// The incident was logged when it opened: the retry adds no record for it.
+	if h.count(audit.IncidentUpdate) != 0 {
+		t.Fatalf("kinds = %v", h.kinds())
+	}
 }
 
 // An update of the incident while a failed send is waiting for its gap does
@@ -351,7 +355,11 @@ func TestRateLimitedSendMarksNotified(t *testing.T) {
 			waitFor(t, "drop audited", func() bool { return h.count(audit.NotifyDropped) == 1 })
 			h.d.mu.Lock()
 			got, _ := h.d.deps.Incidents.Get(second.ID)
+			_, paced := h.d.tries[string(second.Fingerprint)]
 			h.d.mu.Unlock()
+			if paced {
+				t.Fatal("the pacing entry of a send that a limit dropped must go")
+			}
 			if !got.NotifiedAt.Equal(t0.Add(30 * time.Second)) {
 				t.Fatalf("NotifiedAt = %v, want the time of the dropped send", got.NotifiedAt)
 			}
@@ -381,12 +389,10 @@ func TestRecoveryIsNotifiedWithHighPriority(t *testing.T) {
 
 func TestRefusedSignalIsAuditedAndNotifiedUnderTheLimit(t *testing.T) {
 	h := newHarness(t, hopts{setup: func(h *harness) { writeIncidents(t, h, incident.MaxIncidents, result.Critical, t0.Add(-time.Minute)) }})
-	// The OOM rule reports the same victim again after its window (10m).
-	oomKill := "Out of memory: Killed process 77 (worker) total-vm:1kB, anon-rss:1kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:1kB oom_score_adj:0"
-	h.script("", fake.Script{Follow: true, Lines: []string{
-		kernLine(cur("1"), t0.Add(-11*time.Minute), oomKill), kernLine(cur("2"), t0, oomKill),
-	}})
-	if err := h.runUntil("refused signal", func() bool { return h.count(audit.NotifySent) == 1 && h.savedCursor() == cur("2") }); err != nil {
+	h.steps(oomAt(cur("1"), t0.Add(-11*time.Minute)),
+		func() { waitFor(t, "first send", func() bool { return h.count(audit.NotifySent) == 1 }) },
+		oomAt(cur("2"), t0))
+	if err := h.runUntil("refused signal", func() bool { return h.count(audit.NotifyDropped) == 1 && h.savedCursor() == cur("2") }); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(h.store.List()); n != incident.MaxIncidents {
@@ -398,8 +404,28 @@ func TestRefusedSignalIsAuditedAndNotifiedUnderTheLimit(t *testing.T) {
 	if n := len(h.notif.sent()); n != 1 {
 		t.Fatalf("sends = %d, want 1 (the second refusal is inside the per-fingerprint limit)", n)
 	}
-	if h.count(audit.NotifyDropped) != 1 {
-		t.Fatalf("kinds = %v, want the limit drop audited", h.kinds())
+	// The refused job is not about a stored incident: its record names none.
+	for _, r := range h.records() {
+		if r.Kind == audit.NotifySent && r.IncidentID != "" {
+			t.Fatalf("notify_sent of a refused signal names the incident %q", r.IncidentID)
+		}
+	}
+}
+
+// A refused signal is paced like any retry: with a failing notifier four
+// refusals inside one gap send once.
+func TestRefusedSignalIsPacedAfterFailure(t *testing.T) {
+	h := newHarness(t, hopts{setup: func(h *harness) { writeIncidents(t, h, incident.MaxIncidents, result.Critical, t0.Add(-time.Minute)) }})
+	h.notif.fail = func(int) error { return errTransient }
+	h.steps(oomAt(cur("1"), t0.Add(-33*time.Minute)),
+		func() { waitFor(t, "failed send", func() bool { return h.count(audit.NotifyFailed) == 1 }) },
+		oomAt(cur("2"), t0.Add(-22*time.Minute)), oomAt(cur("3"), t0.Add(-11*time.Minute)), oomAt(cur("4"), t0))
+	if err := h.runUntil("four refusals", func() bool { return h.savedCursor() == cur("4") }); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if n := len(h.notif.sent()); n != 1 {
+		t.Fatalf("sends = %d, want 1: the refused path is paced like the Pending path", n)
 	}
 }
 
@@ -562,13 +588,13 @@ func TestOverfullSpoolAuditedAndNotifiedOncePerEpisode(t *testing.T) {
 	waitFor(t, "start", func() bool { return len(h.fs.Calls()) == 1 })
 	housekeepOnce(t, h)
 	housekeepOnce(t, h)
-	waitFor(t, "notice", func() bool { return len(h.notif.sent()) == 1 })
+	waitFor(t, "notice", func() bool { return h.count(audit.NotifySent) == 1 })
 	sp.batch = requests.Batch{}
 	housekeepOnce(t, h)
 	sp.batch = requests.Batch{Overfull: true}
 	h.clk.add(time.Hour) // outside the worker's per-fingerprint interval
 	housekeepOnce(t, h)
-	waitFor(t, "second episode", func() bool { return len(h.notif.sent()) == 2 })
+	waitFor(t, "second episode", func() bool { return h.count(audit.NotifySent) == 2 })
 	if err := r.stop(t); err != nil {
 		t.Fatal(err)
 	}

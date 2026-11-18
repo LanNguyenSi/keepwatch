@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 )
@@ -26,6 +27,7 @@ func (d *Daemon) appendRecord(kind audit.Kind, incidentID, fingerprint, summary 
 	})
 	switch {
 	case err == nil:
+		d.checkFill()
 		return nil
 	case errors.Is(err, audit.ErrFull):
 		return fmt.Errorf("%w: %v", ErrAuditFull, err)
@@ -48,9 +50,10 @@ func (d *Daemon) record(kind audit.Kind, incidentID, fingerprint, summary string
 
 type noiseState struct {
 	start   time.Time
+	written int
 	extra   int
 	kind    audit.Kind
-	summary string
+	agg     string
 }
 
 // noise writes a repeating kind of record at most once per NoiseInterval:
@@ -62,18 +65,40 @@ func (d *Daemon) noise(key string, kind audit.Kind, summary string) error {
 }
 
 func (d *Daemon) noiseN(key string, n int, kind audit.Kind, summary string) error {
+	return d.limited(key, 1, n, kind, summary, func() error { return d.recordNoise(kind, summary) })
+}
+
+// recordLimited writes a record of an event that an outsider can repeat at
+// will (a new incident, an eviction): at most AuditBudget records per key and
+// NoiseInterval, the rest counted into one record per interval.
+func (d *Daemon) recordLimited(key string, kind audit.Kind, incidentID, fingerprint, summary, agg string) error {
+	return d.limited(key, d.opt.AuditBudget, 1, kind, agg, func() error { return d.record(kind, incidentID, fingerprint, summary) })
+}
+
+// limited counts n events of key in the current window and calls write for
+// them while fewer than budget records were written in it. The state is
+// stored before write runs, so a write that reports a refusal through the
+// limiter finds the window open.
+func (d *Daemon) limited(key string, budget, n int, kind audit.Kind, agg string, write func() error) error {
 	now := d.now()
-	if st := d.noisy[key]; st != nil {
-		if now.Sub(st.start) < d.opt.NoiseInterval {
-			st.extra += n
-			return nil
-		}
+	st := d.noisy[key]
+	if st != nil && now.Sub(st.start) >= d.opt.NoiseInterval {
 		if err := d.flushOne(key, st); err != nil {
 			return err
 		}
+		st = nil
 	}
-	d.noisy[key] = &noiseState{start: now, kind: kind, summary: summary, extra: n - 1}
-	return d.recordNoise(kind, summary)
+	if st == nil {
+		st = &noiseState{start: now, kind: kind, agg: agg}
+		d.noisy[key] = st
+	}
+	if st.written >= budget {
+		st.extra += n
+		return nil
+	}
+	st.written++
+	st.extra += n - 1
+	return write()
 }
 
 // recordNoise writes a noise record; a refusal is dropped (the record is
@@ -92,7 +117,7 @@ func (d *Daemon) flushOne(key string, st *noiseState) error {
 	if st.extra == 0 {
 		return nil
 	}
-	return d.recordNoise(st.kind, fmt.Sprintf("%d more within %s: %s", st.extra, d.opt.NoiseInterval, st.summary))
+	return d.recordNoise(st.kind, fmt.Sprintf("%d more within %s: %s", st.extra, d.opt.NoiseInterval, st.agg))
 }
 
 // flushNoise writes the counts of the windows that ended (all of them when
@@ -137,4 +162,37 @@ func (d *Daemon) finish(loopErr error) error {
 		return ferr
 	}
 	return d.appendRecord(audit.DaemonStop, "", "", "daemon stopped on request")
+}
+
+// fillNoticeNumerator and fillNoticeDenominator are the share of the audit
+// log's size limit (80 %) at which the daemon sends its one fill notice.
+const (
+	fillNoticeNumerator   = 4
+	fillNoticeDenominator = 5
+)
+
+// checkFill sends one notice per process when the audit log passes 80 % of its
+// size limit, so there is time to move it aside before the daemon stops.
+func (d *Daemon) checkFill() {
+	if d.fillNoticed {
+		return
+	}
+	size, limit := d.deps.Audit.Size(), d.deps.Audit.MaxSize()
+	if size*fillNoticeDenominator < limit*fillNoticeNumerator {
+		return
+	}
+	d.fillNoticed = true
+	d.alertEvent("audit_fill", "keepwatch: audit log is 80% full",
+		fmt.Sprintf("The audit log holds %d of at most %d bytes. At the limit the watch daemon stops, because it does not run without auditing. Move the log aside as described in the audit documentation before that.", size, limit))
+}
+
+// cutBytes cuts s to at most n bytes at a character boundary.
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

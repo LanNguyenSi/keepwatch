@@ -10,9 +10,14 @@
 // apply it to the incident store, append the audit records and enqueue the
 // notification. Only then is the line "handled", and only handled lines move
 // the cursor. A crash between the work and the cursor save replays the line
-// on the next start (at least once, never lost). A replayed signal is then an
-// update of the incident it opened, so its audit record says incident_update
-// where the lost one said incident_open.
+// on the next start (at least once, never lost). A crash between the incident
+// store write and the audit record leaves an incident the log does not mention.
+// Rule windows live in memory, so the replayed line of a threshold rule gives
+// no signal again, and nothing but the housekeeping pass finds the incident;
+// it writes an incident_update record "found without a recorded notification"
+// the first time it takes over such an incident in a process, before it
+// notifies. (A rule that fires on a single line, such as the OOM rule, gives
+// its signal again and the replay audits as incident_update.)
 //
 // # Single transformation
 //
@@ -36,6 +41,23 @@
 //     terminal daemon_error record into the reserve and stops with
 //     ErrAuditFull. A record the log refuses as invalid is counted and
 //     audited as input_error, and auditing goes on.
+//   - Audit volume: whoever can make the host log lines can make new
+//     fingerprints (a source address, a process name), and every new one opens
+//     an incident. At most AuditBudget (DefaultAuditBudget, 10) incident_open
+//     records of new fingerprints and the same number of eviction records are
+//     written per NoiseInterval (1m); the rest of the interval is counted into
+//     one record per kind and interval. The incident store is unchanged, only
+//     the audit volume is bounded. Such a record is about 810 bytes
+//     (measured), so the two budgets and their two count records write at
+//     most 22 records, about 17.8 KB, per minute: DefaultMaxSize (256 MiB)
+//     lasts about ten days of sustained flooding, where unbounded it was
+//     reached by about 331,000 signals. Updates and reopens of a stored
+//     incident are bounded by the rules' own windows and the 500 incidents the
+//     store keeps. The daemon sends one high-priority notice when the log
+//     passes 80 % of its limit (once per process) and one when it stops
+//     because the log is full; the second is sent before the worker is
+//     stopped, within DrainTimeout, after the terminal record was the last
+//     one that fit.
 //   - Audit start: Run does not verify the chain. Open resumes from the last
 //     intact record, and a full verification would read up to the whole log on
 //     every start of a restart loop; `keepwatch audit verify` and doctor are
@@ -47,13 +69,21 @@
 //     is not evaluated. A signal time more than ClockSkew ahead of the daemon
 //     clock is clamped to the daemon clock and the clamp is audited.
 //   - The stream: when journalctl exits or the stream fails it is restarted
-//     after a capped exponential backoff from the last cursor. A restart that
-//     is refused because of the cursor (journal rotated or vacuumed) is
-//     audited as cursor_reset and restarts at now without a backoff. After
+//     after a capped exponential backoff from the last cursor. journalctl
+//     refuses a malformed cursor ("Failed to seek to cursor: Invalid
+//     argument", exit 1; measured on systemd 249 and 255); that is audited as
+//     cursor_reset ("journalctl refused the saved cursor as invalid") and the
+//     stream restarts at now without a backoff. A cursor whose entry was
+//     vacuumed or whose journal was replaced is not an error: journalctl
+//     continues from the oldest entry it still has. The daemon therefore
+//     compares the first line after a restart with the saved cursor, once per
+//     stream: a changed seqnum id (s=) or a seqnum (i=) that advanced by more
+//     than one is audited as journal_gap (no notification). After
 //     MaxRestarts consecutive failures without progress, or when journalctl
 //     cannot be started at all, Run returns an error, so the process exits
 //     non-zero and the service manager restarts it. Run returns nil only
-//     after the context was cancelled.
+//     after the context was cancelled. A Sleep error that is not the
+//     context's ends the loop with that error.
 //   - Notifications: the daemon paces retries of failed sends itself (the
 //     alert worker gives the slot back on failure). An incident that wants a
 //     notification and has none recorded is retried by the housekeeping pass,
@@ -62,6 +92,9 @@
 //     PerIncidentInterval. The ntfy client waits for a Retry-After of up to
 //     that long inside the send; a longer one is not visible to the daemon (the
 //     error carries no such field), so the doubling gap is what honours it.
+//     Notices of the daemon itself (an audit recovery, a full spool, the audit
+//     log filling up) stay in a small pending set until they were sent and are
+//     retried by the same pass under the same pacing.
 //   - Cursor saves are throttled: a line that produced a signal saves at once,
 //     other lines at most once per CursorInterval, and the stream end, the
 //     housekeeping pass and the shutdown save what is pending.
@@ -79,7 +112,6 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
-	"github.com/LanNguyenSi/keepwatch/internal/journal"
 	"github.com/LanNguyenSi/keepwatch/internal/rules"
 )
 
@@ -104,6 +136,9 @@ const (
 	DefaultCursorInterval       = 2 * time.Second
 	DefaultTempAge              = time.Hour
 	DefaultTempSweepInterval    = 10 * time.Minute
+	// DefaultAuditBudget is the per-interval budget of incident_open and
+	// eviction records, see the package comment for the fill time it gives.
+	DefaultAuditBudget = 10
 )
 
 // Deps are the injected parts of the daemon.
@@ -146,9 +181,16 @@ type Options struct {
 	// HousekeepingInterval is the period of the housekeeping pass.
 	HousekeepingInterval time.Duration
 	CursorInterval       time.Duration
-	// PerIncidentInterval is the alert worker's per-incident interval; the
-	// retry pacing derives from it. Zero selects one hour.
+	// PerIncidentInterval is the least time between two notices of one
+	// incident, and the base of the retry pacing. The alert worker has the
+	// same parameter with another zero meaning (off), so the wiring sets it
+	// once here and builds the worker's Params with AlertParams. Zero selects
+	// one hour; there is no "off".
 	PerIncidentInterval time.Duration
+	// AuditBudget is how many incident_open records (new fingerprints) and
+	// how many eviction records one NoiseInterval may write; the excess is
+	// counted into one record per interval. Zero selects DefaultAuditBudget.
+	AuditBudget int
 	// TempAge and TempSweepInterval govern the sweep of stale temporary
 	// request files.
 	TempAge           time.Duration
@@ -177,6 +219,9 @@ func (o Options) withDefaults() Options {
 	def(&o.PerIncidentInterval, time.Hour)
 	def(&o.TempAge, DefaultTempAge)
 	def(&o.TempSweepInterval, DefaultTempSweepInterval)
+	if o.AuditBudget == 0 {
+		o.AuditBudget = DefaultAuditBudget
+	}
 	if o.MaxRestarts == 0 {
 		o.MaxRestarts = DefaultMaxRestarts
 	}
@@ -187,6 +232,15 @@ func (o Options) withDefaults() Options {
 		o.Sleep = sleepTimer
 	}
 	return o
+}
+
+// AlertParams returns the worker parameters whose per-incident interval is the
+// daemon's, so the interval is set in one place.
+func (o Options) AlertParams(queueSize, globalPerMinute int, sendTimeout time.Duration) alert.Params {
+	return alert.Params{
+		QueueSize: queueSize, PerIncidentInterval: o.withDefaults().PerIncidentInterval,
+		GlobalPerMinute: globalPerMinute, SendTimeout: sendTimeout,
+	}
 }
 
 func sleepTimer(ctx context.Context, d time.Duration) error {
@@ -219,6 +273,10 @@ type Daemon struct {
 	rejAudited    map[string]bool
 	overfull      bool
 	lastTempSweep time.Time
+	notices       map[string]notice // daemon notices not yet sent, by fingerprint
+	logged        map[string]bool   // incident ids the audit log mentions in this process
+	fillNoticed   bool
+	gapFrom       string // saved cursor to compare the first line of a stream with
 
 	results   chan alert.Result
 	resMu     sync.RWMutex
@@ -254,6 +312,7 @@ func New(deps Deps, opt Options) (*Daemon, error) {
 		deps: deps, opt: opt.withDefaults(),
 		noisy: map[string]*noiseState{}, inflight: map[string]int{},
 		tries: map[string]tryState{}, rejAudited: map[string]bool{},
+		notices: map[string]notice{}, logged: map[string]bool{},
 		results: make(chan alert.Result, 4096),
 	}
 	if deps.Worker != nil {
@@ -298,14 +357,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cancelRun = cancel
 	d.failMu.Unlock()
 
-	d.mu.Lock()
-	err := d.start()
-	d.mu.Unlock()
-	if err != nil {
-		d.fail(err)
-		return d.finish(err)
-	}
-
+	// The worker and the result loop run before start: the first records can
+	// already notify (a recovery), and a start that fails because the audit
+	// log is full still sends its stop notice.
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	workerDone, resultsDone, hkDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	if d.deps.Worker != nil {
@@ -314,14 +368,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 		close(workerDone)
 	}
 	go d.resultLoop(resultsDone)
-	hkCtx, hkCancel := context.WithCancel(context.Background())
-	go d.housekeepLoop(hkCtx, hkDone)
 
-	loopErr := d.streamLoop(runCtx)
+	d.mu.Lock()
+	err := d.start()
+	d.mu.Unlock()
+	var loopErr error
+	if err != nil {
+		d.fail(err)
+		loopErr = err
+		close(hkDone)
+	} else {
+		hkCtx, hkCancel := context.WithCancel(context.Background())
+		go d.housekeepLoop(hkCtx, hkDone)
+		loopErr = d.streamLoop(runCtx)
+		hkCancel()
+		<-hkDone
+	}
 
-	hkCancel()
-	<-hkDone
-	if loopErr == nil && d.failure() == nil {
+	// Shutdown: a stop because the audit log is full sends one notice, and a
+	// clean stop lets queued notifications finish; both within DrainTimeout.
+	switch f := d.failure(); {
+	case errors.Is(f, ErrAuditFull):
+		d.mu.Lock()
+		d.alertEvent("audit_full", "keepwatch: audit log is full, the watch daemon stopped",
+			"The audit log reached its size limit and the watch daemon stopped, because it does not run without auditing. Move the log aside as described in the audit documentation and start the daemon again.")
+		d.mu.Unlock()
+		d.drain()
+	case f == nil && loopErr == nil:
 		d.drain()
 	}
 	workerCancel()
@@ -379,52 +452,4 @@ func (d *Daemon) start() error {
 				r.Offset, r.Length, r.Hash, r.Terminated, r.Completed))
 	}
 	return nil
-}
-
-// streamLoop runs journalctl until the context ends or the loop gives up.
-func (d *Daemon) streamLoop(ctx context.Context) error {
-	backoff, fails := d.opt.BackoffMin, 0
-	for {
-		if ctx.Err() != nil {
-			return d.failure()
-		}
-		d.mu.Lock()
-		cur := d.cur
-		d.delivered = 0
-		d.mu.Unlock()
-		args, err := journal.Args(cur)
-		if err != nil {
-			return fmt.Errorf("watch: %w", err)
-		}
-		res, serr := d.deps.Streamer.Stream(ctx, append([]string{d.opt.Program}, args...), execx.StreamOpts{}, d.onLine)
-		if f := d.failure(); f != nil {
-			return f
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		if errors.Is(serr, execx.ErrNotAllowed) || errors.Is(serr, execx.ErrNotFound) {
-			return fmt.Errorf("%w: %s cannot be started: %v", ErrStreamEnded, d.opt.Program, serr)
-		}
-		d.mu.Lock()
-		reset, progress, err := d.streamEnded(res, serr, cur)
-		d.mu.Unlock()
-		if err != nil {
-			return err
-		}
-		if reset {
-			continue
-		}
-		if progress || res.Duration >= d.opt.StableAfter {
-			backoff, fails = d.opt.BackoffMin, 0
-		}
-		fails++
-		if fails > d.opt.MaxRestarts {
-			return fmt.Errorf("%w: %d restarts without progress, last exit %d", ErrStreamEnded, fails-1, res.ExitCode)
-		}
-		if err := d.opt.Sleep(ctx, backoff); err != nil {
-			return d.failure()
-		}
-		backoff = min(backoff*2, d.opt.BackoffMax)
-	}
 }

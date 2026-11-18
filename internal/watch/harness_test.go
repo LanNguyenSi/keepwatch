@@ -13,6 +13,7 @@ import (
 
 	"github.com/LanNguyenSi/keepwatch/internal/alert"
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
+	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
 	"github.com/LanNguyenSi/keepwatch/internal/notify"
@@ -68,22 +69,28 @@ type hopts struct {
 	auditMax int64
 	clean    func(string) string
 	reqs     *RequestOps
+	// dirName names the state directory (default "state").
+	dirName string
 	// beforeOpen runs after the state directory exists.
 	setup func(h *harness)
 }
 
 type harness struct {
-	t      *testing.T
-	path   string
-	dir    *securefile.Dir
-	clk    *fakeClock
-	fs     *fake.FakeStreamer
-	notif  *fakeNotifier
-	worker *alert.Worker
-	store  *incident.Store
-	aw     *audit.Writer
-	d      *Daemon
-	cursor *CursorStore
+	t    *testing.T
+	path string
+	dir  *securefile.Dir
+	// storeDir and curDir are the handles of the incident store and the
+	// cursor store; a test closes one to make that store's writes fail.
+	storeDir *securefile.Dir
+	curDir   *securefile.Dir
+	clk      *fakeClock
+	fs       *fake.FakeStreamer
+	notif    *fakeNotifier
+	worker   *alert.Worker
+	store    *incident.Store
+	aw       *audit.Writer
+	d        *Daemon
+	cursor   *CursorStore
 
 	mu     sync.Mutex
 	sleeps []time.Duration
@@ -100,18 +107,31 @@ func args(cursor string) []string {
 func newHarness(t *testing.T, o hopts) *harness {
 	t.Helper()
 	h := &harness{t: t, clk: &fakeClock{t: t0}, fs: fake.NewStreamer(), notif: &fakeNotifier{}}
-	h.path = filepath.Join(t.TempDir(), "state")
+	name := o.dirName
+	if name == "" {
+		name = "state"
+	}
+	h.path = filepath.Join(t.TempDir(), name)
 	dir, err := securefile.OpenDir(h.path, true, securefile.DefaultOwnerOf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { dir.Close() })
 	h.dir = dir
-	h.cursor = NewCursorStore(dir)
+	open := func() *securefile.Dir {
+		d, err := securefile.OpenDir(h.path, true, securefile.DefaultOwnerOf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { d.Close() })
+		return d
+	}
+	h.storeDir, h.curDir = open(), open()
+	h.cursor = NewCursorStore(h.curDir)
 	if o.setup != nil {
 		o.setup(h)
 	}
-	h.store, err = incident.Open(dir, o.store...)
+	h.store, err = incident.Open(h.storeDir, o.store...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,3 +343,29 @@ func plainLine(cursor string, at time.Time) string {
 
 // script adds a script for the argv of the given cursor.
 func (h *harness) script(cursor string, s fake.Script) { h.fs.Add(args(cursor), s) }
+
+// steps replaces the streamer by one that delivers the given lines and runs
+// the given functions in order, then waits for the context. An item is a line
+// (string) or a func(), which lets a test wait for an effect between lines.
+func (h *harness) steps(items ...any) {
+	h.d.deps.Streamer = streamFunc(func(ctx context.Context, _ []string, _ execx.StreamOpts, on func([]byte) error) (execx.StreamResult, error) {
+		for _, it := range items {
+			switch v := it.(type) {
+			case string:
+				if err := on([]byte(v)); err != nil {
+					return execx.StreamResult{}, err
+				}
+			case func():
+				v()
+			}
+		}
+		<-ctx.Done()
+		return execx.StreamResult{}, ctx.Err()
+	})
+}
+
+const oomKillLine = "Out of memory: Killed process 77 (worker) total-vm:1kB, anon-rss:1kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:1kB oom_score_adj:0"
+
+// oomAt is a kernel line of the OOM kill of "worker"; the rule reports the
+// same victim again after its 10m window.
+func oomAt(c string, at time.Time) string { return kernLine(c, at, oomKillLine) }

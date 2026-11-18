@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 	"github.com/LanNguyenSi/keepwatch/internal/event"
@@ -29,7 +28,7 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		if err := d.noise("incident_full", audit.InputError, "the incident store is full of more severe incidents; a signal was refused"); err != nil {
 			return err
 		}
-		if res.Incident.Notify {
+		if res.Incident.Notify && d.due(string(res.Incident.Fingerprint)) {
 			inc := res.Incident
 			inc.ID = "refused"
 			return d.notifyIncident(inc, true)
@@ -46,7 +45,8 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		}
 	}
 	for _, ev := range res.Evicted {
-		if err := d.record(audit.IncidentClose, ev.ID, string(ev.Fingerprint), fmt.Sprintf("evicted to make room, it was %s", ev.State)); err != nil {
+		if err := d.recordLimited("incident_evicted", audit.IncidentClose, ev.ID, string(ev.Fingerprint),
+			fmt.Sprintf("evicted to make room, it was %s", ev.State), "incidents were evicted to make room, not audited one by one"); err != nil {
 			return err
 		}
 	}
@@ -58,22 +58,31 @@ func (d *Daemon) handleSignal(sig event.Signal) error {
 		kind = audit.IncidentReopen
 	}
 	in := res.Incident
-	if err := d.record(kind, in.ID, string(in.Fingerprint), fmt.Sprintf("[%s] %s: %s", in.Severity, in.Title, in.Summary)); err != nil {
+	text := fmt.Sprintf("[%s] %s: %s", in.Severity, in.Title, in.Summary)
+	if kind == audit.IncidentOpen {
+		err = d.recordLimited("incident_open", kind, in.ID, string(in.Fingerprint), text, "incidents were opened for new fingerprints, not audited one by one")
+	} else {
+		err = d.record(kind, in.ID, string(in.Fingerprint), text)
+	}
+	if err != nil {
 		return err
 	}
+	d.markLogged(in.ID)
 	if res.Notify || (res.Pending && d.due(string(in.Fingerprint))) {
 		return d.notifyIncident(in, false)
 	}
 	return nil
 }
 
-// cutBytes cuts s to at most n bytes at a character boundary.
-func cutBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
+// markLogged remembers that the audit log mentions the incident, so the
+// housekeeping retry does not have to say so (see reconcileNotifications).
+func (d *Daemon) markLogged(id string) {
+	if len(d.logged) >= maxLogged {
+		clear(d.logged)
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
+	d.logged[id] = true
 }
+
+// maxLogged bounds the set of logged incident ids; at the bound the set starts
+// over, which costs at most one extra record per incident.
+const maxLogged = 4096

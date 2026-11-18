@@ -67,6 +67,7 @@ func (d *Daemon) handleResult(r alert.Result) error {
 	case alert.Sent:
 		d.release(fp)
 		delete(d.tries, fp)
+		d.noticeSent(fp)
 		if err := d.record(audit.NotifySent, id, fp, "notification sent"); err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ func (d *Daemon) handleResult(r alert.Result) error {
 		st := d.tries[fp]
 		st.failures++
 		st.notBefore = r.At.Add(d.gap(st.failures))
-		d.tries[fp] = st
+		d.setTry(fp, st)
 		return d.record(audit.NotifyFailed, id, fp, fmt.Sprintf("notification failed (%s): %s", r.Class, d.safe(r.Detail)))
 	case alert.Dropped:
 		if r.Reason == alert.DropShutdown {
@@ -154,46 +155,120 @@ func (d *Daemon) notifyIncident(in incident.Incident, refused bool) error {
 	if refused {
 		id = ""
 	}
-	if len(d.tries) >= maxTries {
-		for k, st := range d.tries {
-			if now.After(st.notBefore) && d.inflight[k] == 0 {
-				delete(d.tries, k)
-			}
-		}
-	}
 	st := d.tries[fp]
 	st.notBefore = now.Add(d.gap(st.failures))
-	d.tries[fp] = st
+	d.setTry(fp, st)
 	switch d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)}) {
 	case alert.DropIncident, alert.DropGlobal:
 		if !refused {
+			// The limit decided there is no message now: the incident counts as
+			// notified and its pacing entry goes.
+			delete(d.tries, fp)
 			return d.markNotified(in.ID, now)
 		}
 	}
 	return nil
 }
 
+// setTry stores the pacing of fp. At maxTries entries it first drops the
+// expired ones that are not in flight, and then the one with the oldest
+// notBefore, so the map never grows past the bound.
+func (d *Daemon) setTry(fp string, st tryState) {
+	if _, ok := d.tries[fp]; !ok && len(d.tries) >= maxTries {
+		now := d.now()
+		oldest, oldestAt := "", time.Time{}
+		for k, t := range d.tries {
+			if now.After(t.notBefore) && d.inflight[k] == 0 {
+				delete(d.tries, k)
+			} else if oldest == "" || t.notBefore.Before(oldestAt) {
+				oldest, oldestAt = k, t.notBefore
+			}
+		}
+		if len(d.tries) >= maxTries {
+			delete(d.tries, oldest)
+		}
+	}
+	d.tries[fp] = st
+}
+
+// notice is the text of a daemon notice that has not been sent yet. It is
+// cleaned when it is stored.
+type notice struct {
+	title, body string
+	// again is set when the event happened once more while the notice was in
+	// flight: the next send is still due after this one succeeded.
+	again bool
+}
+
+// noticeSent ends a notice whose send succeeded, unless the event came again
+// meanwhile.
+func (d *Daemon) noticeSent(fp string) {
+	n, ok := d.notices[fp]
+	switch {
+	case !ok:
+	case n.again:
+		n.again = false
+		d.notices[fp] = n
+	default:
+		delete(d.notices, fp)
+	}
+}
+
+// maxNotices bounds the pending daemon notices; their keys are a small fixed
+// set, so the bound is never reached in practice.
+const maxNotices = 16
+
 // alertEvent notifies a security-relevant event of the daemon itself (not an
-// incident) with the worker's limits; the text is cleaned like any other.
+// incident), at high priority. The notice stays pending until it was sent:
+// the housekeeping pass retries it under the same gap pacing as an incident,
+// so a failed send, a limit and a full queue do not lose it.
 func (d *Daemon) alertEvent(key, title, body string) {
 	if d.deps.Worker == nil {
 		return
 	}
-	d.enqueue(alert.Job{
-		Fingerprint: string(event.FingerprintOf("daemon", key)),
-		Msg: notify.Message{
-			Title: d.safe(title), Body: d.safe(body),
-			Priority: notify.PriorityOf(result.High), Tags: []string{"keepwatch", string(result.High)},
-		},
-	})
+	fp := string(event.FingerprintOf("daemon", key))
+	if _, ok := d.notices[fp]; !ok && len(d.notices) >= maxNotices {
+		return
+	}
+	n := notice{title: d.safe(title), body: d.safe(body), again: d.inflight[fp] > 0}
+	d.notices[fp] = n
+	if !n.again {
+		d.sendNotice(fp)
+	}
+}
+
+func (d *Daemon) sendNotice(fp string) {
+	n := d.notices[fp]
+	st := d.tries[fp]
+	st.notBefore = d.now().Add(d.gap(st.failures))
+	d.setTry(fp, st)
+	d.enqueue(alert.Job{Fingerprint: fp, Msg: notify.Message{
+		Title: n.title, Body: n.body,
+		Priority: notify.PriorityOf(result.High), Tags: []string{"keepwatch", string(result.High)},
+	}})
 }
 
 // reconcileNotifications retries the incidents that want a notification and
 // have none recorded: a failed or dropped send, or a crash before the
 // enqueue. Attempts are paced by gap.
 func (d *Daemon) reconcileNotifications() error {
+	for fp := range d.notices {
+		if d.due(fp) {
+			d.sendNotice(fp)
+		}
+	}
 	for _, in := range d.deps.Incidents.List() {
 		if in.State == incident.StateOpen && in.Notify && in.NotifiedAt.IsZero() && d.due(string(in.Fingerprint)) {
+			// An incident the log does not mention (its record was lost in a
+			// crash, or a replayed line gave no signal) is mentioned before
+			// anything is sent for it.
+			if !d.logged[in.ID] {
+				if err := d.record(audit.IncidentUpdate, in.ID, string(in.Fingerprint),
+					fmt.Sprintf("found without a recorded notification: [%s] %s: %s", in.Severity, in.Title, in.Summary)); err != nil {
+					return err
+				}
+				d.markLogged(in.ID)
+			}
 			if err := d.notifyIncident(in, false); err != nil {
 				return err
 			}
