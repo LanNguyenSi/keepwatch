@@ -368,3 +368,61 @@ func TestOneCleanCallSite(t *testing.T) {
 		t.Fatalf("Clean is called at %v, want one site", sites)
 	}
 }
+
+// Incident records reach the audit log only through admit: no other call
+// names an incident kind, and writeSig, which writes them, is called only by
+// admit.
+func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
+	fset := token.NewFileSet()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	incidentKinds := map[string]bool{"IncidentOpen": true, "IncidentUpdate": true, "IncidentReopen": true, "IncidentClose": true}
+	writers := map[string]bool{"record": true, "appendRecord": true, "recordNoise": true, "noise": true, "noiseN": true}
+	var bad []string
+	writeSigCalls := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range af.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				c, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := c.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "writeSig" {
+					writeSigCalls++
+					if fn.Name.Name != "admit" {
+						bad = append(bad, fset.Position(c.Pos()).String()+": writeSig outside admit")
+					}
+				}
+				if !writers[sel.Sel.Name] {
+					return true
+				}
+				for _, a := range c.Args {
+					if k, ok := a.(*ast.SelectorExpr); ok && incidentKinds[k.Sel.Name] {
+						bad = append(bad, fset.Position(c.Pos()).String()+": "+sel.Sel.Name+" with audit."+k.Sel.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(bad) > 0 || writeSigCalls == 0 {
+		t.Fatalf("incident records outside admit: %v (writeSig calls %d)", bad, writeSigCalls)
+	}
+}

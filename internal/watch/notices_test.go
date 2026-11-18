@@ -245,7 +245,6 @@ func TestNoticeInFlightIsNotHandedOnAgain(t *testing.T) {
 	h.d.mu.Lock()
 	h.d.alertEvent("k", "second", "body")
 	h.d.mu.Unlock()
-	h.clk.add(time.Hour)
 	housekeepOnce(t, h)
 	time.Sleep(60 * time.Millisecond)
 	if n := h.count(audit.NotifyDropped); n != 0 {

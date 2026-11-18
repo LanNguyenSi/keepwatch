@@ -136,15 +136,18 @@ type auditLine struct {
 func (h *harness) lines() []auditLine {
 	h.t.Helper()
 	var out []auditLine
-	for _, l := range strings.SplitAfter(h.file(audit.FileName), "\n") {
+	recs := h.records()
+	for i, l := range strings.SplitAfter(h.file(audit.FileName), "\n") {
 		if l == "" {
 			continue
 		}
-		var r audit.Record
-		if err := json.Unmarshal([]byte(l), &r); err != nil {
-			h.t.Fatal(err)
+		if i >= len(recs) {
+			h.t.Fatalf("line %d has no record", i)
 		}
-		out = append(out, auditLine{rec: r, size: len(l)})
+		out = append(out, auditLine{rec: recs[i], size: len(l)})
+	}
+	if len(out) != len(recs) {
+		h.t.Fatalf("%d lines, %d records", len(out), len(recs))
 	}
 	return out
 }
@@ -256,8 +259,8 @@ func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 			t.Errorf("a notification for incident %s, which the log does not mention", l.rec.IncidentID)
 		}
 	}
-	if total := len(h.lines()); total < 50 {
-		t.Fatalf("only %d records: the flood did not run", total)
+	if total := len(h.lines()); total < 50 || len(mentioned) == 0 || incRecs[1] == 0 {
+		t.Fatalf("%d records, %d incidents mentioned: the flood did not run", total, len(mentioned))
 	}
 }
 
@@ -504,5 +507,34 @@ func TestRecordSummariesAreCut(t *testing.T) {
 func TestAuditArithmeticValues(t *testing.T) {
 	if maxNotices != 8 || DefaultAuditBudget != 10 || maxRecordSummary != 512 || DefaultNoiseInterval != time.Minute || DefaultHousekeepingInterval != 30*time.Second {
 		t.Fatal("a value of the audit volume arithmetic changed: update the package comment")
+	}
+}
+
+// Takeover records of one pass go through the budget of their rule too: over
+// it, only the incidents whose notification was accepted get one.
+func TestTakeoverRecordsAreBudgeted(t *testing.T) {
+	const g = 2
+	seeds := make([]seed, DefaultAuditBudget+5)
+	for i := range seeds {
+		seeds[i] = seed{incident.StateOpen, true, false}
+	}
+	h := newHarness(t, hopts{opt: Options{GlobalPerMinute: g}, setup: func(h *harness) { writeSeeds(t, h, seeds) }})
+	h.script("", fake.Script{Follow: true})
+	r := h.start()
+	waitFor(t, "start", func() bool { return len(h.fs.Calls()) == 1 })
+	h.clk.add(3 * time.Hour)
+	housekeepOnce(t, h)
+	waitFor(t, "sends", func() bool { return h.count(audit.NotifySent) == g })
+	if err := r.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, rec := range h.records() {
+		if strings.Contains(rec.Summary, "found without a recorded notification") {
+			n++
+		}
+	}
+	if n < DefaultAuditBudget || n > DefaultAuditBudget+g {
+		t.Fatalf("takeover records = %d, want between %d and %d", n, DefaultAuditBudget, DefaultAuditBudget+g)
 	}
 }
