@@ -302,9 +302,6 @@ func (d *Daemon) reconcileNotifications() error {
 			d.sendNotice(fp)
 		}
 	}
-	if d.noticeWaiting() {
-		return nil
-	}
 	for _, in := range d.deps.Incidents.List() {
 		if in.State == incident.StateOpen && in.Notify && in.NotifiedAt.IsZero() && d.due(string(in.Fingerprint)) {
 			if err := d.takeOver(in); err != nil {

@@ -430,25 +430,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-hkDone
 	}
 
-	// Shutdown: the pending cursor and counts are written, then a clean stop
-	// lets queued notifications finish, and a stop because the audit log is
-	// full (from any step) sends one notice first; both within DrainTimeout.
-	// Counts that the drain adds are written after it, with the same notice
-	// when that fills the log.
-	stopErr := d.flushAtStop(loopErr)
-	if d.stopNotice(stopErr) || stopErr == nil {
-		d.drain()
+	// Shutdown: a clean stop lets queued notifications finish, then the
+	// pending cursor and counts are written. A stop because the audit log is
+	// full, found by any step (a line, a stream end, the flush here), sends
+	// one notice before the worker is stopped. Each wait is bounded by
+	// DrainTimeout.
+	stopErr := d.failure()
+	if stopErr == nil {
+		stopErr = loopErr
 	}
 	if stopErr == nil {
-		d.mu.Lock()
-		stopErr = d.flushNoise(true)
-		d.mu.Unlock()
-		if stopErr == nil {
-			stopErr = d.failure()
-		}
-		if d.stopNotice(stopErr) {
-			d.drain()
-		}
+		d.drain()
+	}
+	stopErr = d.flushAtStop(stopErr)
+	if d.stopNotice(stopErr) {
+		d.drain()
 	}
 	workerCancel()
 	<-workerDone
@@ -457,14 +453,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.finish(stopErr)
 }
 
-// flushAtStop returns the error Run ends with, after saving the pending
-// cursor and, when there is no error yet, writing the pending counts.
-func (d *Daemon) flushAtStop(loopErr error) error {
+// flushAtStop saves the pending cursor and, when there is no error yet
+// (also none recorded while draining), writes the pending counts. It returns
+// the error Run ends with.
+func (d *Daemon) flushAtStop(err error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	err := d.failure()
 	if err == nil {
-		err = loopErr
+		err = d.failure()
 	}
 	if cerr := d.flushCursor(); err == nil {
 		err = cerr

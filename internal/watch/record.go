@@ -147,8 +147,8 @@ func (d *Daemon) flushNoise(all bool) error {
 
 // finish writes the last audit record and returns what Run returns: the
 // first fatal error (after a terminal daemon_error), or nil after daemon_stop.
-// stopErr is what flushAtStop and the last flush returned; a failure recorded
-// after them (by the result loop while draining) also counts.
+// stopErr is what flushAtStop returned; a failure recorded after it (by the
+// result loop while draining) also counts.
 func (d *Daemon) finish(stopErr error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -319,6 +319,30 @@ func TestFailingSendsAreBoundedPerMinute(t *testing.T) {
 	if n := len(h.notif.sent()); n != 2 {
 		t.Fatalf("send attempts = %d within one minute, want 2", n)
 	}
+	if h.count(audit.NotifyDropped) == 0 {
+		t.Fatal("the drops of the daemon's limit are not audited")
+	}
+}
+
+// A notice that the worker's per-incident limit drops (the same notice went
+// out within that interval) ends, so it does not hold incidents back.
+func TestNoticeDroppedByThePerIncidentLimitEnds(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.steps(func() {
+		h.d.mu.Lock()
+		h.d.alertEvent("k", "notice", "body")
+		h.d.mu.Unlock()
+		waitFor(t, "notice sent", func() bool { return h.count(audit.NotifySent) == 1 })
+		h.d.mu.Lock()
+		h.d.alertEvent("k", "notice", "body")
+		h.d.mu.Unlock()
+	}, sshLine(cur("1"), t0, "203.0.113.1"))
+	if err := h.runUntil("incident sent", func() bool { return h.count(audit.NotifySent) == 2 }); err != nil {
+		t.Fatal(err)
+	}
+	if ts := h.titles(); len(ts) != 2 || !strings.Contains(ts[1], "203.0.113.1") {
+		t.Fatalf("titles = %v", ts)
+	}
 }
 
 // lineSizes are the sizes of the audit file's lines, newline included.

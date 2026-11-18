@@ -428,3 +428,69 @@ func TestAcceptedNotificationKeepsItsRecordOverTheBudget(t *testing.T) {
 		t.Fatalf("incident_open records = %d, want 2: both notifications were accepted", n)
 	}
 }
+
+// The update limit applies to updates only: a reopen right after an update
+// is written.
+func TestReopenRightAfterAnUpdateIsWritten(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	h.steps(oomPid(cur("1"), t0, 100, "worker"), oomPid(cur("2"), t0, 101, "worker"), func() {
+		h.d.mu.Lock()
+		defer h.d.mu.Unlock()
+		if _, err := h.store.Close(h.store.List()[0].ID); err != nil {
+			t.Error(err)
+		}
+	}, oomPid(cur("3"), t0, 102, "worker"))
+	if err := h.runUntil("lines", func() bool { return h.savedCursor() == cur("3") }); err != nil {
+		t.Fatal(err)
+	}
+	if h.count(audit.IncidentReopen) != 1 {
+		t.Fatalf("kinds = %v", h.kinds())
+	}
+}
+
+// Idle closes of the housekeeping pass go through the same budget.
+func TestIdleClosesAreBudgeted(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true, setup: func(h *harness) {
+		writeIncidents(t, h, 3*DefaultAuditBudget, result.Low, t0.Add(-8*24*time.Hour))
+	}})
+	housekeepOnce(t, h)
+	h.d.mu.Lock()
+	err := h.d.flushNoise(true)
+	h.d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closes, counted := 0, false
+	for _, r := range h.records() {
+		if r.Kind == audit.IncidentClose {
+			closes++
+		}
+		if strings.HasPrefix(r.Summary, itoa(int64(2*DefaultAuditBudget))+" more within") {
+			counted = true
+		}
+	}
+	if closes != DefaultAuditBudget || !counted {
+		t.Fatalf("close records = %d, counted = %v: %v", closes, counted, h.kinds())
+	}
+}
+
+// Every ordinary summary is cut to maxRecordSummary bytes.
+func TestRecordSummariesAreCut(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.d.mu.Lock()
+	err := h.d.record(audit.InputError, "", "", strings.Repeat("a", 3000))
+	h.d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs := h.records(); len(rs) != 1 || len(rs[0].Summary) != maxRecordSummary {
+		t.Fatalf("records = %d, summary length = %d", len(rs), len(rs[0].Summary))
+	}
+}
+
+// The package comment's arithmetic is written for these values.
+func TestAuditArithmeticValues(t *testing.T) {
+	if maxNotices != 8 || DefaultAuditBudget != 10 || maxRecordSummary != 512 || DefaultNoiseInterval != time.Minute || DefaultHousekeepingInterval != 30*time.Second {
+		t.Fatal("a value of the audit volume arithmetic changed: update the package comment")
+	}
+}
