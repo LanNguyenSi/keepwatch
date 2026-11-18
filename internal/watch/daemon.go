@@ -247,8 +247,8 @@ type Options struct {
 	// a slot back when a send fails, so the daemon keeps its own count; the
 	// wiring sets it once here and builds the worker's Params with
 	// AlertParams. Zero selects DefaultGlobalPerMinute; New refuses a negative
-	// value, a negative AuditBudget, and a PerIncidentInterval between zero
-	// and one minute.
+	// value, a negative AuditBudget, and a PerIncidentInterval that is
+	// negative or below one minute.
 	GlobalPerMinute int
 	// TempAge and TempSweepInterval govern the sweep of stale temporary
 	// request files.
@@ -386,8 +386,8 @@ func New(deps Deps, opt Options) (*Daemon, error) {
 	}
 	// The room for notices in the worker's limit (see AlertParams) is one
 	// slot per notice key and minute, which a shorter interval does not keep.
-	if opt.PerIncidentInterval > 0 && opt.PerIncidentInterval < time.Minute {
-		return nil, errors.New("watch: PerIncidentInterval must be at least one minute")
+	if opt.PerIncidentInterval != 0 && opt.PerIncidentInterval < time.Minute {
+		return nil, errors.New("watch: PerIncidentInterval must be zero or at least one minute")
 	}
 	if deps.Clock == nil {
 		deps.Clock = time.Now
