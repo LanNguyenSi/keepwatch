@@ -596,40 +596,54 @@ func TestPostureQueueIsCountedAtStop(t *testing.T) {
 	}
 }
 
-// At the default cadence (passes 30s apart, a 1m budget window) every
-// signal of a backlog gets its own record.
-func TestPostureBacklogAtTheRealCadenceIsWritten(t *testing.T) {
-	h := newHarness(t, hopts{noWorker: true})
-	src := withPosture(h)
-	const backlog = 40
-	src.push(postureSigs("c", backlog, result.Low), nil)
-	for i := 0; i < backlog/h.d.posturePerPass(); i++ {
-		housekeepOnce(t, h)
-		h.clk.add(DefaultHousekeepingInterval)
-	}
-	h.d.mu.Lock()
-	err := h.d.flushNoise(true)
-	h.d.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opened := map[string]bool{}
-	for _, rec := range h.records() {
-		if rec.Kind == audit.IncidentOpen {
-			opened[rec.IncidentID] = true
-		}
-		if strings.Contains(rec.Summary, "were counted, not written one by one") {
-			t.Errorf("count record %q", rec.Summary)
-		}
-	}
-	list := h.store.List()
-	if len(list) != backlog {
-		t.Fatalf("incidents = %d", len(list))
-	}
-	for _, in := range list {
-		if !opened[in.ID] {
-			t.Errorf("incident %s has no incident_open record", in.ID)
-		}
+// Every signal of a backlog gets its own record: at the default cadence,
+// with a pass latency that varies by a few milliseconds (so a budget window
+// sees three passes), and with a 45s interval that does not divide the
+// window.
+func TestPostureBacklogIsWritten(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		interval time.Duration
+		latency  []time.Duration // added to the tick of pass k, cyclic
+	}{
+		{"exact", DefaultHousekeepingInterval, []time.Duration{0}},
+		{"latency", DefaultHousekeepingInterval, []time.Duration{2 * time.Millisecond, time.Millisecond, 0}},
+		{"45s", 45 * time.Second, []time.Duration{0}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, hopts{noWorker: true, opt: Options{HousekeepingInterval: c.interval}})
+			src := withPosture(h)
+			const backlog = 60
+			src.push(postureSigs("c", backlog, result.Low), nil)
+			for k := 0; len(h.store.List()) < backlog; k++ {
+				if k > backlog {
+					t.Fatal("the backlog does not drain")
+				}
+				at := t0.Add(time.Duration(k)*c.interval + c.latency[k%len(c.latency)])
+				h.clk.add(at.Sub(h.clk.now()))
+				housekeepOnce(t, h)
+			}
+			h.d.mu.Lock()
+			err := h.d.flushNoise(true)
+			h.d.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened := map[string]bool{}
+			for _, rec := range h.records() {
+				if rec.Kind == audit.IncidentOpen {
+					opened[rec.IncidentID] = true
+				}
+				if strings.Contains(rec.Summary, "were counted, not written one by one") {
+					t.Errorf("count record %q", rec.Summary)
+				}
+			}
+			for _, in := range h.store.List() {
+				if !opened[in.ID] {
+					t.Errorf("incident %s has no incident_open record", in.ID)
+				}
+			}
+		})
 	}
 }
 
@@ -640,12 +654,17 @@ func TestPosturePerPass(t *testing.T) {
 		opt  Options
 		want int
 	}{
-		{"defaults", Options{}, 5},
-		{"one pass per window", Options{HousekeepingInterval: time.Minute}, 10},
+		{"defaults", Options{}, 3},
+		{"one pass per window", Options{HousekeepingInterval: time.Minute}, 5},
+		{"45s", Options{HousekeepingInterval: 45 * time.Second}, 5},
+		{"20s", Options{HousekeepingInterval: 20 * time.Second}, 2},
 		{"pass longer than the window", Options{HousekeepingInterval: 3 * time.Minute}, 10},
 		{"many passes per window", Options{HousekeepingInterval: time.Second}, 1},
-		{"configured budget", Options{AuditBudget: 4, HousekeepingInterval: time.Minute}, 4},
-		{"configured budget at the default cadence", Options{AuditBudget: 20}, 10},
+		{"configured budget", Options{AuditBudget: 4, HousekeepingInterval: time.Minute}, 2},
+		{"configured budget at the default cadence", Options{AuditBudget: 20}, 6},
+		{"budget of one", Options{AuditBudget: 1}, 1},
+		{"a nanosecond interval", Options{HousekeepingInterval: time.Nanosecond}, 1},
+		{"negative interval", Options{HousekeepingInterval: -time.Minute}, 10},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := &Daemon{opt: c.opt.withDefaults()}
@@ -861,5 +880,70 @@ func TestPostureSortIsStable(t *testing.T) {
 		if got[i].Fingerprint != want[i].Fingerprint {
 			t.Fatalf("queue position %d: %s, want %s", i, got[i].Subject, want[i].Subject)
 		}
+	}
+}
+
+// A stop whose queued-at-stop record does not fit the audit log ends with
+// ErrAuditFull and its terminal record, also with exactly one queued signal.
+func TestPostureQueuedAtStopWithAFullAuditLog(t *testing.T) {
+	run := func(h *harness) error {
+		withPosture(h).push(postureSigs("q", h.d.posturePerPass()+1, result.Low), nil)
+		h.script("", fake.Script{Follow: true})
+		r := h.start()
+		waitFor(t, "start", func() bool { return len(h.fs.Calls()) == 1 })
+		housekeepOnce(t, h)
+		return r.stop(t)
+	}
+	probe := newHarness(t, hopts{noWorker: true})
+	if err := run(probe); err != nil {
+		t.Fatal(err)
+	}
+	sizes := lineSizes(probe)
+	before := int64(0)
+	for _, n := range sizes[:len(sizes)-2] { // all but the queued record and daemon_stop
+		before += n
+	}
+	h := newHarness(t, hopts{noWorker: true, auditMax: audit.ReserveBytes + before + 10})
+	if err := run(h); !errors.Is(err, ErrAuditFull) {
+		t.Fatalf("Run = %v, want ErrAuditFull", err)
+	}
+	k := h.kinds()
+	if last := k[len(k)-1]; last != audit.DaemonError {
+		t.Fatalf("kinds = %v, want a terminal daemon_error", k)
+	}
+}
+
+// Refusals are rate limited: several over two passes of one window give the
+// first record and one count.
+func TestPostureRefusalsAreRateLimited(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true, setup: func(h *harness) { writeIncidents(t, h, 1, result.High, t0) }})
+	src := withPosture(h)
+	foreign := func(n int) []event.Signal {
+		out := postureSigs("r", n, result.High)
+		for i := range out {
+			out[i].Fingerprint = event.FingerprintOf("seed", itoa(0))
+		}
+		return out
+	}
+	src.push(foreign(3), nil)
+	housekeepOnce(t, h)
+	h.clk.add(DefaultHousekeepingInterval)
+	src.push(foreign(2), nil)
+	housekeepOnce(t, h)
+	h.d.mu.Lock()
+	err := h.d.flushNoise(true)
+	h.d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const text = "a posture signal named an incident of another rule and was refused"
+	var got []string
+	for _, rec := range h.records() {
+		if strings.Contains(rec.Summary, text) {
+			got = append(got, rec.Summary)
+		}
+	}
+	if len(got) != 2 || got[0] != text || got[1] != "4 more within 1m0s: "+text {
+		t.Fatalf("refusal records = %q", got)
 	}
 }

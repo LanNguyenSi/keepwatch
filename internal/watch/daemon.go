@@ -221,9 +221,11 @@
 // do not want notification, posture ones, go first.
 //
 // A pass handles at most posturePerPass signals: the rule's budget shared
-// by the passes of one NoiseInterval (AuditBudget*HousekeepingInterval/
-// NoiseInterval, at least 1 and at most AuditBudget; 5 at the defaults), so
-// a backlog of signals that each write one record is written, not counted
+// by the most passes one budget window can see, which is one more than the
+// interval ratio, as a window starts at its first record and a pass can
+// come a moment late (AuditBudget/(NoiseInterval/HousekeepingInterval + 1),
+// at least 1 and at most AuditBudget; 3 at the defaults), so a backlog of
+// signals that each write one record is written, not counted
 // (a signal that evicts an incident writes two, and those are counted over
 // the budget). The rest wait in a queue of at most postureQueueMax (500, the
 // incident store's cap) for the next passes: across polls in the order of

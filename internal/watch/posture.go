@@ -28,12 +28,19 @@ const PostureMinSeverity = result.Info
 const postureQueueMax = incident.MaxIncidents
 
 // posturePerPass is how many posture signals one housekeeping pass handles:
-// the rule's budget shared by the passes of one NoiseInterval
-// (AuditBudget*HousekeepingInterval/NoiseInterval, 5 at the defaults), at
-// least 1 and at most AuditBudget, so a backlog of signals that each write
+// the rule's budget shared by the most passes that can touch one budget
+// window. A window starts at its first record and lasts NoiseInterval, so
+// with pass latency it can see NoiseInterval/HousekeepingInterval + 1
+// passes: AuditBudget/(NoiseInterval/HousekeepingInterval + 1), integer
+// division on interval counts (no overflow), at least 1 and at most
+// AuditBudget; 3 at the defaults. So a backlog of signals that each write
 // one record is written, not counted.
 func (d *Daemon) posturePerPass() int {
-	n := int(int64(d.opt.AuditBudget) * int64(d.opt.HousekeepingInterval) / int64(d.opt.NoiseInterval))
+	passes := int64(1)
+	if hk := d.opt.HousekeepingInterval; hk > 0 {
+		passes = int64(d.opt.NoiseInterval/hk) + 1
+	}
+	n := int(int64(d.opt.AuditBudget) / passes)
 	return min(max(n, 1), max(d.opt.AuditBudget, 1))
 }
 
