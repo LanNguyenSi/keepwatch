@@ -83,10 +83,10 @@ func (d *Daemon) applyRequest(it requests.Item) error {
 		return d.requestRecord(audit.IncidentAck, in, d.requestText(it, "acked"))
 	case err == nil:
 		return d.requestRecord(audit.IncidentClose, in, d.requestText(it, "closed"))
-	case te != nil && te.From == te.To:
+	case errors.As(err, &te) && te.From == te.To:
 		return d.requestRecord(audit.RequestRejected, in, d.requestText(it,
 			fmt.Sprintf("rejected: the incident is already %s (a second request, or a replay after a crash before the request was removed)", te.To)))
-	case te != nil:
+	case errors.As(err, &te):
 		return d.requestRecord(audit.RequestRejected, in, d.requestText(it,
 			fmt.Sprintf("rejected: the incident cannot move from %s to %s", te.From, te.To)))
 	case errors.Is(err, incident.ErrUnknownIncident):
