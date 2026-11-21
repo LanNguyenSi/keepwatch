@@ -141,8 +141,9 @@ func Assemble(cfg *config.Config, stateDir string, in Injections) (*Assembly, er
 		return nil, fmt.Errorf("watch: watch.notify.global_per_minute must be 0 (default) or 1 to %d, got %d", MaxGlobalPerMinute, n.GlobalPerMinute)
 	case n.Queue < 0 || n.Queue > MaxQueue:
 		return nil, fmt.Errorf("watch: watch.notify.queue must be 0 (default) or 1 to %d, got %d", MaxQueue, n.Queue)
-	case n.PerIncidentInterval < 0 || (n.PerIncidentInterval != 0 && n.PerIncidentInterval < time.Minute):
-		// The rule of New, checked before anything is opened.
+	case n.PerIncidentInterval != 0 && n.PerIncidentInterval < time.Minute:
+		// The rule of New (a negative value included), checked before
+		// anything is opened.
 		return nil, fmt.Errorf("watch: watch.notify.per_incident_interval must be 0 (default) or at least 1m, got %v", n.PerIncidentInterval)
 	case typedNil(in.Notifier):
 		return nil, errors.New("watch: the notifier is an interface holding a nil value; pass a nil interface for no notifier")
