@@ -297,6 +297,14 @@
 // login rule counts as after the learning phase, so every unknown source in
 // the backlog notifies. With a reset baseline (zero LearningStart) that holds
 // for every line anyway.
+//
+// # Assembly
+//
+// Assemble builds Deps and Options from the configuration and the state
+// directory, in one place: the constants the configuration does not have,
+// the precedence of watch.notify (a set value wins, zero is the default) and
+// the caller's preconditions (the watch lock held, an error is a failed
+// start) are documented there.
 package watch
 
 import (
