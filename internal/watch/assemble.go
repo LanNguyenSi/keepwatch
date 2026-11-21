@@ -3,6 +3,7 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -42,10 +43,13 @@ const (
 	// the package comment holds for G up to 60.
 	MaxQueue           = 1000
 	MaxGlobalPerMinute = 60
-	// SendTimeout bounds one send of the worker: the longest the ntfy client
-	// takes for its two tries, the wait between them and the longest
-	// Retry-After it honours.
+	// SendTimeout bounds one send of the worker. It is an upper bound with a
+	// margin of the longest a ntfy send takes: two tries of DefaultTimeout
+	// and one wait of max(DefaultBackoff, MaxRetryAfter) between them; the
+	// sum adds both waits, a margin of DefaultBackoff.
 	SendTimeout = 2*notify.DefaultTimeout + notify.DefaultBackoff + notify.MaxRetryAfter
+	// The least severity of a posture signal is PostureMinSeverity
+	// (posture.go), wired into posture.New here.
 )
 
 // var _ keeps posture.Source a PostureSource.
@@ -57,7 +61,9 @@ type Injections struct {
 	// Streamer runs journalctl; required (New refuses a nil one).
 	Streamer execx.Streamer
 	// Notifier sends notifications; a nil interface means no notifier is
-	// configured, and the daemon runs without a worker.
+	// configured, and the daemon runs without a worker. An interface that
+	// holds a nil pointer (or another nil value, such as a nil func) is
+	// refused: a worker over it would panic on its first send.
 	Notifier notify.Notifier
 	// Clock is the daemon clock for the daemon, the worker, the audit
 	// writer and the baseline load; nil means time.Now.
@@ -117,6 +123,14 @@ func (a *Assembly) Close() error {
 // Assemble, because audit.Open resumes the log and may append to it. An
 // error, from any step including New, is a failed start: the process exits
 // non-zero. Everything opened by then is closed before Assemble returns.
+//
+// Every step that does not need the audit writer (the option checks of New,
+// the redact patterns, the baseline and the rules, the posture source, the
+// incident store) runs before audit.Open, so a refused start leaves a torn
+// tail of the log as it is and the next start recovers it and notifies.
+// Only the worker and New come after audit.Open, and with the checks before
+// it neither can refuse; should one fail after all, the recovery notice of
+// that start is lost (the audit_recovered record stays in the log).
 func Assemble(cfg *config.Config, stateDir string, in Injections) (*Assembly, error) {
 	if cfg == nil {
 		return nil, errors.New("watch: Assemble needs a configuration")
@@ -124,9 +138,14 @@ func Assemble(cfg *config.Config, stateDir string, in Injections) (*Assembly, er
 	n := cfg.Watch.Notify
 	switch {
 	case n.GlobalPerMinute < 0 || n.GlobalPerMinute > MaxGlobalPerMinute:
-		return nil, fmt.Errorf("watch: watch.notify.global_per_minute must be between 1 and %d, got %d", MaxGlobalPerMinute, n.GlobalPerMinute)
+		return nil, fmt.Errorf("watch: watch.notify.global_per_minute must be 0 (default) or 1 to %d, got %d", MaxGlobalPerMinute, n.GlobalPerMinute)
 	case n.Queue < 0 || n.Queue > MaxQueue:
-		return nil, fmt.Errorf("watch: watch.notify.queue must be between 1 and %d, got %d", MaxQueue, n.Queue)
+		return nil, fmt.Errorf("watch: watch.notify.queue must be 0 (default) or 1 to %d, got %d", MaxQueue, n.Queue)
+	case n.PerIncidentInterval < 0 || (n.PerIncidentInterval != 0 && n.PerIncidentInterval < time.Minute):
+		// The rule of New, checked before anything is opened.
+		return nil, fmt.Errorf("watch: watch.notify.per_incident_interval must be 0 (default) or at least 1m, got %v", n.PerIncidentInterval)
+	case typedNil(in.Notifier):
+		return nil, errors.New("watch: the notifier is an interface holding a nil value; pass a nil interface for no notifier")
 	}
 	a := &Assembly{}
 	if err := a.build(cfg, stateDir, in); err != nil {
@@ -162,6 +181,17 @@ func (a *Assembly) build(cfg *config.Config, stateDir string, in Injections) (er
 	if err = step("redact patterns", err); err != nil {
 		return err
 	}
+	baseline := NewBaselineStore(a.dir)
+	var known map[string][]string
+	known, a.Dropped = knownKeys(cfg.AuthorizedKeys.Expected)
+	engine, err := buildEngine(cfg.Watch, known, baseline.Load(clock()))
+	if err = step("rules", err); err != nil {
+		return err
+	}
+	st, err := state.Open(stateDir)
+	if err = step("posture", err); err != nil {
+		return err
+	}
 	store, err := incident.Open(a.dir, incident.WithIdleClose(IdleClose))
 	if err = step("incident store", err); err != nil {
 		return err
@@ -173,20 +203,9 @@ func (a *Assembly) build(cfg *config.Config, stateDir string, in Injections) (er
 	if err = step("audit log", err); err != nil {
 		return err
 	}
-	a.deps = Deps{Streamer: in.Streamer, Clock: clock, Clean: red.Clean, Incidents: store, Audit: a.aw, Recovery: rec,
-		Cursor: NewCursorStore(a.dir), Requests: StateRequests(stateDir), Baseline: NewBaselineStore(a.dir)}
-
-	var known map[string][]string
-	known, a.Dropped = knownKeys(cfg.AuthorizedKeys.Expected)
-	a.deps.Engine, err = buildEngine(cfg.Watch, known, a.deps.Baseline.Load(clock()))
-	if err = step("rules", err); err != nil {
-		return err
-	}
-	st, err := state.Open(stateDir)
-	if err = step("posture", err); err != nil {
-		return err
-	}
-	a.deps.Posture = postureOf(posture.New(st, PostureMinSeverity))
+	a.deps = Deps{Streamer: in.Streamer, Clock: clock, Clean: red.Clean, Engine: engine, Incidents: store,
+		Audit: a.aw, Recovery: rec, Cursor: NewCursorStore(a.dir), Requests: StateRequests(stateDir),
+		Baseline: baseline, Posture: postureOf(posture.New(st, PostureMinSeverity))}
 
 	a.opt = Options{GlobalPerMinute: n.GlobalPerMinute, PerIncidentInterval: n.PerIncidentInterval}
 	if in.Notifier != nil {
@@ -206,6 +225,19 @@ func (a *Assembly) build(cfg *config.Config, stateDir string, in Injections) (er
 		return err
 	}
 	return nil
+}
+
+// typedNil reports whether v is a non-nil interface that holds a nil
+// pointer, map, func, chan, interface or slice.
+func typedNil(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch r := reflect.ValueOf(v); r.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Interface, reflect.Slice:
+		return r.IsNil()
+	}
+	return false
 }
 
 // postureOf returns src as a PostureSource, and a nil interface (posture

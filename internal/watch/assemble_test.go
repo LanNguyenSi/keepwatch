@@ -16,8 +16,10 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/alert"
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 	"github.com/LanNguyenSi/keepwatch/internal/config"
+	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
+	"github.com/LanNguyenSi/keepwatch/internal/notify"
 	"github.com/LanNguyenSi/keepwatch/internal/posture"
 	"github.com/LanNguyenSi/keepwatch/internal/requests"
 	"github.com/LanNguyenSi/keepwatch/internal/rules"
@@ -139,7 +141,9 @@ func TestAssembleDefaultsMatchConfig(t *testing.T) {
 	if n.Queue != DefaultQueue || n.GlobalPerMinute != DefaultGlobalPerMinute || n.PerIncidentInterval != time.Hour {
 		t.Fatalf("config defaults %+v, watch defaults queue %d, global %d, per incident 1h", n, DefaultQueue, DefaultGlobalPerMinute)
 	}
-	loadConfig(t, fmt.Sprintf("watch:\n  notify:\n    queue: %d\n    global_per_minute: %d\n", MaxQueue, MaxGlobalPerMinute))
+	// The configuration's upper bounds are accepted by Assemble too.
+	top := loadConfig(t, fmt.Sprintf("watch:\n  notify:\n    queue: %d\n    global_per_minute: %d\n", MaxQueue, MaxGlobalPerMinute))
+	assembleT(t, top, newStateDir(t), Injections{Notifier: &fakeNotifier{}})
 	for _, y := range []string{
 		fmt.Sprintf("watch:\n  notify:\n    queue: %d\n", MaxQueue+1),
 		fmt.Sprintf("watch:\n  notify:\n    global_per_minute: %d\n", MaxGlobalPerMinute+1),
@@ -259,11 +263,15 @@ func TestAssembleRefusesOutOfRangeNotify(t *testing.T) {
 			t.Errorf("%+v: %v", n, err)
 		}
 	}
-	// A per-incident interval New refuses is a failed start too.
-	cfg := loadConfig(t, "watch:\n  enabled: true\n")
-	cfg.Watch.Notify.PerIncidentInterval = 30 * time.Second
-	if _, err := Assemble(cfg, newStateDir(t), Injections{Streamer: newFeed().streamer()}); err == nil {
-		t.Error("a per-incident interval below one minute was accepted")
+	// A per-incident interval New refuses is refused before anything is
+	// opened too.
+	for _, d := range []time.Duration{30 * time.Second, -time.Minute} {
+		cfg := loadConfig(t, "watch:\n  enabled: true\n")
+		cfg.Watch.Notify.PerIncidentInterval = d
+		_, err := Assemble(cfg, filepath.Join(t.TempDir(), "none"), Injections{Streamer: newFeed().streamer()})
+		if err == nil || !strings.Contains(err.Error(), "per_incident_interval") {
+			t.Errorf("per-incident interval %v: %v", d, err)
+		}
 	}
 }
 
@@ -453,9 +461,9 @@ func TestAssemblePosture(t *testing.T) {
 	}
 }
 
-// The Recovery of audit.Open reaches the daemon.
-func TestAssembleHandsRecovery(t *testing.T) {
-	dir := newStateDir(t)
+// tornTail leaves an audit log in dir that ends in a torn record.
+func tornTail(t *testing.T, dir string) {
+	t.Helper()
 	sd, err := securefile.OpenDir(dir, false, securefile.DefaultOwnerOf)
 	if err != nil {
 		t.Fatal(err)
@@ -475,6 +483,12 @@ func TestAssembleHandsRecovery(t *testing.T) {
 	}
 	f.WriteString(`{"seq":2,"ti`)
 	f.Close()
+}
+
+// The Recovery of audit.Open reaches the daemon.
+func TestAssembleHandsRecovery(t *testing.T) {
+	dir := newStateDir(t)
+	tornTail(t, dir)
 	at := t0.Add(time.Hour)
 	a := assembleT(t, loadConfig(t, "watch:\n  enabled: true\n"), dir, Injections{Clock: (&fakeClock{t: at}).now})
 	if a.deps.Recovery == nil || a.Daemon.deps.Recovery != a.deps.Recovery {
@@ -488,7 +502,7 @@ func TestAssembleHandsRecovery(t *testing.T) {
 	}
 }
 
-var assembleSteps = []string{"state directory", "redact patterns", "incident store", "audit log", "rules", "posture", "alert worker", "daemon"}
+var assembleSteps = []string{"state directory", "redact patterns", "rules", "posture", "incident store", "audit log", "alert worker", "daemon"}
 
 // closedState reports what of a is still open.
 func stillOpen(a *Assembly) []string {
@@ -535,7 +549,8 @@ func TestAssembleCleanupOnFailure(t *testing.T) {
 			if open := stillOpen(got); len(open) > 0 {
 				t.Errorf("still open after a failure at %s: %q", step, open)
 			}
-			if got.dir == nil || (step != "state directory" && step != "redact patterns" && step != "incident store" && got.aw == nil) {
+			afterAudit := slices.Index(assembleSteps, step) >= slices.Index(assembleSteps, "audit log")
+			if got.dir == nil || afterAudit != (got.aw != nil) {
 				t.Errorf("the failure at %s found nothing opened", step)
 			}
 		})
@@ -554,16 +569,13 @@ func TestAssembleCleanupOnFailure(t *testing.T) {
 			t.Errorf("still open: %q", open)
 		}
 	})
-	t.Run("New refuses", func(t *testing.T) {
+	t.Run("New's option rule checked before anything is opened", func(t *testing.T) {
 		bad := loadConfig(t, "watch:\n  enabled: true\n")
 		bad.Watch.Notify.PerIncidentInterval = time.Second
 		var got *Assembly
 		_, err := Assemble(bad, newStateDir(t), Injections{Streamer: newFeed().streamer(), fail: func(_ string, a *Assembly) error { got = a; return nil }})
-		if err == nil || got.aw == nil {
-			t.Fatalf("Assemble: %v", err)
-		}
-		if open := stillOpen(got); len(open) > 0 {
-			t.Errorf("still open: %q", open)
+		if err == nil || got != nil {
+			t.Fatalf("Assemble: %v, steps run: %t", err, got != nil)
 		}
 	})
 	t.Run("Close", func(t *testing.T) {
@@ -689,5 +701,125 @@ func TestAssembleRefusesMissingParts(t *testing.T) {
 	}
 	if _, err := Assemble(cfg, filepath.Join(t.TempDir(), "none"), Injections{Streamer: st}); err == nil || !strings.Contains(err.Error(), "state directory") {
 		t.Errorf("a missing state directory: %v", err)
+	}
+}
+
+// An interface holding a nil notifier is refused before anything is
+// opened; a worker over it would panic on its first send.
+func TestAssembleRefusesTypedNilNotifier(t *testing.T) {
+	cfg := loadConfig(t, "watch:\n  enabled: true\n")
+	var ntfy *notify.Ntfy
+	var fn notifierFunc
+	for _, n := range []notify.Notifier{ntfy, fn} {
+		var got *Assembly
+		_, err := Assemble(cfg, newStateDir(t), Injections{Streamer: newFeed().streamer(), Notifier: n,
+			fail: func(_ string, a *Assembly) error { got = a; return nil }})
+		if err == nil || !strings.Contains(err.Error(), "nil") || got != nil {
+			t.Errorf("%T: %v, steps run: %t", n, err, got != nil)
+		}
+	}
+	if typedNil(&fakeNotifier{}) || typedNil(nil) {
+		t.Error("typedNil misreads a real notifier or a nil interface")
+	}
+}
+
+// The rules remember more than one key: interleaved ssh sources and units
+// each reach the threshold, and an OOM victim seen again inside OOMWindow is not
+// reported again while another victim came in between.
+func TestAssembleRuleKeyCap(t *testing.T) {
+	cfg := loadConfig(t, "watch:\n  ssh_bruteforce:\n    threshold: 2\n    window: 1m\n  restart_loop:\n    threshold: 2\n    window: 1m\n")
+	restart := func(c, unit string, at time.Time) string {
+		return jline(c, at, map[string]string{"MESSAGE": unit + ": Scheduled restart job, restart counter is at 1.", "_UID": "0", "_PID": "1", "_TRANSPORT": "journal"})
+	}
+	victim := func(c, name string, at time.Time) string {
+		return kernLine(c, at, strings.Replace(oomKillLine, "77 (worker)", "78 ("+name+")", 1))
+	}
+	a, err := runFeed(t, cfg, newStateDir(t), &fakeClock{t: t0.Add(time.Hour)}, newFeed(
+		sshLine(cur("1"), t0, "10.0.0.7"), sshLine(cur("2"), t0, "10.0.0.8"),
+		sshLine(cur("3"), t0.Add(time.Second), "10.0.0.7"), sshLine(cur("4"), t0.Add(time.Second), "10.0.0.8"),
+		oomAt(cur("5"), t0), victim(cur("6"), "other", t0.Add(time.Minute)), oomAt(cur("7"), t0.Add(2*time.Minute)),
+		restart(cur("8"), "a.service", t0), restart(cur("9"), "b.service", t0),
+		restart(cur("10"), "a.service", t0.Add(time.Second)), restart(cur("11"), "b.service", t0.Add(time.Second))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, r := ruleIncidents(a, rules.IDSSHBruteForce), ruleIncidents(a, rules.IDRestartLoop); s != 2 || r != 2 {
+		t.Errorf("%d ssh and %d restart incidents, want 2 each (one per key)", s, r)
+	}
+	var counts []int
+	for _, in := range a.deps.Incidents.List() {
+		if in.RuleID == rules.IDOOMKill {
+			counts = append(counts, in.Count)
+		}
+	}
+	if len(counts) != 2 || counts[0] != 1 || counts[1] != 1 {
+		t.Errorf("OOM incident counts %v, want two victims reported once each", counts)
+	}
+}
+
+// Contract with the login rule: every fingerprint and user name knownKeys
+// keeps is known to rules.NewLoginAnomaly given the same entry unfiltered.
+func TestKnownKeysContractWithLoginRule(t *testing.T) {
+	b64 := func(n int) string { return strings.Repeat("a", n) }
+	entries := []struct{ user, fp string }{
+		{"alice", "SHA256:" + b64(43)}, {"alice", "SHA256:SHA256:" + b64(43) + "=="}, {"alice", b64(64)},
+		{"alice", b64(65)}, {"alice", "AZaz09+/"}, {"alice", "ab-c"}, {"alice", "SHA256:" + b64(64) + "="},
+		{"alice", "SHA256:" + b64(1)}, {"alice", "SHA256:"}, {strings.Repeat("u", 64), b64(43)},
+		{strings.Repeat("u", 65), b64(43)}, {"a b~", b64(43)},
+	}
+	at := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	signals := func(user, fp string, known map[string][]string) int {
+		b := rules.NewBaseline(time.Time{})
+		b.AddIP(user, "10.0.0.1")
+		r, err := rules.NewLoginAnomaly(rules.LoginParams{LearningPeriod: time.Hour, KnownKeys: known}, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		norm := strings.TrimRight(strings.TrimPrefix(strings.TrimPrefix(fp, "SHA256:"), "SHA256:"), "=")
+		ev := event.Event{Kind: event.KindJournal, Time: at, UID: 0, SystemdUnit: "ssh.service", PID: 800,
+			Message: "Accepted publickey for " + user + " from 10.0.0.1 port 22 ssh2: ED25519 SHA256:" + norm}
+		return len(r.Evaluate(ev, at))
+	}
+	keptAny := 0
+	for _, e := range entries {
+		out, _ := knownKeys(map[string][]string{e.user: {e.fp}})
+		if len(out[e.user]) != 1 {
+			continue
+		}
+		keptAny++
+		if n := signals(e.user, e.fp, map[string][]string{e.user: {e.fp}}); n != 0 {
+			t.Errorf("knownKeys keeps user %q key %q, the login rule does not know it (%d signals)", e.user, e.fp, n)
+		}
+	}
+	// Negative control: the same login without known keys signals.
+	if keptAny < 6 || signals("alice", "SHA256:"+b64(43), nil) != 1 {
+		t.Errorf("the contract measured nothing: %d kept entries, or no signal for an unknown key", keptAny)
+	}
+}
+
+// A start refused before audit.Open leaves a torn tail as it is, so the
+// next start gets the Recovery and notifies it.
+func TestAssembleKeepsRecoveryOnRefusedStart(t *testing.T) {
+	cfg := loadConfig(t, "watch:\n  enabled: true\n")
+	for _, c := range []struct {
+		name  string
+		spoil func(*config.Config)
+	}{
+		{"rules refused", func(c *config.Config) { c.Watch.SSHBruteforce = config.WatchRule{} }},
+		{"New's option rule", func(c *config.Config) { c.Watch.Notify.PerIncidentInterval = time.Second }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := newStateDir(t)
+			tornTail(t, dir)
+			bad := *cfg
+			c.spoil(&bad)
+			if _, err := Assemble(&bad, dir, Injections{Streamer: newFeed().streamer()}); err == nil {
+				t.Fatal("the spoiled configuration was accepted")
+			}
+			a := assembleT(t, cfg, dir, Injections{})
+			if a.deps.Recovery == nil {
+				t.Fatal("the start after a refused one has no Recovery to notify")
+			}
+		})
 	}
 }
