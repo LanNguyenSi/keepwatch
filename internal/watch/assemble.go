@@ -58,8 +58,8 @@ var _ PostureSource = (*posture.Source)(nil)
 // Injections are the parts of the daemon Assemble does not build from the
 // configuration.
 type Injections struct {
-	// Streamer runs journalctl; required (New refuses a nil one, Assemble
-	// an interface holding a nil value, as for Notifier).
+	// Streamer runs journalctl; required. Assemble refuses a nil interface
+	// and an interface holding a nil value, as for Notifier.
 	Streamer execx.Streamer
 	// Notifier sends notifications; a nil interface means no notifier is
 	// configured, and the daemon runs without a worker. An interface that
@@ -138,6 +138,10 @@ func Assemble(cfg *config.Config, stateDir string, in Injections) (*Assembly, er
 	}
 	n := cfg.Watch.Notify
 	switch {
+	case in.Streamer == nil:
+		// Refused here rather than by New, so that New cannot refuse
+		// after audit.Open.
+		return nil, errors.New("watch: Assemble needs a streamer")
 	case n.GlobalPerMinute < 0 || n.GlobalPerMinute > MaxGlobalPerMinute:
 		return nil, fmt.Errorf("watch: watch.notify.global_per_minute must be 0 (default) or 1 to %d, got %d", MaxGlobalPerMinute, n.GlobalPerMinute)
 	case n.Queue < 0 || n.Queue > MaxQueue:
@@ -232,13 +236,14 @@ func (a *Assembly) build(cfg *config.Config, stateDir string, in Injections) (er
 }
 
 // typedNil reports whether v is a non-nil interface that holds a nil
-// pointer, map, func, chan, interface or slice.
+// pointer, map, func, chan or slice. (An interface kind never comes out of
+// reflect.ValueOf of an interface value, so it is not listed.)
 func typedNil(v any) bool {
 	if v == nil {
 		return false
 	}
 	switch r := reflect.ValueOf(v); r.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Interface, reflect.Slice:
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice:
 		return r.IsNil()
 	}
 	return false

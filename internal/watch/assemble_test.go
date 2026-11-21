@@ -696,8 +696,9 @@ func TestAssembleRefusesMissingParts(t *testing.T) {
 	if _, err := Assemble(nil, newStateDir(t), Injections{Streamer: st}); err == nil {
 		t.Error("a nil configuration was accepted")
 	}
-	if _, err := Assemble(cfg, newStateDir(t), Injections{}); err == nil {
-		t.Error("a missing streamer was accepted")
+	var ran bool
+	if _, err := Assemble(cfg, newStateDir(t), Injections{fail: func(string, *Assembly) error { ran = true; return nil }}); err == nil || !strings.Contains(err.Error(), "streamer") || ran {
+		t.Errorf("a missing streamer: %v, steps run: %t", err, ran)
 	}
 	if _, err := Assemble(cfg, filepath.Join(t.TempDir(), "none"), Injections{Streamer: st}); err == nil || !strings.Contains(err.Error(), "state directory") {
 		t.Errorf("a missing state directory: %v", err)
@@ -710,7 +711,10 @@ func TestAssembleRefusesTypedNilNotifier(t *testing.T) {
 	cfg := loadConfig(t, "watch:\n  enabled: true\n")
 	var ntfy *notify.Ntfy
 	var fn notifierFunc
-	for _, n := range []notify.Notifier{ntfy, fn} {
+	var m mapNotifier
+	var ch chanNotifier
+	var sl sliceNotifier
+	for _, n := range []notify.Notifier{ntfy, fn, m, ch, sl} {
 		var got *Assembly
 		_, err := Assemble(cfg, newStateDir(t), Injections{Streamer: newFeed().streamer(), Notifier: n,
 			fail: func(_ string, a *Assembly) error { got = a; return nil }})
@@ -722,6 +726,17 @@ func TestAssembleRefusesTypedNilNotifier(t *testing.T) {
 		t.Error("typedNil misreads a real notifier or a nil interface")
 	}
 }
+
+// Notifiers of a map, chan and slice type, for the typed-nil kinds.
+type (
+	mapNotifier   map[string]int
+	chanNotifier  chan int
+	sliceNotifier []int
+)
+
+func (mapNotifier) Send(context.Context, notify.Message) error   { return nil }
+func (chanNotifier) Send(context.Context, notify.Message) error  { return nil }
+func (sliceNotifier) Send(context.Context, notify.Message) error { return nil }
 
 // The rules remember more than one key: interleaved ssh sources and units
 // each reach the threshold, and an OOM victim seen again inside OOMWindow is not
@@ -780,15 +795,26 @@ func TestKnownKeysContractWithLoginRule(t *testing.T) {
 			Message: "Accepted publickey for " + user + " from 10.0.0.1 port 22 ssh2: ED25519 SHA256:" + norm}
 		return len(r.Evaluate(ev, at))
 	}
+	// A kept entry must matter to the rule: known, the login gives no
+	// signal, and without it one. A dropped entry must not: the rule given
+	// it unfiltered signals the same as without it. A rules tightening that
+	// knownKeys does not follow cannot be seen here, as the rule parses the
+	// key of the line with the same check, so the line then carries no key;
+	// it is harmless for the same reason (no configured key can match).
 	keptAny := 0
 	for _, e := range entries {
 		out, _ := knownKeys(map[string][]string{e.user: {e.fp}})
+		known := signals(e.user, e.fp, map[string][]string{e.user: {e.fp}})
+		unknown := signals(e.user, e.fp, nil)
 		if len(out[e.user]) != 1 {
+			if known != unknown {
+				t.Errorf("knownKeys drops user %q key %q, the login rule knows it (%d signals, %d without it)", e.user, e.fp, known, unknown)
+			}
 			continue
 		}
 		keptAny++
-		if n := signals(e.user, e.fp, map[string][]string{e.user: {e.fp}}); n != 0 {
-			t.Errorf("knownKeys keeps user %q key %q, the login rule does not know it (%d signals)", e.user, e.fp, n)
+		if known != 0 || unknown == 0 {
+			t.Errorf("knownKeys keeps user %q key %q, the login rule does not use it (%d signals, %d without it)", e.user, e.fp, known, unknown)
 		}
 	}
 	// Negative control: the same login without known keys signals.
