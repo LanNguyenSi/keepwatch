@@ -70,8 +70,7 @@ func (d *Daemon) applyRequest(it requests.Item) error {
 	case requests.ActionClose:
 		in, err = d.deps.Incidents.Close(req.IncidentID)
 	default:
-		in, _ = d.deps.Incidents.Get(req.IncidentID)
-		return d.requestRecord(audit.RequestRejected, in, d.requestText(it, "rejected: the action is neither ack nor close"))
+		return d.requestRecord(audit.RequestRejected, incident.Incident{}, d.requestText(it, "rejected: the action is neither ack nor close"))
 	}
 	var te *incident.TransitionError
 	if errors.As(err, &te) {

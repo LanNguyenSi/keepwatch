@@ -145,13 +145,13 @@ func TestInvalidRequestRejectedOnceAndRemoved(t *testing.T) {
 		state  incident.State // the state the incident is put in first
 		id     string         // overrides the incident's id
 		reason string
-		known  bool // the record carries the incident's id and fingerprint
+		known  bool // the record carries the incident's id and fingerprint (a refused transition)
 	}{
 		{"unknown id", requests.ActionAck, incident.StateOpen, "abcdef0123456789", "no such incident", false},
 		{"ack of a closed incident", requests.ActionAck, incident.StateClosed, "", "cannot move from closed to acked", true},
 		{"close of a closed incident", requests.ActionClose, incident.StateClosed, "", "already closed", true},
 		{"ack of an acked incident", requests.ActionAck, incident.StateAcked, "", "already acked", true},
-		{"unknown action", requests.Action("reopen"), incident.StateOpen, "", "neither ack nor close", true},
+		{"unknown action", requests.Action("reopen"), incident.StateOpen, "", "neither ack nor close", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
