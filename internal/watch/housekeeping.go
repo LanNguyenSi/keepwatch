@@ -30,13 +30,17 @@ func StateRequests(stateDir string) *RequestOps {
 
 func (d *Daemon) housekeepLoop(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
-	t := time.NewTicker(d.opt.HousekeepingInterval)
-	defer t.Stop()
+	tick := d.opt.HousekeepingTick
+	if tick == nil {
+		t := time.NewTicker(d.opt.HousekeepingInterval)
+		defer t.Stop()
+		tick = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-tick:
 			d.mu.Lock()
 			err := d.housekeep()
 			d.mu.Unlock()
@@ -49,8 +53,8 @@ func (d *Daemon) housekeepLoop(ctx context.Context, done chan<- struct{}) {
 }
 
 // housekeep is the periodic pass: save the cursor, write the counts of ended
-// noise windows, close idle incidents, retry notifications and look after
-// the request spool.
+// noise windows, close idle incidents, look after the request spool and
+// retry notifications.
 func (d *Daemon) housekeep() error {
 	if err := d.flushCursor(); err != nil {
 		return err
@@ -69,10 +73,12 @@ func (d *Daemon) housekeep() error {
 			return err
 		}
 	}
-	if err := d.reconcileNotifications(); err != nil {
+	// Requests go before the notification retry, so an ack or close of this
+	// pass stops a retry that would be due in it.
+	if err := d.requestsPass(); err != nil {
 		return err
 	}
-	return d.requestsPass()
+	return d.reconcileNotifications()
 }
 
 // requestsPass handles what is wrong in the spool: a rejected entry is
@@ -80,8 +86,8 @@ func (d *Daemon) housekeep() error {
 // pass, because Remove failed, is not audited again; a name that has left the
 // listing is forgotten); a directory with more entries than one
 // listing examines is audited and notified once per episode; stale temporary
-// files are swept now and then. Accepted requests are left for the stage that
-// applies them.
+// files are swept now and then. Accepted requests are applied, audited and
+// removed (applyRequests).
 func (d *Daemon) requestsPass() error {
 	ops := d.deps.Requests
 	if ops == nil {
@@ -92,6 +98,9 @@ func (d *Daemon) requestsPass() error {
 		return d.noise("requests_pending", audit.InputError, "cannot list the request spool: "+d.safe(err.Error()))
 	}
 	seen := map[string]bool{}
+	if err := d.applyRequests(b.Items, seen); err != nil {
+		return err
+	}
 	for _, it := range append(append([]requests.Item(nil), b.Items...), b.Stray...) {
 		if it.Accepted() {
 			continue
