@@ -378,7 +378,12 @@ func TestOneCleanCallSite(t *testing.T) {
 // check in New and calls of Size and MaxSize; so it cannot be reached
 // through an alias either. The calls that hand a kind on (a wrapper passing
 // its own parameter, and the count record of a rule's window in allow) are
-// listed by name.
+// listed by name. The records of applied requests are the one second path:
+// requestRecord writes them, it is called only by applyRequest, and only with
+// one of the constants incident_ack, incident_close and request_rejected.
+// applyRequest is called only by applyRequests, applyRequests only by
+// requestsPass, and requestsPass only by housekeep and by start (the pass
+// before the stream); each of these calls must exist.
 func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -393,7 +398,22 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 	handsOn := map[string]bool{
 		"writeSig>record": false, "record>appendRecord": false, "recordNoise>appendRecord": false,
 		"noise>noiseN": false, "noiseN>take": false, "noiseN>recordNoise": false, "flushOne>recordNoise": false,
-		"allow>take": false,
+		"allow>take": false, "requestRecord>record": false,
+	}
+	// requestCallers are the only callers of the functions that lead to
+	// requestRecord, as caller>callee; each edge must exist.
+	requestCallers := map[string]bool{
+		"applyRequests>applyRequest": false, "requestsPass>applyRequests": false,
+		"housekeep>requestsPass": false, "start>requestsPass": false,
+	}
+	// requestKind reports whether e is one of the kinds requestRecord may write.
+	requestKind := func(e ast.Expr) bool {
+		k, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		x, ok := k.X.(*ast.Ident)
+		return ok && x.Name == "audit" && (k.Sel.Name == "IncidentAck" || k.Sel.Name == "IncidentClose" || k.Sel.Name == "RequestRejected")
 	}
 	constKind := func(e ast.Expr) bool {
 		switch k := e.(type) {
@@ -406,7 +426,7 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 		return false
 	}
 	var bad []string
-	writeSigCalls, checked, audits := 0, 0, 0
+	writeSigCalls, checked, audits, requestCalls := 0, 0, 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -453,6 +473,20 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 						bad = append(bad, pos+": writeSig outside admit")
 					}
 				}
+				if name == "applyRequest" || name == "applyRequests" || name == "requestsPass" {
+					edge := fn.Name.Name + ">" + name
+					if _, ok := requestCallers[edge]; !ok {
+						bad = append(bad, pos+": "+name+" called in "+fn.Name.Name)
+					}
+					requestCallers[edge] = true
+				}
+				if name == "requestRecord" {
+					requestCalls++
+					if fn.Name.Name != "applyRequest" || !constKindCall(c, 0, requestKind) {
+						bad = append(bad, pos+": requestRecord in "+fn.Name.Name+", outside applyRequest or with a kind that is not a request record kind")
+					}
+					return true
+				}
 
 				i, ok := kindArg[name]
 				if !ok {
@@ -470,13 +504,18 @@ func TestIncidentRecordsOnlyThroughAdmit(t *testing.T) {
 			})
 		}
 	}
+	for edge, seen := range requestCallers {
+		if !seen {
+			bad = append(bad, "the request call "+edge+" does not exist")
+		}
+	}
 	for edge, seen := range handsOn {
 		if !seen {
 			bad = append(bad, "the listed call "+edge+" does not exist any more")
 		}
 	}
-	if len(bad) > 0 || writeSigCalls == 0 || checked == 0 || audits == 0 {
-		t.Fatalf("incident records outside admit: %v (writeSig calls %d, writer calls with a constant kind %d, places that name the audit writer %d)", bad, writeSigCalls, checked, audits)
+	if len(bad) > 0 || writeSigCalls == 0 || checked == 0 || audits == 0 || requestCalls == 0 {
+		t.Fatalf("incident records outside admit: %v (writeSig calls %d, writer calls with a constant kind %d, places that name the audit writer %d, requestRecord calls %d)", bad, writeSigCalls, checked, audits, requestCalls)
 	}
 }
 

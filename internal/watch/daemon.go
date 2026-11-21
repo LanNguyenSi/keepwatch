@@ -75,8 +75,15 @@
 //     25.5 hours (G = 6) or 13.1 hours (G = 60) of a flood that reaches
 //     every bound at once.
 //     The other records are not in an outsider's hands: request_rejected
-//     (the spool is writable by root only), cursor_reset, and the start and
-//     stop records of a process. The daemon sends one high-priority notice
+//     (the spool is writable by root only), the records of applied requests
+//     (see Requests), cursor_reset, and the start and stop records of a
+//     process. The records of applied requests (incident_ack, incident_close
+//     and request_rejected for a request that cannot be applied) are
+//     incident records outside admit, written by requestRecord alone and
+//     bounded by requests.MaxPending per pass: at most
+//     MaxPending*(1+60s/HousekeepingInterval) = 100*3 = 300 per minute at the
+//     defaults, at most 450 KiB, on top of the flood above only when root
+//     fills the spool. The daemon sends one high-priority notice
 //     when the log passes 80 % of its limit (once per process) and one when
 //     it stops because the log is full, from whichever step found it full
 //     (a line, a stream end, the flush at shutdown); the second is handed to
@@ -141,6 +148,43 @@
 //     maxNotices (AlertParams): incident notifications hold at most
 //     GlobalPerMinute of its slots, and each notice key at most one, as
 //     long as PerIncidentInterval is at least a minute.
+//   - Requests: the request pass applies the accepted ack and close
+//     requests of the spool (at most requests.MaxPending per pass) through
+//     the incident store. It runs once in start, after the stores are open
+//     and before the stream is followed, and then in every housekeeping
+//     pass, so an ack or close takes effect within one
+//     HousekeepingInterval (30s by default). The order is apply, then audit,
+//     then Remove. A request the store refuses (an unknown, retired or
+//     evicted id, a target state already reached, any move CanTransition
+//     does not allow) is audited as request_rejected with the reason and
+//     removed. The note is cleaned first and then cut; RequestedAt is the
+//     writer's claim and appears in the summary as such, never as the
+//     record time, which is the daemon clock. A crash after the store write
+//     and before the record leaves the transition without its record, like
+//     the signal crash window above; a crash after the record and before
+//     Remove leaves the file. Either way the next start replays the request
+//     in its first request pass, before any line of the new process can
+//     reopen the incident, finds the target state reached and writes
+//     request_rejected "already acked" (or closed, or "cannot move" for an
+//     ack whose incident was closed meanwhile), never a second incident_ack
+//     or incident_close. This holds when the pass at start lists the spool:
+//     a listing failure at start is audited as input_error (not fatal) and
+//     leaves the replay to the first housekeeping pass, and while the spool
+//     is overfull the examined window is not in submission order, so a
+//     request may wait beyond the pass at start. A request_rejected for a
+//     known incident carries its id and fingerprint. A fatal error of the
+//     pass at start (audit full, a store that cannot save) stops the start.
+//     A name whose record was written is remembered while Remove keeps
+//     failing, so it is neither applied nor audited again; the memory ends
+//     when the name leaves the listing. A failing Remove is silent (no
+//     record), and while MaxPending applied names cannot be removed they
+//     fill the window requests.Pending returns, so acks and closes behind
+//     them stop until the files are gone; only root can create that state.
+//     A pass applies requests before it
+//     retries notifications, and the retry wants an open incident, so an ack
+//     or a close stops a notification that was still pending (no retry, no
+//     reconcile send after it). A notification the worker accepted before the
+//     ack can still be sent: the worker has no way to take a job back.
 //   - Cursor saves are throttled: a line that produced a signal saves at once,
 //     other lines at most once per CursorInterval, and the stream end, the
 //     housekeeping pass and the shutdown save what is pending.
@@ -228,9 +272,15 @@ type Options struct {
 	ClockSkew time.Duration
 	// DrainTimeout bounds how long shutdown waits for queued notifications.
 	DrainTimeout time.Duration
-	// HousekeepingInterval is the period of the housekeeping pass.
+	// HousekeepingInterval is the period of the housekeeping pass. It is also
+	// the latency of an ack or close request: the pass applies them.
 	HousekeepingInterval time.Duration
-	CursorInterval       time.Duration
+	// HousekeepingTick is the tick source of the housekeeping pass: each value
+	// received starts one pass. Nil means a time.Ticker with
+	// HousekeepingInterval. Tests replace it; it must not be closed while Run
+	// runs.
+	HousekeepingTick <-chan time.Time
+	CursorInterval   time.Duration
 	// PerIncidentInterval is the least time between two notices of one
 	// incident, and the base of the retry pacing. The alert worker has the
 	// same parameter with another zero meaning (off), so the wiring sets it
@@ -556,7 +606,8 @@ func (d *Daemon) drain() {
 	}
 }
 
-// start writes daemon_start, loads the cursor and notifies a recovery.
+// start writes daemon_start, loads the cursor, notifies a recovery and runs
+// the request pass once.
 func (d *Daemon) start() error {
 	cur, err := d.deps.Cursor.Load()
 	reason := ""
@@ -589,5 +640,8 @@ func (d *Daemon) start() error {
 			fmt.Sprintf("The audit log ended in a torn region (offset %d, %d bytes, sha256 %s, terminated %t, completed %t); a record accounts for it. Check the log with keepwatch audit verify.",
 				r.Offset, r.Length, r.Hash, r.Terminated, r.Completed))
 	}
-	return nil
+	// The request pass runs once before the stream is followed, so a request
+	// replayed after a restart meets the state the previous process left,
+	// before a line can reopen its incident.
+	return d.requestsPass()
 }

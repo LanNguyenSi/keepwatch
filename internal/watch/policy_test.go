@@ -571,15 +571,6 @@ func TestRejectedRequestAuditedOncePerName(t *testing.T) {
 	h.verify()
 }
 
-func TestAcceptedRequestsAreLeftAlone(t *testing.T) {
-	sp := &spool{batch: requests.Batch{Items: []requests.Item{{Name: "req-ok", Request: requests.Request{Action: requests.ActionAck}}}}}
-	h := newHarness(t, hopts{reqs: sp.ops()})
-	housekeepOnce(t, h)
-	if len(sp.removed) != 0 || h.count(audit.RequestRejected) != 0 {
-		t.Fatalf("removed=%v kinds=%v", sp.removed, h.kinds())
-	}
-}
-
 func TestOverfullSpoolAuditedAndNotifiedOncePerEpisode(t *testing.T) {
 	sp := &spool{batch: requests.Batch{Overfull: true}}
 	h := newHarness(t, hopts{reqs: sp.ops()})
