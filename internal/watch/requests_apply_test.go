@@ -433,6 +433,27 @@ func TestRequestRecordAtTheAuditLimitIsFatal(t *testing.T) {
 	}
 }
 
+// The pass at start is part of start: a request record the audit log has no
+// room for (daemon_start fits, the request record does not) ends Run with
+// ErrAuditFull, and the request is not removed.
+func TestStartPassErrorEndsRun(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true, auditMax: audit.ReserveBytes + 400})
+	in := openIncident(t, h, "1", "t", false)
+	sp := &spool{batch: requests.Batch{Items: []requests.Item{accepted("req-a", requests.ActionAck, in.ID, strings.Repeat("n", 300))}}}
+	h.d.deps.Requests = sp.ops()
+	h.script("", fake.Script{Follow: true})
+	err := h.start().wait(t)
+	if !errors.Is(err, ErrAuditFull) {
+		t.Fatalf("Run = %v, want ErrAuditFull", err)
+	}
+	if h.count(audit.DaemonStart) != 1 || h.count(audit.IncidentAck) != 0 {
+		t.Fatalf("kinds = %v, want daemon_start and no incident_ack", h.kinds())
+	}
+	if len(sp.removed) != 0 {
+		t.Fatalf("Remove calls = %q, want none", sp.removed)
+	}
+}
+
 // A store that cannot save stops the pass with the store's error: no record
 // is written, and the request is neither removed nor remembered.
 func TestRequestWithAFailingStoreIsFatal(t *testing.T) {

@@ -167,9 +167,14 @@
 //     reopen the incident, finds the target state reached and writes
 //     request_rejected "already acked" (or closed, or "cannot move" for an
 //     ack whose incident was closed meanwhile), never a second incident_ack
-//     or incident_close. A request_rejected for a known incident carries its
-//     id and fingerprint. A
-//     name whose record was written is remembered while Remove keeps
+//     or incident_close. This holds when the pass at start lists the spool:
+//     a listing failure at start is audited as input_error (not fatal) and
+//     leaves the replay to the first housekeeping pass, and while the spool
+//     is overfull the examined window is not in submission order, so a
+//     request may wait beyond the pass at start. A request_rejected for a
+//     known incident carries its id and fingerprint. A fatal error of the
+//     pass at start (audit full, a store that cannot save) stops the start.
+//     A name whose record was written is remembered while Remove keeps
 //     failing, so it is neither applied nor audited again; the memory ends
 //     when the name leaves the listing. A failing Remove is silent (no
 //     record), and while MaxPending applied names cannot be removed they
