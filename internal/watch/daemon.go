@@ -203,30 +203,44 @@
 // cleans its subject and summary again although the state file holds
 // cleaned text, as the file is input; the incident store; admit), with rule
 // id "posture" and Notify false set by the daemon whatever the source
-// returned. Every notification path (the open, the reopen, an update that
-// is pending, the refused path, the takeover of the housekeeping retry)
-// asks the incident's or the signal's Notify, and an incident takes Notify
-// only from the signal that opens or reopens it, so a posture incident is
-// never notified; `check --notify` is the one path that notifies about
-// posture. Posture records count against the budget of rule "posture", so
-// a posture flood does not use up a journal rule's budget, and the store's
-// eviction rule (a signal never evicts an open or acked incident more
-// severe than itself, and refuses with ErrFull instead) keeps a posture
-// flood from pushing out more severe journal incidents; among incidents of
-// one severity those that do not want notification, posture ones, go first.
+// returned. A signal whose fingerprint belongs to a stored incident of
+// another rule is refused and counted (signal_invalid), so it cannot take
+// over that incident's Notify; the posture package puts its rule id first
+// into every fingerprint, so its signals never meet that case. Every
+// notification path (the open, the reopen, an update that is pending, the
+// refused path, the takeover of the housekeeping retry) asks the incident's
+// or the signal's Notify, and an incident takes Notify only from the signal
+// that opens or reopens it, so a posture incident is never notified; that
+// holds while no journal rule uses the rule id "posture" (a test pins it).
+// `check --notify` is the one path that notifies about posture. Posture
+// records count against the budget of rule "posture", so a posture flood
+// does not use up a journal rule's budget, and the store's eviction rule (a
+// signal never evicts an open or acked incident more severe than itself,
+// and refuses with ErrFull instead) keeps a posture flood from pushing out
+// more severe journal incidents; among incidents of one severity those that
+// do not want notification, posture ones, go first.
 //
-// A pass handles at most posturePerPass (10) signals; the rest wait in a
-// queue of at most postureQueueMax (500, the incident store's cap) for the
-// next passes, in the order the source gave them. Signals that do not fit
-// the queue are dropped and counted through the noise path
-// (posture_overflow): the first drop of a window is written at once, the
-// rest as one count record when the window ends. A poll error is audited
-// as input_error through the noise path (posture_poll), cleaned, on every
-// pass it happens, and the queue is worked on anyway. The stall under d.mu
-// a pass adds is one load of the state file (state.MaxFileSize, 16 MiB, and
-// its comparison with the run before) and at most posturePerPass incident
-// store writes with their records, as many as ten signals of one journal
-// line.
+// A pass handles at most posturePerPass signals: the rule's budget shared
+// by the passes of one NoiseInterval (AuditBudget*HousekeepingInterval/
+// NoiseInterval, at least 1 and at most AuditBudget; 5 at the defaults), so
+// a backlog of signals that each write one record is written, not counted
+// (a signal that evicts an incident writes two, and those are counted over
+// the budget). The rest wait in a queue of at most postureQueueMax (500, the
+// incident store's cap) for the next passes: across polls in the order of
+// the polls, within one poll the most severe first (stable). Signals that do
+// not fit the queue, the least severe of the poll, are dropped and counted
+// through the noise path (posture_overflow): the first drop of a window is
+// written at once, the rest as one count record when the window ends. The
+// queue lives in memory: a clean stop counts the signals still queued
+// through the same key, with its own text, and does not handle them; a crash
+// loses them without a record. The baseline of the posture source is in
+// memory too, so these changes do not come back after a restart; `check
+// --notify` still reports them. A poll error is audited as input_error
+// through the noise path (posture_poll), cleaned, on every pass it happens,
+// and the queue is worked on anyway. The stall under d.mu a pass adds is one
+// load of the state file (state.MaxFileSize, 16 MiB, and its comparison
+// with the run before) and at most posturePerPass incident store writes with
+// their records, no more than AuditBudget signals of one journal line.
 //
 // # Login baseline
 //
@@ -656,6 +670,9 @@ func (d *Daemon) flushAtStop(err error) error {
 	}
 	if err == nil {
 		err = d.flushNoise(true)
+	}
+	if err == nil {
+		err = d.countQueuedAtStop()
 	}
 	return err
 }
