@@ -148,9 +148,11 @@
 //     maxNotices (AlertParams): incident notifications hold at most
 //     GlobalPerMinute of its slots, and each notice key at most one, as
 //     long as PerIncidentInterval is at least a minute.
-//   - Requests: the housekeeping pass applies the accepted ack and close
+//   - Requests: the request pass applies the accepted ack and close
 //     requests of the spool (at most requests.MaxPending per pass) through
-//     the incident store, so an ack or close takes effect within one
+//     the incident store. It runs once in start, after the stores are open
+//     and before the stream is followed, and then in every housekeeping
+//     pass, so an ack or close takes effect within one
 //     HousekeepingInterval (30s by default). The order is apply, then audit,
 //     then Remove. A request the store refuses (an unknown, retired or
 //     evicted id, a target state already reached, any move CanTransition
@@ -160,12 +162,20 @@
 //     record time, which is the daemon clock. A crash after the store write
 //     and before the record leaves the transition without its record, like
 //     the signal crash window above; a crash after the record and before
-//     Remove leaves the file. Either way the next start replays the request,
-//     finds the target state reached and writes request_rejected "already
-//     acked" (or closed), never a second incident_ack or incident_close. A
+//     Remove leaves the file. Either way the next start replays the request
+//     in its first request pass, before any line of the new process can
+//     reopen the incident, finds the target state reached and writes
+//     request_rejected "already acked" (or closed, or "cannot move" for an
+//     ack whose incident was closed meanwhile), never a second incident_ack
+//     or incident_close. A request_rejected for a known incident carries its
+//     id and fingerprint. A
 //     name whose record was written is remembered while Remove keeps
 //     failing, so it is neither applied nor audited again; the memory ends
-//     when the name leaves the listing. The pass applies requests before it
+//     when the name leaves the listing. A failing Remove is silent (no
+//     record), and while MaxPending applied names cannot be removed they
+//     fill the window requests.Pending returns, so acks and closes behind
+//     them stop until the files are gone; only root can create that state.
+//     A pass applies requests before it
 //     retries notifications, and the retry wants an open incident, so an ack
 //     or a close stops a notification that was still pending (no retry, no
 //     reconcile send after it). A notification the worker accepted before the
@@ -591,7 +601,8 @@ func (d *Daemon) drain() {
 	}
 }
 
-// start writes daemon_start, loads the cursor and notifies a recovery.
+// start writes daemon_start, loads the cursor, notifies a recovery and runs
+// the request pass once.
 func (d *Daemon) start() error {
 	cur, err := d.deps.Cursor.Load()
 	reason := ""
@@ -624,5 +635,8 @@ func (d *Daemon) start() error {
 			fmt.Sprintf("The audit log ended in a torn region (offset %d, %d bytes, sha256 %s, terminated %t, completed %t); a record accounts for it. Check the log with keepwatch audit verify.",
 				r.Offset, r.Length, r.Hash, r.Terminated, r.Completed))
 	}
-	return nil
+	// The request pass runs once before the stream is followed, so a request
+	// replayed after a restart meets the state the previous process left,
+	// before a line can reopen its incident.
+	return d.requestsPass()
 }

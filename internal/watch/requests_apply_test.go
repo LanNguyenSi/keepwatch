@@ -3,10 +3,14 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/LanNguyenSi/keepwatch/internal/alert"
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
 	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
@@ -141,12 +145,13 @@ func TestInvalidRequestRejectedOnceAndRemoved(t *testing.T) {
 		state  incident.State // the state the incident is put in first
 		id     string         // overrides the incident's id
 		reason string
+		known  bool // the record carries the incident's id and fingerprint
 	}{
-		{"unknown id", requests.ActionAck, incident.StateOpen, "abcdef0123456789", "no such incident"},
-		{"ack of a closed incident", requests.ActionAck, incident.StateClosed, "", "cannot move from closed to acked"},
-		{"close of a closed incident", requests.ActionClose, incident.StateClosed, "", "already closed"},
-		{"ack of an acked incident", requests.ActionAck, incident.StateAcked, "", "already acked"},
-		{"unknown action", requests.Action("reopen"), incident.StateOpen, "", "neither ack nor close"},
+		{"unknown id", requests.ActionAck, incident.StateOpen, "abcdef0123456789", "no such incident", false},
+		{"ack of a closed incident", requests.ActionAck, incident.StateClosed, "", "cannot move from closed to acked", true},
+		{"close of a closed incident", requests.ActionClose, incident.StateClosed, "", "already closed", true},
+		{"ack of an acked incident", requests.ActionAck, incident.StateAcked, "", "already acked", true},
+		{"unknown action", requests.Action("reopen"), incident.StateOpen, "", "neither ack nor close", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -172,6 +177,17 @@ func TestInvalidRequestRejectedOnceAndRemoved(t *testing.T) {
 			}
 			if h.count(audit.IncidentAck)+h.count(audit.IncidentClose) != 0 {
 				t.Fatalf("kinds = %v", h.kinds())
+			}
+			// The incident's own history (audit show by incident) holds the
+			// refusal of a known incident, and nothing for an unknown id.
+			byID := 0
+			for _, r := range rej {
+				if (audit.Filter{IncidentID: in.ID}).Match(r) && r.Fingerprint == string(in.Fingerprint) {
+					byID++
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[c.known]; byID != want || (!c.known && rej[0].IncidentID != "") {
+				t.Fatalf("records of incident %s = %d, want %d: %+v", in.ID, byID, want, rej)
 			}
 			if s := stateOf(t, h, in.ID); s != c.state {
 				t.Fatalf("state = %s, want %s unchanged", s, c.state)
@@ -309,14 +325,193 @@ func TestAckOrCloseStopsPendingNotification(t *testing.T) {
 	}
 }
 
+// restartDaemon builds a new process on the stores of h: a new daemon with
+// a new worker and no memory, whose stream delivers items (see steps).
+func restartDaemon(t *testing.T, h *harness, items ...any) {
+	t.Helper()
+	w, err := alert.NewWorker(h.notif, alert.Params{QueueSize: 16, PerIncidentInterval: 40 * time.Minute}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Clock = h.clk.now
+	deps := h.d.deps
+	deps.Worker = w
+	d, err := New(deps, h.d.opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.d, h.worker = d, w
+	h.steps(items...)
+}
+
+// A request whose Remove failed is replayed by the next process in its
+// first request pass, at start, before a line of the new process can reopen
+// the incident: the replay meets the state the previous process left and is
+// rejected, the reopened incident is not closed or acked by the stale
+// request, and its notification goes out.
+func TestReplayAtStartMeetsTheStateBeforeAReopen(t *testing.T) {
+	for _, c := range []struct {
+		action requests.Action
+		kind   audit.Kind
+		reason string
+	}{
+		{requests.ActionClose, audit.IncidentClose, "already closed"},
+		{requests.ActionAck, audit.IncidentAck, "cannot move from closed to acked"},
+	} {
+		t.Run(string(c.action), func(t *testing.T) {
+			h := newHarness(t, hopts{})
+			sp := &spool{removeE: errors.New("crash")}
+			h.d.deps.Requests = sp.ops()
+			h.steps(oomAt(cur("1"), t0))
+			r := h.start()
+			waitFor(t, "first occurrence", func() bool { return h.count(audit.NotifySent) == 1 })
+			h.d.mu.Lock()
+			id := h.store.List()[0].ID
+			sp.batch = requests.Batch{Items: []requests.Item{accepted("req-a", c.action, id, "")}}
+			h.d.mu.Unlock()
+			housekeepOnce(t, h) // applied and audited, Remove fails
+			if c.action == requests.ActionAck {
+				h.d.mu.Lock()
+				_, err := h.store.Close(id) // closed meanwhile, as by the idle sweep
+				h.d.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			sp.removeE = errors.New("still failing")
+			h.clk.add(3 * time.Hour)
+			restartDaemon(t, h, oomAt(cur("2"), t0.Add(3*time.Hour)))
+			r = h.start()
+			waitFor(t, "reopen notified", func() bool { return h.count(audit.NotifySent) == 2 })
+			housekeepOnce(t, h) // the first housekeeping pass of the new process
+			if err := r.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			if n := h.count(c.kind); n != 1 {
+				t.Fatalf("%s = %d, want 1 (no replay after the reopen): %v", c.kind, n, h.kinds())
+			}
+			rej := recordsOf(h, audit.RequestRejected)
+			if len(rej) != 1 || !strings.Contains(rej[0].Summary, c.reason) {
+				t.Fatalf("request_rejected = %+v, want one with %q", rej, c.reason)
+			}
+			var reopen audit.Record
+			for _, r := range h.records() {
+				if r.Kind == audit.IncidentReopen {
+					reopen = r
+				}
+			}
+			if reopen.Seq == 0 || rej[0].Seq > reopen.Seq {
+				t.Fatalf("the replay was not handled at start, before the reopen: %v", h.kinds())
+			}
+			if s := stateOf(t, h, id); s != incident.StateOpen {
+				t.Fatalf("state = %s, want open", s)
+			}
+			h.verify()
+		})
+	}
+}
+
+// A request record the audit log has no room for stops the pass with
+// ErrAuditFull: the request is neither removed nor remembered, so it stays
+// for the next start.
+func TestRequestRecordAtTheAuditLimitIsFatal(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true, auditMax: audit.ReserveBytes + 100})
+	in := openIncident(t, h, "1", "t", false)
+	sp := &spool{batch: requests.Batch{Items: []requests.Item{accepted("req-a", requests.ActionAck, in.ID, "")}}}
+	h.d.deps.Requests = sp.ops()
+	h.d.mu.Lock()
+	err := h.d.housekeep()
+	h.d.mu.Unlock()
+	if !errors.Is(err, ErrAuditFull) {
+		t.Fatalf("housekeep = %v, want ErrAuditFull", err)
+	}
+	if len(sp.removed) != 0 || len(h.d.rejAudited) != 0 {
+		t.Fatalf("removed = %q, memory = %v", sp.removed, h.d.rejAudited)
+	}
+}
+
+// A store that cannot save stops the pass with the store's error: no record
+// is written, and the request is neither removed nor remembered.
+func TestRequestWithAFailingStoreIsFatal(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	in := openIncident(t, h, "1", "t", false)
+	sp := &spool{batch: requests.Batch{Items: []requests.Item{accepted("req-a", requests.ActionAck, in.ID, "")}}}
+	h.d.deps.Requests = sp.ops()
+	h.storeDir.Close()
+	h.d.mu.Lock()
+	err := h.d.housekeep()
+	h.d.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "incident store") {
+		t.Fatalf("housekeep = %v, want the incident store error", err)
+	}
+	if h.count(audit.IncidentAck) != 0 || len(sp.removed) != 0 || len(h.d.rejAudited) != 0 {
+		t.Fatalf("kinds = %v, removed = %q, memory = %v", h.kinds(), sp.removed, h.d.rejAudited)
+	}
+}
+
+// The request name and the incident id are untrusted and reach the audit log
+// only cleaned: each carries the token and a control byte.
+func TestRequestNameAndIncidentIDCleaned(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	it := accepted("req-\x1b[31m"+hostileToken, requests.ActionAck, hostileToken+"\x01", "")
+	sp := &spool{batch: requests.Batch{Items: []requests.Item{it}}}
+	h.d.deps.Requests = sp.ops()
+	housekeepOnce(t, h)
+	rej := recordsOf(h, audit.RequestRejected)
+	if len(rej) != 1 {
+		t.Fatalf("records = %+v", h.records())
+	}
+	s := rej[0].Summary
+	if strings.ContainsAny(s, "\x1b\x01") || strings.Contains(s, hostileToken) || strings.Count(s, "[REDACTED]") < 2 {
+		t.Fatalf("name or id not cleaned: %q", s)
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.path, audit.FileName)); strings.Contains(string(b), hostileToken) {
+		t.Fatal("raw token in the audit log")
+	}
+	if len(sp.removed) != 1 || sp.removed[0] != it.Name {
+		t.Fatalf("Remove calls = %q, want the raw name", sp.removed)
+	}
+}
+
+// A closed tick source ends the housekeeping loop: no pass runs after the
+// one at start, where a receive from the closed channel would run passes
+// without end.
+func TestClosedHousekeepingTickEndsTheLoop(t *testing.T) {
+	var calls atomic.Int64
+	ops := (&spool{}).ops()
+	ops.Pending = func() (requests.Batch, error) { calls.Add(1); return requests.Batch{}, nil }
+	tick := make(chan time.Time)
+	close(tick)
+	h := newHarness(t, hopts{noWorker: true, reqs: ops, opt: Options{HousekeepingTick: tick}})
+	h.script("", fake.Script{Follow: true})
+	r := h.start()
+	waitFor(t, "start pass", func() bool { return calls.Load() >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	if err := r.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("request passes = %d, want 1 (the one at start)", n)
+	}
+}
+
 // The housekeeping pass runs on the injected tick source.
 func TestHousekeepingRunsOnTheInjectedTick(t *testing.T) {
 	tick := make(chan time.Time, 1)
 	h := newHarness(t, hopts{noWorker: true, opt: Options{HousekeepingTick: tick}})
 	in := openIncident(t, h, "1", "t", false)
-	h.d.deps.Requests = (&spool{batch: requests.Batch{Items: []requests.Item{accepted("req-a", requests.ActionAck, in.ID, "")}}}).ops()
+	sp := &spool{}
+	h.d.deps.Requests = sp.ops()
 	h.script("", fake.Script{Follow: true})
 	r := h.start()
+	waitFor(t, "start", func() bool { return len(h.fs.Calls()) == 1 })
+	// The request arrives after the pass at start; only a tick applies it.
+	h.d.mu.Lock()
+	sp.batch = requests.Batch{Items: []requests.Item{accepted("req-a", requests.ActionAck, in.ID, "")}}
+	h.d.mu.Unlock()
 	tick <- t0
 	waitFor(t, "ack", func() bool { return h.count(audit.IncidentAck) == 1 })
 	if err := r.stop(t); err != nil {

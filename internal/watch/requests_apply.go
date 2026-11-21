@@ -34,8 +34,9 @@ func (d *Daemon) applyRequests(items []requests.Item, seen map[string]bool) erro
 		}
 		seen[it.Name] = true
 		if !d.rejAudited[it.Name] {
-			// The bound counts the requests that write a record; a remembered
-			// one costs only its Remove, and one beyond the bound waits.
+			// requests.Pending returns at most MaxPending items; this guards
+			// against RequestOps that return more. It counts the requests
+			// that write a record, and one beyond it is left as it is.
 			if n == requests.MaxPending {
 				continue
 			}
@@ -69,19 +70,24 @@ func (d *Daemon) applyRequest(it requests.Item) error {
 	case requests.ActionClose:
 		in, err = d.deps.Incidents.Close(req.IncidentID)
 	default:
-		return d.requestRecord(audit.RequestRejected, incident.Incident{}, d.requestText(it, "rejected: the action is neither ack nor close"))
+		in, _ = d.deps.Incidents.Get(req.IncidentID)
+		return d.requestRecord(audit.RequestRejected, in, d.requestText(it, "rejected: the action is neither ack nor close"))
 	}
 	var te *incident.TransitionError
+	if errors.As(err, &te) {
+		// The refused incident exists: its record carries its id.
+		in, _ = d.deps.Incidents.Get(te.ID)
+	}
 	switch {
 	case err == nil && req.Action == requests.ActionAck:
 		return d.requestRecord(audit.IncidentAck, in, d.requestText(it, "acked"))
 	case err == nil:
 		return d.requestRecord(audit.IncidentClose, in, d.requestText(it, "closed"))
-	case errors.As(err, &te) && te.From == te.To:
-		return d.requestRecord(audit.RequestRejected, incident.Incident{}, d.requestText(it,
+	case te != nil && te.From == te.To:
+		return d.requestRecord(audit.RequestRejected, in, d.requestText(it,
 			fmt.Sprintf("rejected: the incident is already %s (a second request, or a replay after a crash before the request was removed)", te.To)))
-	case errors.As(err, &te):
-		return d.requestRecord(audit.RequestRejected, incident.Incident{}, d.requestText(it,
+	case te != nil:
+		return d.requestRecord(audit.RequestRejected, in, d.requestText(it,
 			fmt.Sprintf("rejected: the incident cannot move from %s to %s", te.From, te.To)))
 	case errors.Is(err, incident.ErrUnknownIncident):
 		return d.requestRecord(audit.RequestRejected, incident.Incident{}, d.requestText(it,

@@ -40,7 +40,12 @@ func (d *Daemon) housekeepLoop(ctx context.Context, done chan<- struct{}) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick:
+		case _, ok := <-tick:
+			if !ok {
+				// A closed tick source ends the housekeeping, instead of a
+				// pass after every receive from the closed channel.
+				return
+			}
 			d.mu.Lock()
 			err := d.housekeep()
 			d.mu.Unlock()
