@@ -8,8 +8,9 @@
 // For each journal line: decode, evaluate the rules, and for each signal
 // build the display text (the one place that cleans host text, see display),
 // apply it to the incident store, append the audit records and enqueue the
-// notification. Only then is the line "handled", and only handled lines move
-// the cursor. A crash between the work and the cursor save replays the line
+// notification. Then the login baseline is saved when the line changed it
+// (see Login baseline). Only then is the line "handled", and only handled
+// lines move the cursor. A crash between the work and the cursor save replays the line
 // on the next start (at least once, never lost). A crash between the incident
 // store write and the audit record leaves an incident the log does not mention.
 // Rule windows live in memory, so the replayed line of a threshold rule gives
@@ -76,11 +77,12 @@
 //     every bound at once.
 //     The other records are not in an outsider's hands: request_rejected
 //     (the spool is writable by root only), the records of applied requests
-//     (see Requests), cursor_reset, and the start and stop records of a
-//     process. The records of applied requests (incident_ack, incident_close
-//     and request_rejected for a request that cannot be applied) are
-//     incident records outside admit, written by requestRecord alone and
-//     bounded by requests.MaxPending per pass: at most
+//     (see Requests), cursor_reset, the input_error of a login baseline
+//     reset, and the start and stop records of a process. The records of
+//     applied requests (incident_ack, incident_close and request_rejected
+//     for a request that cannot be applied) are incident records outside
+//     admit, written by requestRecord alone and bounded by
+//     requests.MaxPending per pass: at most
 //     MaxPending*(1+60s/HousekeepingInterval) = 100*3 = 300 per minute at the
 //     defaults, at most 450 KiB, on top of the flood above only when root
 //     fills the spool. The daemon sends one high-priority notice
@@ -137,7 +139,7 @@
 //     that long inside the send; a longer one is not visible to the daemon (the
 //     error carries no such field), so the doubling gap is what honours it.
 //     Notices of the daemon itself (an audit recovery, a full spool, the audit
-//     log filling up or full) stay in a small pending set until they were
+//     log filling up or full, a login baseline reset) stay in a small pending set until they were
 //     sent; every housekeeping pass sends the ones not in flight. They go
 //     first: while one waits to be sent, no incident notification is handed
 //     to the worker (those stay unnotified for the housekeeping retry), so
@@ -188,6 +190,60 @@
 //   - Cursor saves are throttled: a line that produced a signal saves at once,
 //     other lines at most once per CursorInterval, and the stream end, the
 //     housekeeping pass and the shutdown save what is pending.
+//
+// # Login baseline
+//
+// The login rule's baseline lives in BaselineFile in the state directory
+// (BaselineStore; nil Deps.Baseline switches persistence off). The wiring
+// loads it before it builds the rules engine; start acts on what the load
+// found, before the stream starts:
+//   - A missing file gives a new baseline whose learning starts at the load,
+//     and that baseline is saved at once, so a restart does not restart
+//     learning.
+//   - A file that fails the trust checks of securefile (owner, mode, symlink,
+//     not a regular file), and any other read error, stops the start with
+//     ErrBaselineLoad, like the cursor; the error text goes through safe.
+//   - A file that is over MaxBaselineBytes (refused before it is read), that
+//     rules.Unmarshal refuses (corrupt, an unknown schema_version, a bound),
+//     or that is empty, is not trusted as a baseline: the daemon starts with
+//     the zero LearningStart (no learning phase: every login from an unknown
+//     source notifies), writes an input_error record and a daemon notice
+//     naming the reason (through safe), keeps the file as BaselineAsideFile,
+//     and saves the new baseline. The copy is a hard link made before the
+//     new baseline replaces the file, so a crash in between finds the file
+//     again; there is at most one copy, the next reset replaces it. When
+//     the copy cannot be made, or the held directory has no copy
+//     afterwards, the start stops with ErrBaselineLoad and the file stays
+//     as it is. An earlier copy satisfies that check, so a path swap by
+//     whoever can write the parent of the state directory (root) can still
+//     lose the new copy; a link operation in securefile would close it.
+//
+// The read is bounded by MaxBaselineBytes, the bound rules.Unmarshal applies
+// itself, and there is no streaming decoder: the worst document at the bound
+// measured (a users array of about 1.1 million bare numbers) peaks at about
+// 190 MB resident on linux while encoding/json decodes it, about 130 MB
+// under GOMEMLIMIT=64MiB, next to the unit's MemoryMax=256M. That is a decision for a trusted file:
+// it passed the securefile checks, so only root or the daemon's user can
+// have written it, and either can already stop the daemon.
+//
+// The baseline is saved after every change, with no throttle, after the
+// signals of the line were handled and before the cursor save: a crash in
+// between replays the line against the saved baseline, and a source that
+// was learned but whose signal was not handled is not saved as known. A
+// change includes the learning latch flipping on a line that gives no
+// signal, and entries learned in the learning phase (their info signals do
+// not notify). A save failure stops the daemon. Change detection costs O(1)
+// per line: the baseline is marshalled only when the line gave a login
+// signal or LearningDone differs from its value at the last save (the login
+// rule adds an entry only in an Evaluate that returns a signal for it, and
+// a test pins that), and written only when the JSON differs from the file.
+//
+// A baseline reset (a new or reset baseline) with a resumed cursor: the
+// backlog after the cursor is evaluated against the new baseline, and its
+// login lines carry journal times before the new LearningStart, which the
+// login rule counts as after the learning phase, so every unknown source in
+// the backlog notifies. With a reset baseline (zero LearningStart) that holds
+// for every line anyway.
 package watch
 
 import (
@@ -252,6 +308,9 @@ type Deps struct {
 	Recovery *audit.Recovery
 	// Requests is the request spool; nil switches the pass off.
 	Requests *RequestOps
+	// Baseline is the store of the login rule's baseline, loaded before the
+	// engine was built; nil switches its persistence off.
+	Baseline *BaselineStore
 }
 
 // Options tune the daemon. A zero field selects its default; a negative
@@ -606,8 +665,9 @@ func (d *Daemon) drain() {
 	}
 }
 
-// start writes daemon_start, loads the cursor, notifies a recovery and runs
-// the request pass once.
+// start writes daemon_start, loads the cursor, acts on the loaded login
+// baseline (see Login baseline), notifies a recovery and runs the request
+// pass once.
 func (d *Daemon) start() error {
 	cur, err := d.deps.Cursor.Load()
 	reason := ""
@@ -633,6 +693,9 @@ func (d *Daemon) start() error {
 		if err := d.record(audit.CursorReset, "", "", reason); err != nil {
 			return err
 		}
+	}
+	if err := d.startBaseline(); err != nil {
+		return err
 	}
 	d.cur, d.saved = cur, cur
 	if r := d.deps.Recovery; r != nil {
