@@ -823,3 +823,20 @@ func TestAssembleKeepsRecoveryOnRefusedStart(t *testing.T) {
 		})
 	}
 }
+
+// A streamer interface that holds a nil value is refused before anything
+// is opened, like the notifier. Clock is a func field, not an interface: a
+// nil Clock is time.Now.
+func TestAssembleRefusesTypedNilStreamer(t *testing.T) {
+	cfg := loadConfig(t, "watch:\n  enabled: true\n")
+	var real *execx.Real
+	var fn streamFunc
+	for _, st := range []execx.Streamer{real, fn} {
+		var got *Assembly
+		_, err := Assemble(cfg, newStateDir(t), Injections{Streamer: st,
+			fail: func(_ string, a *Assembly) error { got = a; return nil }})
+		if err == nil || !strings.Contains(err.Error(), "streamer") || got != nil {
+			t.Errorf("%T: %v, steps run: %t", st, err, got != nil)
+		}
+	}
+}

@@ -58,7 +58,8 @@ var _ PostureSource = (*posture.Source)(nil)
 // Injections are the parts of the daemon Assemble does not build from the
 // configuration.
 type Injections struct {
-	// Streamer runs journalctl; required (New refuses a nil one).
+	// Streamer runs journalctl; required (New refuses a nil one, Assemble
+	// an interface holding a nil value, as for Notifier).
 	Streamer execx.Streamer
 	// Notifier sends notifications; a nil interface means no notifier is
 	// configured, and the daemon runs without a worker. An interface that
@@ -145,6 +146,8 @@ func Assemble(cfg *config.Config, stateDir string, in Injections) (*Assembly, er
 		// The rule of New (a negative value included), checked before
 		// anything is opened.
 		return nil, fmt.Errorf("watch: watch.notify.per_incident_interval must be 0 (default) or at least 1m, got %v", n.PerIncidentInterval)
+	case typedNil(in.Streamer):
+		return nil, errors.New("watch: the streamer is an interface holding a nil value")
 	case typedNil(in.Notifier):
 		return nil, errors.New("watch: the notifier is an interface holding a nil value; pass a nil interface for no notifier")
 	}
