@@ -67,6 +67,9 @@ func (d *Daemon) handleLine(line []byte) error {
 			return err
 		}
 	}
+	if err := d.saveBaseline(sigs); err != nil {
+		return err
+	}
 	return d.handled(ev.Cursor, len(sigs) > 0)
 }
 

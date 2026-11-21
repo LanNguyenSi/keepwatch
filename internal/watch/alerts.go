@@ -264,7 +264,8 @@ func (d *Daemon) noticeSent(fp string) {
 }
 
 // maxNotices bounds the pending daemon notices; their keys are a small fixed
-// set (an audit recovery, the fill and the full audit log, a full spool), so
+// set (an audit recovery, the fill and the full audit log, a full spool, a
+// login baseline reset), so
 // the bound is never reached in practice.
 const maxNotices = 8
 
