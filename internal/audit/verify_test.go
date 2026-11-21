@@ -18,7 +18,7 @@ var t0 = time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 // sample returns n records for a log, with a mix of kinds, incidents and
 // strings that need escaping.
 func sample(n int) []Record {
-	kinds := []Kind{DaemonStart, IncidentOpen, NotifySent, IncidentAck, IncidentClose, PostureSeen}
+	kinds := []Kind{DaemonStart, IncidentOpen, NotifySent, IncidentAck, IncidentClose, InputError}
 	recs := make([]Record, n)
 	for i := range recs {
 		recs[i] = Record{

@@ -57,23 +57,25 @@
 //     mentioned only when its record was
 //     written, so the takeover record covers the ones over the budget.
 //     The incident store is unchanged; only the audit volume is bounded.
-//     Worst case per NoiseInterval (1m) at the defaults, with R = 4 rules,
-//     B = AuditBudget = 10 and G = GlobalPerMinute (1 to 60, default 6):
-//     R*B = 40 incident records and R = 4 count records; at most G incident
+//     Worst case per NoiseInterval (1m) at the defaults, with R = 5 rules
+//     (the four journal rules and posture), B = AuditBudget = 10 and
+//     G = GlobalPerMinute (1 to 60, default 6):
+//     R*B = 50 incident records and R = 5 count records; at most G incident
 //     records over the budget; at most G notify_sent or notify_failed records
 //     of incident notifications; at most maxNotices*(1+60s/
 //     HousekeepingInterval) = 8*3 = 24 records of daemon notices; and two
-//     records for each of the 17 rate-limited keys (journal_line_invalid,
+//     records for each of the 19 rate-limited keys (journal_line_invalid,
 //     line_too_long, audit_refused, clock_clamp, incident_full,
 //     signal_invalid, stream_restart, journal_gap, requests_pending,
-//     requests_sweep, results_lost and notify_dropped for each of its six
-//     reasons) = 34. That is 102+2G records: 114 at G = 6, 222 at G = 60.
+//     requests_sweep, results_lost, posture_poll, posture_overflow and
+//     notify_dropped for each of its six reasons) = 38. That is 117+2G
+//     records: 129 at G = 6, 237 at G = 60.
 //     Every summary but the terminal record's is cut to 512 bytes
 //     (maxRecordSummary), and with Deps.Clean = the redact
 //     package's Clean (control characters escaped) a record line is at most
-//     1536 bytes, so the log grows by at most 171 KiB (G = 6) or 333 KiB
+//     1536 bytes, so the log grows by at most 193.5 KiB (G = 6) or 355.5 KiB
 //     (G = 60) per minute, and DefaultMaxSize (256 MiB) lasts at least
-//     25.5 hours (G = 6) or 13.1 hours (G = 60) of a flood that reaches
+//     22.5 hours (G = 6) or 12.2 hours (G = 60) of a flood that reaches
 //     every bound at once.
 //     The other records are not in an outsider's hands: request_rejected
 //     (the spool is writable by root only), the records of applied requests
@@ -191,6 +193,41 @@
 //     other lines at most once per CursorInterval, and the stream end, the
 //     housekeeping pass and the shutdown save what is pending.
 //
+// # Posture
+//
+// The housekeeping pass polls Deps.Posture (nil switches it off) with the
+// daemon clock, after the request pass and before the notification retry.
+// The first state the source sees is its baseline and gives nothing, so a
+// change shows up from the second state on (see the posture package).
+// Each signal takes the journal-signal path (handleSignal: display, which
+// cleans its subject and summary again although the state file holds
+// cleaned text, as the file is input; the incident store; admit), with rule
+// id "posture" and Notify false set by the daemon whatever the source
+// returned. Every notification path (the open, the reopen, an update that
+// is pending, the refused path, the takeover of the housekeeping retry)
+// asks the incident's or the signal's Notify, and an incident takes Notify
+// only from the signal that opens or reopens it, so a posture incident is
+// never notified; `check --notify` is the one path that notifies about
+// posture. Posture records count against the budget of rule "posture", so
+// a posture flood does not use up a journal rule's budget, and the store's
+// eviction rule (a signal never evicts an open or acked incident more
+// severe than itself, and refuses with ErrFull instead) keeps a posture
+// flood from pushing out more severe journal incidents; among incidents of
+// one severity those that do not want notification, posture ones, go first.
+//
+// A pass handles at most posturePerPass (10) signals; the rest wait in a
+// queue of at most postureQueueMax (500, the incident store's cap) for the
+// next passes, in the order the source gave them. Signals that do not fit
+// the queue are dropped and counted through the noise path
+// (posture_overflow): the first drop of a window is written at once, the
+// rest as one count record when the window ends. A poll error is audited
+// as input_error through the noise path (posture_poll), cleaned, on every
+// pass it happens, and the queue is worked on anyway. The stall under d.mu
+// a pass adds is one load of the state file (state.MaxFileSize, 16 MiB, and
+// its comparison with the run before) and at most posturePerPass incident
+// store writes with their records, as many as ten signals of one journal
+// line.
+//
 // # Login baseline
 //
 // The login rule's baseline lives in BaselineFile in the state directory
@@ -256,6 +293,7 @@ import (
 
 	"github.com/LanNguyenSi/keepwatch/internal/alert"
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
+	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/execx"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
 	"github.com/LanNguyenSi/keepwatch/internal/rules"
@@ -311,6 +349,9 @@ type Deps struct {
 	// Baseline is the store of the login rule's baseline, loaded before the
 	// engine was built; nil switches its persistence off.
 	Baseline *BaselineStore
+	// Posture is polled by the housekeeping pass (see Posture); nil
+	// switches it off.
+	Posture PostureSource
 }
 
 // Options tune the daemon. A zero field selects its default; a negative
@@ -460,8 +501,9 @@ type Daemon struct {
 	updated       map[string]time.Time // time of the last incident_update record, by incident id
 	attempts      []time.Time          // when the worker accepted an incident notification, last minute
 	fillNoticed   bool
-	gapFrom       string // saved cursor to compare the first line of a stream with
-	gapSkipped    bool   // a line of the current stream named no usable cursor
+	gapFrom       string         // saved cursor to compare the first line of a stream with
+	gapSkipped    bool           // a line of the current stream named no usable cursor
+	postureQueue  []event.Signal // posture signals waiting for a later pass
 
 	results   chan alert.Result
 	resMu     sync.RWMutex

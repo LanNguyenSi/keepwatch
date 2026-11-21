@@ -58,8 +58,8 @@ func (d *Daemon) housekeepLoop(ctx context.Context, done chan<- struct{}) {
 }
 
 // housekeep is the periodic pass: save the cursor, write the counts of ended
-// noise windows, close idle incidents, look after the request spool and
-// retry notifications.
+// noise windows, close idle incidents, look after the request spool, poll
+// the posture source and retry notifications.
 func (d *Daemon) housekeep() error {
 	if err := d.flushCursor(); err != nil {
 		return err
@@ -81,6 +81,9 @@ func (d *Daemon) housekeep() error {
 	// Requests go before the notification retry, so an ack or close of this
 	// pass stops a retry that would be due in it.
 	if err := d.requestsPass(); err != nil {
+		return err
+	}
+	if err := d.posturePass(); err != nil {
 		return err
 	}
 	return d.reconcileNotifications()

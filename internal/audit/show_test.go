@@ -38,7 +38,7 @@ func eq(a, b []uint64) bool {
 func TestShowFilters(t *testing.T) {
 	recs, log := showLog()
 	// Kinds cycle DaemonStart, IncidentOpen, NotifySent, IncidentAck,
-	// IncidentClose, PostureSeen; incident ids inc-0, inc-1, inc-2 repeat.
+	// IncidentClose, InputError; incident ids inc-0, inc-1, inc-2 repeat.
 	at := func(i int) time.Time { return recs[i].Time }
 	cases := []struct {
 		name string
@@ -47,7 +47,7 @@ func TestShowFilters(t *testing.T) {
 	}{
 		{"no filter", Filter{}, []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
 		{"one kind", Filter{Kinds: []Kind{IncidentOpen}}, []uint64{2, 8}},
-		{"two kinds", Filter{Kinds: []Kind{IncidentOpen, PostureSeen}}, []uint64{2, 6, 8, 12}},
+		{"two kinds", Filter{Kinds: []Kind{IncidentOpen, InputError}}, []uint64{2, 6, 8, 12}},
 		{"kind that never occurs", Filter{Kinds: []Kind{DaemonError}}, nil},
 		{"one incident", Filter{IncidentID: "inc-1"}, []uint64{2, 5, 8, 11}},
 		{"incident that never occurs", Filter{IncidentID: "inc-9"}, nil},
