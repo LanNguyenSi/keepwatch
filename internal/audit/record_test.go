@@ -10,11 +10,10 @@ func TestKindStrings(t *testing.T) {
 		IncidentClose: "incident_close", NotifySent: "notify_sent",
 		NotifyFailed: "notify_failed", NotifyDropped: "notify_dropped",
 		RequestRejected: "request_rejected", CursorReset: "cursor_reset",
-		PostureSeen: "posture_seen", JournalLineInvalid: "journal_line_invalid",
-		AuditRecovered: "audit_recovered", InputError: "input_error",
-		DaemonError: "daemon_error",
+		JournalLineInvalid: "journal_line_invalid", AuditRecovered: "audit_recovered",
+		InputError: "input_error", DaemonError: "daemon_error",
 	}
-	if len(want) != 17 {
+	if len(want) != 16 {
 		t.Fatalf("got %d kinds", len(want))
 	}
 	for k, s := range want {

@@ -2,6 +2,7 @@ package watch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/LanNguyenSi/keepwatch/internal/event"
 	"github.com/LanNguyenSi/keepwatch/internal/execx/fake"
 	"github.com/LanNguyenSi/keepwatch/internal/incident"
+	"github.com/LanNguyenSi/keepwatch/internal/posture"
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 	"github.com/LanNguyenSi/keepwatch/internal/rules"
 )
@@ -159,25 +161,32 @@ func incidentKind(k audit.Kind) bool {
 	return k == audit.IncidentOpen || k == audit.IncidentUpdate || k == audit.IncidentReopen || k == audit.IncidentClose
 }
 
-// worstCaseBytes is the ceiling of the package comment: 4 rules with their
-// budget and count record, G records over the budget and G results of
-// incident notifications, the notices, and two records for each of the 17
-// rate-limited keys, at 1536 bytes per record line.
+// worstCaseBytes is the ceiling of the package comment: 5 rules (the four
+// journal rules and posture) with their budget and count record, G records
+// over the budget and G results of incident notifications, the notices, and
+// two records for each of the rateLimitedKeys keys, at 1536 bytes per
+// record line.
 func worstCaseBytes(budget, g int) int {
-	return (4*(budget+1) + 2*g + maxNotices*3 + 2*17) * 1536
+	return (5*(budget+1) + 2*g + maxNotices*3 + 2*rateLimitedKeys) * 1536
 }
 
 // A flood of every signal shape the rules give (new fingerprints that evict
 // stored incidents, one fingerprint with changing victims, a close and a
-// reopen) stays under the documented ceiling in every interval, and its
-// incident records under the budget of the rules plus the notifications the
-// worker accepted.
+// reopen), with a posture flood that evicts stored incidents too, fills the
+// posture queue over its bound and fails every other poll, stays under the
+// documented ceiling in every interval, and its incident records under the
+// budget of the rules plus the notifications the worker accepted.
 func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 	const g, intervals = 3, 4
 	h := newHarness(t, hopts{opt: Options{GlobalPerMinute: g}, setup: func(h *harness) {
 		writeIncidents(t, h, incident.MaxIncidents, result.Low, t0.Add(-time.Minute))
 	}})
 	h.notif.fail = func(int) error { return errTransient }
+	src := withPosture(h)
+	for i := 0; i < 2*intervals; i++ {
+		src.push(postureSigs(fmt.Sprintf("p%d", i), postureQueueMax/4, result.Medium), nil)
+		src.push(nil, errors.New("posture: state not usable: "+strings.Repeat("x", 3000)))
+	}
 	var items []any
 	n := 0
 	next := func() string { n++; return cur(itoa(int64(n))) }
@@ -202,6 +211,10 @@ func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 			}
 		}, oomPid(next(), at, 9000+i, "worker"))
 		items = append(items, func() {
+			// Every pass of a minute at the default interval polls posture.
+			for p := 0; p < 2; p++ {
+				housekeepOnce(t, h)
+			}
 			waitForWithin(t, time.Minute, "no job in flight", func() bool { h.d.mu.Lock(); defer h.d.mu.Unlock(); return h.d.inflightTotal == 0 })
 			h.clk.add(time.Minute)
 			housekeepOnce(t, h)
@@ -245,9 +258,10 @@ func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 		if bytes[m] > ceiling {
 			t.Errorf("minute %d: %d audit bytes, ceiling %d", m, bytes[m], ceiling)
 		}
-		// Two rules flood: their budgets plus what the worker accepted.
-		if incRecs[m] > 2*DefaultAuditBudget+g {
-			t.Errorf("minute %d: %d incident records, want at most %d", m, incRecs[m], 2*DefaultAuditBudget+g)
+		// Three rules flood (ssh, OOM, posture): their budgets plus what the
+		// worker accepted.
+		if incRecs[m] > 3*DefaultAuditBudget+g {
+			t.Errorf("minute %d: %d incident records, want at most %d", m, incRecs[m], 3*DefaultAuditBudget+g)
 		}
 		if counted[m] == 0 && m > 0 {
 			t.Errorf("minute %d: no count record, the flood did not exceed the budget", m)
@@ -265,6 +279,22 @@ func TestAuditBytesPerIntervalStayUnderTheCeiling(t *testing.T) {
 	}
 	if total := len(h.lines()); total < 50 || len(mentioned) == 0 || incRecs[1] == 0 {
 		t.Fatalf("%d records, %d incidents mentioned: the flood did not run", total, len(mentioned))
+	}
+	// The posture flood ran: it evicted, overflowed its queue, failed polls
+	// and was counted as its own rule.
+	postureIncidents, overflow, pollErr, postureCount := 0, false, false, false
+	for _, in := range h.store.List() {
+		if in.RuleID == posture.RuleID {
+			postureIncidents++
+		}
+	}
+	for _, l := range h.lines() {
+		overflow = overflow || strings.Contains(l.rec.Summary, "the posture queue was full")
+		pollErr = pollErr || strings.Contains(l.rec.Summary, "cannot read the posture state")
+		postureCount = postureCount || strings.HasSuffix(l.rec.Summary, (&Daemon{}).aggText(posture.RuleID))
+	}
+	if postureIncidents == 0 || !overflow || !pollErr || !postureCount {
+		t.Fatalf("posture incidents = %d, overflow = %v, poll error = %v, posture count = %v: the posture flood did not run", postureIncidents, overflow, pollErr, postureCount)
 	}
 }
 

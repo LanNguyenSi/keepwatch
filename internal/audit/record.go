@@ -50,7 +50,6 @@ const (
 	// invalid state transition it asks for.
 	RequestRejected Kind = "request_rejected"
 	CursorReset     Kind = "cursor_reset"
-	PostureSeen     Kind = "posture_seen"
 	// JournalLineInvalid is used when a journal line cannot be parsed.
 	JournalLineInvalid Kind = "journal_line_invalid"
 	// AuditRecovered is used after torn-tail recovery of the audit log. Only
