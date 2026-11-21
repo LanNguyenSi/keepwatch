@@ -141,8 +141,8 @@ func TestAssembleDefaultsMatchConfig(t *testing.T) {
 	if n.Queue != DefaultQueue || n.GlobalPerMinute != DefaultGlobalPerMinute || n.PerIncidentInterval != time.Hour {
 		t.Fatalf("config defaults %+v, watch defaults queue %d, global %d, per incident 1h", n, DefaultQueue, DefaultGlobalPerMinute)
 	}
-	// The configuration's upper bounds are accepted by Assemble too.
-	top := loadConfig(t, fmt.Sprintf("watch:\n  notify:\n    queue: %d\n    global_per_minute: %d\n", MaxQueue, MaxGlobalPerMinute))
+	// The configuration's bounds are accepted by Assemble too.
+	top := loadConfig(t, fmt.Sprintf("watch:\n  notify:\n    queue: %d\n    global_per_minute: %d\n    per_incident_interval: 1m\n", MaxQueue, MaxGlobalPerMinute))
 	assembleT(t, top, newStateDir(t), Injections{Notifier: &fakeNotifier{}})
 	for _, y := range []string{
 		fmt.Sprintf("watch:\n  notify:\n    queue: %d\n", MaxQueue+1),
