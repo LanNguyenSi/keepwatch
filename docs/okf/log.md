@@ -2,6 +2,18 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+## 2026-11-22
+
+- Re-verified `invariant-single-transformation.md`, `limit-known-limits.md` and
+  `overview-run.md` after the notification retry change (`notify.Error` carries
+  `Retry-After`, the watch daemon paces failed retries by it) changed
+  `docs/running.md` (the HTTP client paragraph). None of the three describes
+  notification retries; the "not coordinated" citation in the known limits was
+  already moved to lines 360-361 and still says so. The older `docs/install.md`
+  staleness on `limit-known-limits.md` also holds up: the only change since the
+  last stamp was the version in the install example, and the cited lines 137,
+  139 and 371 still say what the limits claim.
+
 ## 2026-11-13
 
 - Re-stamped `invariant-doctor-effective-unit.md`, `invariant-placement.md` and
