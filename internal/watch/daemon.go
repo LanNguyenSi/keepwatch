@@ -138,8 +138,11 @@
 //     at most once per max(PerIncidentInterval/4, the longest Retry-After the
 //     ntfy client waits for) and with doubling gaps after each failure, up to
 //     PerIncidentInterval. The ntfy client waits for a Retry-After of up to
-//     that long inside the send; a longer one is not visible to the daemon (the
-//     error carries no such field), so the doubling gap is what honours it.
+//     that long inside the send; a longer one is carried by the error
+//     (notify.Error.RetryAfter, through alert.Result) and the failed attempt
+//     waits for max(gap, the asked-for time) instead, capped at the upper
+//     bound of the gap (max(PerIncidentInterval, that floor)), so a hostile
+//     or buggy server cannot silence alerts indefinitely.
 //     Notices of the daemon itself (an audit recovery, a full spool, the audit
 //     log filling up or full, a login baseline reset) stay in a small pending set until they were
 //     sent; every housekeeping pass sends the ones not in flight. They go

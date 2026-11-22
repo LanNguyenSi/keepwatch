@@ -27,7 +27,7 @@ adjacent ones stop short.
 
 - **No lock, anywhere.** `check`, `report --weekly` and their files
   (`state.json`, `history.json`) are not coordinated
-  (`docs/running.md:356-357#"not coordinated"`). The one place the code
+  (`docs/running.md:360-361#"not coordinated"`). The one place the code
   narrows the window is the weekly delivery failure record: the state is read
   again immediately before the write and the record lands only if nothing
   committed in between, leaving the read-to-rename gap

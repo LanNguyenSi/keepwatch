@@ -170,7 +170,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // failed on the network or with 5xx or 429. A 4xx other than 429, a redirect
 // and any other answer end it at once. A Retry-After of up to MaxRetryAfter
 // seconds is waited for (never less than the backoff); a longer one means no
-// second request.
+// second request. The returned error carries the last answer's Retry-After in
+// Error.RetryAfter (0 when it asked for nothing usable), so a caller can pace
+// its next attempt by a wait this client did not sit through.
 func (n *Ntfy) Send(ctx context.Context, m Message) error {
 	req, err := n.build(m)
 	if err != nil {
@@ -273,6 +275,7 @@ func (n *Ntfy) do(ctx context.Context, r *request, attempt int) (wait time.Durat
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		e.Class = Transient
 		wait = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+		e.RetryAfter = wait
 	}
 	return wait, e
 }

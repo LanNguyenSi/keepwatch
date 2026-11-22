@@ -261,6 +261,76 @@ func TestRetryAfterAsAnHTTPDate(t *testing.T) {
 	}
 }
 
+// The error of a failed Send carries the Retry-After of the last answer; a
+// missing, invalid, zero or negative header gives 0.
+func TestErrorCarriesTheLastAnswersRetryAfter(t *testing.T) {
+	cases := []struct {
+		name, header string
+		want         time.Duration
+		requests     int
+	}{
+		{"above the cap", "120", 120 * time.Second, 1},
+		{"invalid", "soon", 0, 2},
+		{"zero", "0", 0, 2},
+		{"negative", "-5", 0, 2},
+		{"absent", "", 0, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				if c.header != "" {
+					w.Header().Set("Retry-After", c.header)
+				}
+				w.WriteHeader(429)
+			})
+			rec := &recorder{}
+			err := newNtfy(t, s.URL, rec).Send(context.Background(), Message{Body: "x"})
+			e := AsError(err)
+			if e == nil || e.Class != Transient || e.Status != 429 {
+				t.Fatalf("%#v", err)
+			}
+			if e.RetryAfter != c.want {
+				t.Errorf("RetryAfter = %v, want %v", e.RetryAfter, c.want)
+			}
+			if s.count() != c.requests {
+				t.Errorf("%d requests, want %d", s.count(), c.requests)
+			}
+		})
+	}
+}
+
+// A date-form Retry-After above the cap is carried by the error and costs no
+// second request.
+func TestErrorCarriesADateFormRetryAfterAboveTheCap(t *testing.T) {
+	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", time.Now().UTC().Add(120*time.Second).Format(http.TimeFormat))
+		w.WriteHeader(503)
+	})
+	rec := &recorder{}
+	err := newNtfy(t, s.URL, rec).Send(context.Background(), Message{Body: "x"})
+	e := AsError(err)
+	if e == nil || e.Class != Transient {
+		t.Fatalf("%#v", err)
+	}
+	if e.RetryAfter <= 115*time.Second || e.RetryAfter > 120*time.Second {
+		t.Errorf("RetryAfter = %v, want about 2m", e.RetryAfter)
+	}
+	if s.count() != 1 || len(rec.waits) != 0 {
+		t.Errorf("%d requests, waits %v", s.count(), rec.waits)
+	}
+}
+
+// A 2xx answers with no error even when it carries a Retry-After header.
+func TestTwoXXWithRetryAfterHeaderIsNoError(t *testing.T) {
+	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(200)
+	})
+	if err := newNtfy(t, s.URL, &recorder{}).Send(context.Background(), Message{Body: "x"}); err != nil {
+		t.Errorf("Send = %v, want nil", err)
+	}
+}
+
 func TestTimeoutIsATransientFailureWithOneRetry(t *testing.T) {
 	block := make(chan struct{})
 	s := newServer(t, func(int, http.ResponseWriter, *http.Request) { <-block })
