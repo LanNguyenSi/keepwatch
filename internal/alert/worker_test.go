@@ -457,13 +457,15 @@ func TestFailedSendReleasesSlots(t *testing.T) {
 	if r := s.next(t); r.Status != Failed {
 		t.Fatalf("result = %+v", r)
 	}
+	// The retry must succeed: switch the notifier before it is enqueued, or the
+	// worker can pick the retry up while the notifier still fails.
+	fn.mu.Lock()
+	fn.err = nil
+	fn.mu.Unlock()
 	if r := w.Enqueue(job("a")); r != NotDropped {
 		t.Errorf("retry after a failed send: %q", r)
 	}
 	// A sent job keeps its slots.
-	fn.mu.Lock()
-	fn.err = nil
-	fn.mu.Unlock()
 	if r := s.next(t); r.Status != Sent {
 		t.Fatalf("result = %+v", r)
 	}
