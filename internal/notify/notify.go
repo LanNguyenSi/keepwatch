@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/result"
 )
@@ -82,6 +83,12 @@ type Error struct {
 	Status int
 	// Attempts is how many requests were made (0 when none was).
 	Attempts int
+	// RetryAfter is what a transient answer asked for in Retry-After: the
+	// last answer's value when Send returned, 0 when the answer asked for
+	// nothing usable or the class is Permanent. The caller can pace its next
+	// attempt by it; the ntfy client itself never waits longer than
+	// MaxRetryAfter inside a Send.
+	RetryAfter time.Duration
 	// Msg says what went wrong, in a few words.
 	Msg string
 }

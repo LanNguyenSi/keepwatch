@@ -8,6 +8,16 @@ report.
 
 ## [Unreleased]
 
+### Changed
+
+- Notifications: a failed 429 or 5xx delivery now carries the server's
+  `Retry-After` in the error, and the watch daemon paces its retry of the
+  incident by it: the next attempt waits at least as long as the server
+  asked, capped at the daemon's longest retry gap, so a server that asks
+  for a wait longer than the ntfy client sits through no longer goes
+  unhonoured, and no server can silence an incident's alerts for longer
+  than that cap.
+
 ## [0.2.0] - 2026-11-13
 
 Groundwork for the watch daemon (stage 1): the parts it is built from, each

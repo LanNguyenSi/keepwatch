@@ -138,6 +138,46 @@ func TestSendAndResults(t *testing.T) {
 	<-done
 }
 
+// A Failed result carries the Retry-After of the notify.Error; it is 0 for a
+// notify.Error without one and for a non-notify error, and a Dropped result
+// is never stamped with one.
+func TestFailedResultCarriesRetryAfter(t *testing.T) {
+	s := newSink()
+	fn := &fakeNotifier{}
+	w := mk(t, fn, Params{QueueSize: 4}, s, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	fn.mu.Lock()
+	fn.err = &notify.Error{Class: notify.Transient, Status: 429, Msg: "slow down", RetryAfter: 90 * time.Second}
+	fn.mu.Unlock()
+	w.Enqueue(job("a"))
+	if r := s.next(t); r.Status != Failed || r.RetryAfter != 90*time.Second {
+		t.Errorf("result with Retry-After = %+v", r)
+	}
+	fn.mu.Lock()
+	fn.err = &notify.Error{Class: notify.Transient, Status: 503, Msg: "no header"}
+	fn.mu.Unlock()
+	w.Enqueue(job("b"))
+	if r := s.next(t); r.Status != Failed || r.RetryAfter != 0 {
+		t.Errorf("result without Retry-After = %+v", r)
+	}
+	fn.mu.Lock()
+	fn.err = errors.New("plain")
+	fn.mu.Unlock()
+	w.Enqueue(job("c"))
+	if r := s.next(t); r.Status != Failed || r.RetryAfter != 0 {
+		t.Errorf("result of a non-notify error = %+v", r)
+	}
+	cancel()
+	<-done
+	// The worker has ended: the job is dropped and carries no Retry-After.
+	w.Enqueue(job("d"))
+	if r := s.next(t); r.Status != Dropped || r.RetryAfter != 0 {
+		t.Errorf("dropped result = %+v", r)
+	}
+}
+
 func TestEnqueueNeverBlocksWhenQueueFull(t *testing.T) {
 	s := newSink()
 	w := mk(t, &fakeNotifier{}, Params{QueueSize: 2}, s, nil)
@@ -417,13 +457,15 @@ func TestFailedSendReleasesSlots(t *testing.T) {
 	if r := s.next(t); r.Status != Failed {
 		t.Fatalf("result = %+v", r)
 	}
+	// The retry must succeed: switch the notifier before it is enqueued, or the
+	// worker can pick the retry up while the notifier still fails.
+	fn.mu.Lock()
+	fn.err = nil
+	fn.mu.Unlock()
 	if r := w.Enqueue(job("a")); r != NotDropped {
 		t.Errorf("retry after a failed send: %q", r)
 	}
 	// A sent job keeps its slots.
-	fn.mu.Lock()
-	fn.err = nil
-	fn.mu.Unlock()
 	if r := s.next(t); r.Status != Sent {
 		t.Fatalf("result = %+v", r)
 	}

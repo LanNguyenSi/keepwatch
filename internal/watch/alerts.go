@@ -80,7 +80,7 @@ func (d *Daemon) handleResult(r alert.Result) error {
 		d.release(fp)
 		st := d.tries[fp]
 		st.failures++
-		st.notBefore = r.At.Add(d.gap(st.failures))
+		st.notBefore = r.At.Add(d.retryGap(st.failures, r.RetryAfter))
 		d.setTry(fp, st)
 		return d.record(audit.NotifyFailed, id, fp, fmt.Sprintf("notification failed (%s): %s", r.Class, d.safe(r.Detail)))
 	case alert.Dropped:
@@ -108,12 +108,25 @@ func (d *Daemon) release(fp string) {
 // client waits for), doubled per failure, up to PerIncidentInterval.
 func (d *Daemon) gap(failures int) time.Duration {
 	base := max(d.opt.PerIncidentInterval/4, notify.MaxRetryAfter)
-	limit := max(d.opt.PerIncidentInterval, base)
+	limit := d.gapLimit()
 	g := base
 	for i := 1; i < failures && g < limit; i++ {
 		g *= 2
 	}
 	return min(g, limit)
+}
+
+// gapLimit is the upper bound of gap: max(PerIncidentInterval, base).
+func (d *Daemon) gapLimit() time.Duration {
+	return max(d.opt.PerIncidentInterval, max(d.opt.PerIncidentInterval/4, notify.MaxRetryAfter))
+}
+
+// retryGap is the wait before the next attempt after a failed send: gap,
+// raised to the Retry-After the server asked for (Result.RetryAfter, 0 when
+// it asked for nothing usable) but never past gapLimit, so a hostile or
+// buggy server cannot silence alerts indefinitely.
+func (d *Daemon) retryGap(failures int, retryAfter time.Duration) time.Duration {
+	return max(d.gap(failures), min(retryAfter, d.gapLimit()))
 }
 
 // due reports whether another attempt for fp is allowed now.

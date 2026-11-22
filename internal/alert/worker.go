@@ -64,7 +64,11 @@ type Result struct {
 	// Detail is the notifier's own short error text (it never holds the
 	// server address, the token or the message); set when Status is Failed.
 	Detail string
-	At     time.Time
+	// RetryAfter is the wait the notifier's server asked for; meaningful
+	// when Status is Failed and the error is a notify.Error, 0 otherwise
+	// (including every Dropped result).
+	RetryAfter time.Duration
+	At         time.Time
 }
 
 // Params are the limits of a Worker. Zero PerIncidentInterval or zero
@@ -285,7 +289,7 @@ func (w *Worker) send(ctx context.Context, q queued) {
 		w.release(q)
 		r.Status, r.Class, r.Detail = Failed, notify.Permanent, "send failed"
 		if ne := notify.AsError(err); ne != nil {
-			r.Class, r.Detail = ne.Class, ne.Error()
+			r.Class, r.Detail, r.RetryAfter = ne.Class, ne.Error(), ne.RetryAfter
 		}
 	}
 	w.report(r)

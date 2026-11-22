@@ -305,7 +305,11 @@ redirects (a redirect could take the token to another host: it is an error, and 
 runs, times out after 15 seconds per request and reads at most 64 KiB of an answer.
 There is one retry after 2 seconds, and only for a network error, a timeout, a 5xx or
 a 429; a `Retry-After` of up to 30 seconds is waited for, a longer one means no retry
-in this run. Other 4xx answers (a refused token, an unknown topic) are not retried.
+in this run but is carried by the error and honoured by the watch daemon instead: a
+failed incident attempt then waits for its retry gap raised to the asked-for time,
+never past the bound `max(watch.notify.per_incident_interval, 30s)`, so a server can
+hold back a failing incident's retries by at most that long and can never silence them.
+Other 4xx answers (a refused token, an unknown topic) are not retried.
 Error messages name the status and ntfy's own error text, never the topic or the token
 (a network error names the address and port that could not be reached, as the system
 reports it, which is the server you configured).
