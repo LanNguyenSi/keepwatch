@@ -2,6 +2,19 @@
 
 <!-- Add new entries at the top, newest first. -->
 
+## 2026-11-24
+
+- Re-verified and re-stamped `invariant-single-transformation.md`,
+  `limit-known-limits.md` and `overview-run.md` after `Clean` became a fixed
+  point (`internal/redact/redact.go`: a second `Redact` over the escaped text;
+  `FuzzCleanIdempotent`). `invariant-single-transformation.md` was rewritten
+  with that change (order redact, escape, redact, cut; the second posture
+  cleaning is a no-op) and its anchors `redact.go:250-252` and `redact.go:13`
+  still resolve. `limit-known-limits.md` (cut at `MaxFieldRunes`, redaction
+  is shape-matching) and `overview-run.md` (`red.Clean` as the single
+  transformation) stay true. Check: `npx -y okf-kit@0.22.0 check
+  --require-anchors docs/okf`.
+
 ## 2026-11-22
 
 - Re-verified `invariant-single-transformation.md`, `limit-known-limits.md` and
