@@ -95,6 +95,7 @@ type hooks struct {
 	syncDir    func(d *os.File) error
 	dirChecked func()
 	beforeLink func()
+	afterLink  func()
 	beforeOpen func()
 	afterOpen  func()
 	afterStat  func()
@@ -109,6 +110,7 @@ func defaultHooks() hooks {
 		syncDir:    func(d *os.File) error { return d.Sync() },
 		dirChecked: func() {},
 		beforeLink: func() {},
+		afterLink:  func() {},
 		beforeOpen: func() {},
 		afterOpen:  func() {},
 		afterStat:  func() {},
@@ -316,6 +318,9 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 // replaced (the error matches fs.ErrExist). After the link, newname must name
 // the very file that was checked; if oldname was swapped between the check and
 // the link, the new link is removed again and ErrUntrusted is returned. The
+// checked file stays open until that comparison is made: an open file keeps
+// its inode number from being reused, which on Linux a file created right
+// after an unlink would otherwise get, and the comparison would accept it. The
 // directory is flushed afterwards; an error from that flush means the link is
 // in place but may not be durable.
 func (d *Dir) Link(oldname, newname string) error {
@@ -329,15 +334,16 @@ func (d *Dir) Link(oldname, newname string) error {
 	if err != nil {
 		return err
 	}
-	f.Close()
+	defer f.Close()
 	d.hooks.beforeLink()
 	if err := d.root.Link(oldname, newname); err != nil {
 		return err
 	}
+	d.hooks.afterLink()
 	li, err := d.root.Lstat(newname)
 	if err != nil || !os.SameFile(li, fi) {
-		// Only a link made by this call can be at newname: the link refuses
-		// an existing name, so removing it takes nothing else away.
+		// With no other writer in the directory, only the link made by this
+		// call can be at newname: the link refuses an existing name.
 		_ = d.root.Remove(newname)
 		if err != nil {
 			return err

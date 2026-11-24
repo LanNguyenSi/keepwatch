@@ -1338,8 +1338,28 @@ func TestLinkAndRemoveUseTheHeldDirectory(t *testing.T) {
 	if err := d.Remove("old-copy"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
+	// The directory that is flushed is the held one, not the one at the path.
+	flushed := 0
+	d.hooks.syncDir = func(f *os.File) error {
+		flushed++
+		fi, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		held, err := os.Stat(moved)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(fi, held) {
+			return errors.New("flushed a directory other than the held one")
+		}
+		return f.Sync()
+	}
 	if err := d.Link("a", "copy"); err != nil {
 		t.Fatalf("Link: %v", err)
+	}
+	if flushed != 1 {
+		t.Fatalf("directory flushed %d times, want 1", flushed)
 	}
 	if got := entries(t, moved); len(got) != 2 {
 		t.Fatalf("held directory has %v, want a and copy", got)
@@ -1395,5 +1415,51 @@ func TestLinkSyncFailureReported(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(p, "copy")); err != nil {
 		t.Fatalf("the link must be in place after a flush error: %v", err)
+	}
+}
+
+// oldname unlinked and created again between the check and the link: on
+// Linux the new file would get the inode number of the old one if the checked
+// file were no longer open, and the comparison after the link would accept
+// it. The file stays open across the link, so the swap is seen.
+func TestLinkOldnameRecreatedBeforeLink(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("checked"), 100); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.beforeLink = func() {
+		if err := os.Remove(filepath.Join(p, "a")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "a"), []byte("swapped"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Link("a", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("Link: %v, want ErrUntrusted", err)
+	}
+	if _, err := os.Lstat(filepath.Join(p, "copy")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a copy of the recreated file stayed: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(p, "a")); string(b) != "swapped" {
+		t.Fatalf("a is %q, want the recreated file untouched", b)
+	}
+}
+
+// newname gone right after the link: the look at it fails, and that error is
+// returned as it is, not as a swap of oldname.
+func TestLinkNewnameVanishesAfterLink(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.afterLink = func() {
+		if err := os.Remove(filepath.Join(p, "copy")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := d.Link("a", "copy")
+	if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrUntrusted) {
+		t.Fatalf("Link: %v, want fs.ErrNotExist and not ErrUntrusted", err)
 	}
 }
