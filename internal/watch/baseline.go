@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"time"
 
 	"github.com/LanNguyenSi/keepwatch/internal/audit"
@@ -91,29 +90,17 @@ func (s *BaselineStore) Load(now time.Time) *rules.Baseline {
 // setAside keeps the untrusted file as BaselineAsideFile: a hard link, so
 // the file stays in place until the new baseline replaces it atomically, and
 // a crash in between finds it again on the next start. A previous copy is
-// removed first. The directory was opened and checked by securefile; it is
-// opened again by its path here because securefile has no link operation.
-// The copy is then looked up through the trusted handle, and the start fails
-// when the held directory has no copy. An earlier copy satisfies that check,
-// so a path swap by someone who can write the parent of the state directory
-// (root) can still lose the new copy; closing that needs a link operation in
-// securefile.
+// removed first. Both steps go through the directory securefile opened and
+// checked; the state directory is never opened again by its path, so a path
+// swapped in later (by someone who can write its parent) neither receives
+// the copy nor loses it. Link checks that the new name is the very file it
+// examined, so no read-back of the copy is needed: a failed link fails the
+// start and leaves the untrusted file where it is.
 func (s *BaselineStore) setAside() error {
-	root, err := os.OpenRoot(s.dir.Path())
-	if err != nil {
+	if err := s.dir.Remove(BaselineAsideFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	defer root.Close()
-	if err := root.Remove(BaselineAsideFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if err := root.Link(BaselineFile, BaselineAsideFile); err != nil {
-		return err
-	}
-	if _, err := s.dir.ReadCapped(BaselineAsideFile, MaxBaselineBytes); err != nil && !errors.Is(err, securefile.ErrTooLarge) {
-		return fmt.Errorf("the copy is not in the state directory: %w", err)
-	}
-	return nil
+	return s.dir.Link(BaselineFile, BaselineAsideFile)
 }
 
 // persist writes the baseline when its JSON form differs from the content on

@@ -1142,3 +1142,258 @@ func TestSocketSwappedBeforeOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkAndRemove(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("content"), 100); err != nil {
+		t.Fatal(err)
+	}
+	synced := 0
+	d.hooks.syncDir = func(f *os.File) error { synced++; return f.Sync() }
+	if err := d.Link("a", "b"); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if synced != 1 {
+		t.Fatalf("dir synced %d times after the link, want 1", synced)
+	}
+	ai, err := os.Stat(filepath.Join(p, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bi, err := os.Stat(filepath.Join(p, "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(ai, bi) {
+		t.Fatal("b is not a hard link of a")
+	}
+	if got := entries(t, p); len(got) != 2 {
+		t.Fatalf("entries %v, want a and b", got)
+	}
+	if err := d.Remove("b"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if got := entries(t, p); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("entries %v after Remove, want only a", got)
+	}
+	if b, err := d.ReadCapped("a", 100); err != nil || string(b) != "content" {
+		t.Fatalf("a after Remove of its link: %q %v", b, err)
+	}
+	err = d.Remove("b")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Remove of a missing name: %v, want fs.ErrNotExist", err)
+	}
+}
+
+// The size of the file does not matter to Link: an oversized file can be
+// kept.
+func TestLinkIgnoresSize(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "big"), bytes.Repeat([]byte("x"), 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("big", "copy"); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+}
+
+func TestLinkAndRemoveNameValidation(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+		t.Fatal(err)
+	}
+	bad := []string{"", ".", "..", "a/b", "/abs", "../x", ".hidden", ".kwtmp-1", `a\b`, "a\x00b"}
+	for _, n := range bad {
+		if err := d.Link("a", n); !errors.Is(err, ErrInvalidName) {
+			t.Errorf("Link(a, %q): got %v", n, err)
+		}
+		if err := d.Link(n, "c"); !errors.Is(err, ErrInvalidName) {
+			t.Errorf("Link(%q, c): got %v", n, err)
+		}
+		if err := d.Remove(n); !errors.Is(err, ErrInvalidName) {
+			t.Errorf("Remove(%q): got %v", n, err)
+		}
+	}
+	if got := entries(t, p); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("directory changed by refused names: %v", got)
+	}
+}
+
+// Remove validates its name before it acts: a file outside the directory
+// that a path component would reach stays.
+func TestRemoveDoesNotReachOutside(t *testing.T) {
+	d, p := newDir(t)
+	outside := filepath.Join(filepath.Dir(p), "outside")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Remove("../outside"); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("Remove: %v, want ErrInvalidName", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("the file outside the directory is gone: %v", err)
+	}
+}
+
+func TestLinkRefusesSymlinkOldname(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("real", []byte("x"), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(p, "ln")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("ln", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("Link of a symlink: %v, want ErrUntrusted", err)
+	}
+	if _, err := os.Lstat(filepath.Join(p, "copy")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a copy was made of the symlink: %v", err)
+	}
+}
+
+func TestLinkRefusesUntrustedOldname(t *testing.T) {
+	d, p := newDir(t)
+	if err := os.WriteFile(filepath.Join(p, "a"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.ownerOf = foreign
+	if err := d.Link("a", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("foreign owner: %v, want ErrUntrusted", err)
+	}
+	d.ownerOf = DefaultOwnerOf
+	if err := os.Chmod(filepath.Join(p, "a"), 0o620); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("a", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("group writable: %v, want ErrUntrusted", err)
+	}
+	if err := os.Chmod(filepath.Join(p, "a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(p, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("sub", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("directory: %v, want ErrUntrusted", err)
+	}
+	if err := d.Link("missing", "copy"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing: %v, want fs.ErrNotExist", err)
+	}
+	if got := entries(t, p); len(got) != 2 {
+		t.Fatalf("entries %v, want only a and sub", got)
+	}
+}
+
+// newname that exists is never replaced, whatever it is.
+func TestLinkRefusesExistingNewname(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("new"), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WriteAtomic("b", []byte("old"), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("a", "b"); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Link onto a file: %v, want fs.ErrExist", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(p, "b")); string(got) != "old" {
+		t.Fatalf("b is %q, want it untouched", got)
+	}
+	if err := os.Symlink("nowhere", filepath.Join(p, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Link("a", "dangling"); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Link onto a dangling symlink: %v, want fs.ErrExist", err)
+	}
+	if _, err := os.Stat(filepath.Join(p, "nowhere")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the symlink was followed: %v", err)
+	}
+	if err := d.Link("a", "a"); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Link onto itself: %v, want fs.ErrExist", err)
+	}
+}
+
+// The directory handle decides, not the path: after the path is swapped for
+// another directory, Link and Remove act in the directory that was opened.
+func TestLinkAndRemoveUseTheHeldDirectory(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("held"), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WriteAtomic("old-copy", []byte("held"), 10); err != nil {
+		t.Fatal(err)
+	}
+	moved := p + "-moved"
+	if err := os.Rename(p, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "old-copy"} {
+		if err := os.WriteFile(filepath.Join(p, n), []byte("decoy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Remove("old-copy"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := d.Link("a", "copy"); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if got := entries(t, moved); len(got) != 2 {
+		t.Fatalf("held directory has %v, want a and copy", got)
+	}
+	if b, err := os.ReadFile(filepath.Join(moved, "copy")); err != nil || string(b) != "held" {
+		t.Fatalf("copy in the held directory: %q %v", b, err)
+	}
+	got := entries(t, p)
+	if len(got) != 2 {
+		t.Fatalf("decoy directory has %v, want it unchanged", got)
+	}
+	for _, n := range []string{"a", "old-copy"} {
+		if b, err := os.ReadFile(filepath.Join(p, n)); err != nil || string(b) != "decoy" {
+			t.Fatalf("decoy %s: %q %v, want untouched", n, b, err)
+		}
+	}
+}
+
+// oldname swapped for another file between the check and the link: the new
+// link is removed again and the swap is reported.
+func TestLinkOldnameSwappedBeforeLink(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("checked"), 100); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.beforeLink = func() {
+		if err := os.Rename(filepath.Join(p, "a"), filepath.Join(p, "kept")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "a"), []byte("swapped"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Link("a", "copy"); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("Link: %v, want ErrUntrusted", err)
+	}
+	if _, err := os.Lstat(filepath.Join(p, "copy")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the copy of the swapped file stayed: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(p, "a")); string(b) != "swapped" {
+		t.Fatalf("a is %q, want the swapped file untouched", b)
+	}
+}
+
+func TestLinkSyncFailureReported(t *testing.T) {
+	d, p := newDir(t)
+	if err := d.WriteAtomic("a", []byte("x"), 10); err != nil {
+		t.Fatal(err)
+	}
+	d.hooks.syncDir = func(*os.File) error { return errors.New("boom") }
+	if err := d.Link("a", "copy"); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Link: %v, want the flush error", err)
+	}
+	if _, err := os.Lstat(filepath.Join(p, "copy")); err != nil {
+		t.Fatalf("the link must be in place after a flush error: %v", err)
+	}
+}
