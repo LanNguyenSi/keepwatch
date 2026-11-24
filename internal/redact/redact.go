@@ -246,16 +246,25 @@ func replaceExtra(re *regexp.Regexp, s string) string {
 	return sb.String()
 }
 
-// Clean returns s as text that is safe to show: secrets redacted, control
-// characters escaped (see Escape), and cut to MaxFieldRunes. The result is a
-// single line of valid UTF-8. A nil Redactor uses the built-in patterns.
+// Clean returns s as safe to show: redacted, escaped (see Escape), redacted
+// again over the escaped text, cut to MaxFieldRunes. The result is one line
+// of valid UTF-8, and a fixed point of Clean. nil uses the built-in patterns.
 func (r *Redactor) Clean(s string) string {
 	if r == nil {
 		r = defaultRedactor
 	}
-	return truncate(Escape(r.Redact(s)), MaxFieldRunes)
+	return truncate(r.Redact(Escape(r.Redact(s))), MaxFieldRunes)
 }
 
+// truncate cuts s to runes characters and ends a cut text with "...". The
+// result is a fixed point of a second call of the same length: it holds the
+// first runes characters and "...", and the next call cuts at the same rune
+// boundary, which reproduces it. The text before the boundary is unchanged
+// too, because it is already redacted: the text that reaches here has been
+// through Redact twice, so every value a pattern can see in it is the
+// replacement itself, and appending "..." cannot start a value anywhere but
+// directly behind a keyword separator, where the replacement it produces
+// brings the boundary back to the same rune.
 func truncate(s string, runes int) string {
 	n := 0
 	for i := range s {

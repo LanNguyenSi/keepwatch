@@ -188,28 +188,34 @@ func TestHostilePostureTextIsCleaned(t *testing.T) {
 	}
 }
 
-// For these inputs, cleaning text that was cleaned before changes nothing.
-// That does not hold for every input (see the case below), so the second
-// clean of posture text can differ from what the state file shows.
+// Cleaning text that was cleaned before changes nothing, for every input:
+// the state file is input to the daemon, so posture text is cleaned twice
+// and both cleans must agree.
 func TestCleanIsIdempotentOnItsOutput(t *testing.T) {
 	clean := redact.Default().Clean
+	straddle := strings.Repeat("a", redact.MaxFieldRunes-15) + "password=hunter2 tail"
 	for _, raw := range []string{
 		"", "plain text", "sshd_config: weak_cipher aes128-cbc", hostileText,
 		"password=hunter2 token " + hostileToken, "tab\there\r\n", "bad utf8 \xff\xfe",
 		"zero\u200bwidth \u202e rtl", strings.Repeat("long ", 2000), `already \x1b escaped [REDACTED]`,
+		"password=\thunter2", "token:\x00x", "secret=\x01y", "--password\x1bz", straddle,
+		strings.Repeat("a", 1999) + strings.Repeat("é", 500),
 	} {
 		once := clean(raw)
 		if twice := clean(once); twice != once {
 			t.Errorf("Clean(%q): once %q, twice %q", raw, once, twice)
 		}
 	}
-	// An escaped control character after a keyword separator reads as a
-	// value the second time, so the second pass hides more. What holds: it
-	// never shows what the first one hid.
-	once := clean("password=\thunter2")
-	twice := clean(once)
-	if strings.Contains(once, "hunter2") || strings.Contains(twice, "hunter2") || !strings.Contains(twice, "[REDACTED]") {
-		t.Errorf("once %q, twice %q", once, twice)
+	// The control byte after a keyword separator used to survive the first
+	// clean and read as a value the second time; now the first clean already
+	// hides what stands behind it.
+	for raw, secret := range map[string]string{
+		"password=\thunter2": "hunter2", "token:\x00x": `\x00x`, "secret=\x01y": `\x01y`,
+	} {
+		once := clean(raw)
+		if strings.Contains(once, secret) || !strings.Contains(once, "[REDACTED]") {
+			t.Errorf("Clean(%q) = %q", raw, once)
+		}
 	}
 }
 

@@ -18,6 +18,17 @@ report.
   unhonoured, and no server can silence an incident's alerts for longer
   than that cap.
 
+### Fixed
+
+- Redaction: `Clean` is now idempotent on its own output. A value behind a
+  control byte that follows a keyword separator (a tab, a NUL byte) is now
+  redacted on the first pass over the escaped text instead of surviving
+  until a second pass hid it, and a field cut at `MaxFieldRunes` ends at a
+  point a second pass leaves alone, so cleaning text that was cleaned
+  before (the posture path of the watch daemon, where the state file is
+  input) changes nothing and can show neither more nor less than the first
+  clean.
+
 ## [0.2.0] - 2026-11-13
 
 Groundwork for the watch daemon (stage 1): the parts it is built from, each
