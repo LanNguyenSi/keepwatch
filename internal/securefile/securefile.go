@@ -94,6 +94,8 @@ type hooks struct {
 	rename     func(r *os.Root, oldname, newname string) error
 	syncDir    func(d *os.File) error
 	dirChecked func()
+	beforeLink func()
+	afterLink  func()
 	beforeOpen func()
 	afterOpen  func()
 	afterStat  func()
@@ -107,6 +109,8 @@ func defaultHooks() hooks {
 		rename:     func(r *os.Root, o, n string) error { return r.Rename(o, n) },
 		syncDir:    func(d *os.File) error { return d.Sync() },
 		dirChecked: func() {},
+		beforeLink: func() {},
+		afterLink:  func() {},
 		beforeOpen: func() {},
 		afterOpen:  func() {},
 		afterStat:  func() {},
@@ -303,6 +307,67 @@ func (d *Dir) WriteAtomic(name string, data []byte, maxSize int64) (err error) {
 	}
 	defer dir.Close()
 	return d.hooks.syncDir(dir)
+}
+
+// Link makes newname a hard link to the file oldname, both inside the
+// directory, through the directory that was opened and checked (never through
+// a second open by path). oldname must pass the same checks as in ReadCapped
+// (a regular file, not a symlink, a trusted owner, no group/other write bit);
+// its size does not matter. newname must not exist: the link itself refuses
+// when something is there, a dangling symlink included, and nothing is
+// replaced (the error matches fs.ErrExist). After the link, newname must name
+// the very file that was checked; if oldname was swapped between the check and
+// the link, the new link is removed again and ErrUntrusted is returned. The
+// checked file stays open until that comparison is made: an open file keeps
+// its inode number from being reused, which on Linux a file created right
+// after an unlink would otherwise get, and the comparison would accept it. The
+// directory is flushed afterwards; an error from that flush means the link is
+// in place but may not be durable.
+func (d *Dir) Link(oldname, newname string) error {
+	if err := validName(oldname); err != nil {
+		return err
+	}
+	if err := validName(newname); err != nil {
+		return err
+	}
+	f, fi, _, err := d.openChecked(oldname, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	d.hooks.beforeLink()
+	if err := d.root.Link(oldname, newname); err != nil {
+		return err
+	}
+	d.hooks.afterLink()
+	li, err := d.root.Lstat(newname)
+	if err != nil || !os.SameFile(li, fi) {
+		// With no other writer in the directory, only the link made by this
+		// call can be at newname: the link refuses an existing name.
+		_ = d.root.Remove(newname)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%s was replaced while it was being linked: %w", d.filePath(oldname), ErrUntrusted)
+	}
+	dir, err := d.root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return d.hooks.syncDir(dir)
+}
+
+// Remove removes the file name (or an empty directory of that name) through
+// the opened directory. A symlink is removed itself, never followed. A
+// missing name returns an error for which errors.Is(err, fs.ErrNotExist)
+// holds. The directory is not flushed here: a Link or WriteAtomic that
+// follows flushes it.
+func (d *Dir) Remove(name string) error {
+	if err := validName(name); err != nil {
+		return err
+	}
+	return d.root.Remove(name)
 }
 
 // openChecked looks at name, opens it without following links and checks that

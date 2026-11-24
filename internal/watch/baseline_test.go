@@ -633,9 +633,9 @@ func TestBaselineSetAsideFailureIsFatal(t *testing.T) {
 }
 
 // When the state directory's path no longer names the directory the store
-// holds, the copy lands elsewhere; the check through the trusted handle
-// stops the start before the untrusted file is replaced.
-func TestBaselineAsideCheckedThroughHandle(t *testing.T) {
+// holds, the reset still works in the held directory: the copy is made there,
+// and the directory now at the path is not touched.
+func TestBaselineAsideUsesHeldDirectory(t *testing.T) {
 	h := newHarness(t, hopts{noWorker: true})
 	bad := []byte("garbage")
 	writeState(t, h, BaselineFile, bad)
@@ -647,19 +647,29 @@ func TestBaselineAsideCheckedThroughHandle(t *testing.T) {
 	if err := os.Mkdir(h.path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeState(t, h, BaselineFile, []byte("other"))
-	err := runDaemon(t, h, h.d)
-	if !errors.Is(err, ErrBaselineLoad) || !strings.Contains(err.Error(), "not in the state directory") {
-		t.Fatalf("Run: %v, want the failed copy check", err)
+	writeState(t, h, BaselineFile, []byte("decoy"))
+	writeState(t, h, BaselineAsideFile, []byte("decoy copy"))
+	if err := runDaemon(t, h, h.d); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	got, rerr := os.ReadFile(filepath.Join(moved, BaselineFile))
+	got, rerr := os.ReadFile(filepath.Join(moved, BaselineAsideFile))
 	if rerr != nil || string(got) != string(bad) {
-		t.Fatalf("untrusted file in the held directory: %q %v, want it untouched", got, rerr)
+		t.Fatalf("aside copy in the held directory: %q %v, want the untrusted bytes", got, rerr)
+	}
+	if got := h.file(BaselineFile); got != "decoy" {
+		t.Fatalf("decoy baseline %q, want it untouched", got)
+	}
+	if got := h.file(BaselineAsideFile); got != "decoy copy" {
+		t.Fatalf("decoy copy %q, want it untouched", got)
+	}
+	entries, err := os.ReadDir(h.path)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("decoy directory has %d entries (%v), want 2", len(entries), err)
 	}
 }
 
-// An oversized file goes through the whole reset: its copy, larger than the
-// read bound, passes the check through the handle.
+// An oversized file goes through the whole reset: its copy is larger than the
+// read bound and is still made.
 func TestBaselineOversizedFileReset(t *testing.T) {
 	h := newHarness(t, hopts{noWorker: true})
 	writeState(t, h, BaselineFile, padded(t, MaxBaselineBytes+1))

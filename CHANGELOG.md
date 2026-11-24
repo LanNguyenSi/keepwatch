@@ -8,6 +8,16 @@ report.
 
 ## [Unreleased]
 
+### Security
+
+- The watch daemon's set-aside of an untrusted login baseline no longer
+  opens the state directory a second time by its path. The state directory
+  handle that was opened and checked now does the work: `securefile` gained
+  `Link` (checks the source file like a read, refuses an existing target, and
+  verifies after the link that the target is the file it checked) and
+  `Remove`, so a path swapped in after start can no longer receive the copy
+  or make the start keep going without one.
+
 ### Changed
 
 - Notifications: a failed 429 or 5xx delivery now carries the server's
