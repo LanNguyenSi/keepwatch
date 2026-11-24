@@ -59,11 +59,17 @@ display and compares a lower case copy
 pattern is case sensitive.
 
 The single transformation is `redact.Redactor.Clean`: redact, then escape,
-then cut to `MaxFieldRunes` (`internal/redact/redact.go:250-252#"func (r *Redactor) Clean"`).
+then redact again over the escaped text, then cut to `MaxFieldRunes`
+(`internal/redact/redact.go:250-252#"func (r *Redactor) Clean"`).
 Its order is itself an invariant, documented above the package
 (`internal/redact/redact.go:13#"The order matters"`), and the escaping
 step is specified in `docs/running.md` under "Output safety"; this bundle
-does not repeat it.
+does not repeat it. The result is a fixed point: `Clean` of a text `Clean`
+produced changes nothing, which matters where text is cleaned twice, as on
+the posture path of the watch daemon (the state file is input, so a stored
+display subject is cleaned again on the way in); the second `Clean` of a
+cut text is a no-op as well, because the cut is placed at a point the next
+pass leaves alone.
 
 Every consumer of untrusted text applies that one function, each at its own
 boundary:
