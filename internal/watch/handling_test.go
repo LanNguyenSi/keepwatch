@@ -349,3 +349,75 @@ func TestStaleSentResultLeavesTheReopenNotificationDue(t *testing.T) {
 		t.Fatalf("sends = %d, want the reopen notification (1)", n)
 	}
 }
+
+// reopenOpened opens, closes and reopens one incident and returns its id and
+// the reopened incident (ReopenCount >= 1). It runs under the caller's d.mu.
+func reopenOpened(t *testing.T, h *harness, tag string) (string, incident.Incident) {
+	t.Helper()
+	sigAt := func(at time.Time) event.Signal {
+		return event.Signal{RuleID: "r", Fingerprint: event.FingerprintOf(tag, "1"), Severity: result.High, Time: at, Notify: true}
+	}
+	opened, err := h.store.Apply(sigAt(t0), incident.Display{Title: "t", Summary: "s"})
+	if err != nil || opened.Outcome != incident.Opened {
+		t.Fatalf("apply = %+v, %v", opened, err)
+	}
+	id := opened.Incident.ID
+	if _, err := h.store.Close(id); err != nil {
+		t.Fatal(err)
+	}
+	h.clk.add(time.Hour)
+	reopened, err := h.store.Apply(sigAt(h.clk.now()), incident.Display{Title: "t", Summary: "s"})
+	if err != nil || reopened.Outcome != incident.Reopened || reopened.Incident.ReopenCount < 1 {
+		t.Fatalf("reopen = %+v, %v", reopened, err)
+	}
+	return id, reopened.Incident
+}
+
+// The no-worker path marks the incident it is handed for the generation named
+// in the incident: a reopened incident (ReopenCount >= 1) is marked, not
+// refused as a stale mark, so it stops being pending instead of staying
+// unnotified.
+func TestSynchronousNoWorkerMarkNamesTheReopenedGeneration(t *testing.T) {
+	h := newHarness(t, hopts{noWorker: true})
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	id, reopened := reopenOpened(t, h, "sync-noworker")
+	if _, err := h.d.notifyIncident(reopened, false); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := h.store.Get(id); in.NotifiedAt.IsZero() {
+		t.Fatal("the no-worker path left a reopened incident unnotified: a mark of count 0 was refused as stale")
+	}
+}
+
+// The rate-limit drop path marks the incident for the generation named in the
+// incident: a reopened incident is marked and stops being pending, so the next
+// pass does not hand it on again once the limit has room.
+func TestSynchronousRateLimitMarkNamesTheReopenedGeneration(t *testing.T) {
+	h := newHarness(t, hopts{opt: Options{GlobalPerMinute: 1}})
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	id, reopened := reopenOpened(t, h, "sync-ratelimit")
+	// The worker's limit is used up in this minute, so the send is dropped and
+	// the incident counts as notified without a message.
+	h.d.attempts = append(h.d.attempts, h.clk.now())
+	if _, err := h.d.notifyIncident(reopened, false); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := h.store.Get(id); in.NotifiedAt.IsZero() {
+		t.Fatal("the rate-limit drop left a reopened incident unnotified: a mark of count 0 was refused as stale")
+	}
+	if n := h.d.inflightTotal; n != 0 {
+		t.Fatalf("inflight = %d, the dropped send must not reach the worker", n)
+	}
+	// The mark ends the retry: once the limit has room again the next pass does
+	// not hand the reopened incident on a second time.
+	h.clk.add(2 * time.Minute)
+	h.d.logged[id] = true
+	if err := h.d.reconcileNotifications(); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.d.inflightTotal; n != 0 {
+		t.Fatalf("inflight = %d after the next pass, the marked incident must not be re-sent", n)
+	}
+}
