@@ -30,6 +30,13 @@ report.
 
 ### Fixed
 
+- Notifications: the mark that records a taken-over notification now names
+  the incident generation it refers to (the reopen count captured when the
+  job was built). A late result of the first notification, arriving after a
+  close and reopen, is a stale mark: it changes nothing and is ignored like a
+  mark of an unknown incident, so the reopened incident keeps its unnotified
+  state and the reopen notification is retried instead of being silenced by a
+  result of the generation before it.
 - Redaction: `Clean` is now idempotent on its own output. A value behind a
   control byte that follows a keyword separator (a tab, a NUL byte) is now
   redacted on the first pass over the escaped text instead of surviving

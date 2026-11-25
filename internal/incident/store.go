@@ -65,6 +65,11 @@ var (
 	// that cannot be recorded (see usableTime). MarkNotified and Sweep
 	// return it for such a time of their own.
 	ErrInvalidSignal = errors.New("invalid signal")
+	// ErrStaleMark is returned by MarkNotified when the reopen count the
+	// mark names differs from the stored one: the mark belongs to an
+	// earlier generation of the incident (its notification was taken over
+	// before a close and reopen) and changes nothing.
+	ErrStaleMark = errors.New("stale notification mark")
 	// ErrCorrupt is returned by Open for a file that is not valid incident
 	// data. The file is left as it is.
 	ErrCorrupt = errors.New("incident file is corrupt")
@@ -626,14 +631,20 @@ func (s *Store) Apply(sig event.Signal, display Display) (Result, error) {
 // MarkNotified records that the notification of the incident was taken over
 // at the given time (NotifiedAt), so that later updates are no longer
 // Pending. It is written like a transition. A time that cannot be recorded
-// (see usableTime) is ErrInvalidSignal and changes nothing.
-func (s *Store) MarkNotified(id string, at time.Time) (Incident, error) {
+// (see usableTime) is ErrInvalidSignal and changes nothing. reopenCount is
+// the generation the mark refers to, captured when the notification was
+// taken over: a mark of an older generation (its result arrived after a
+// close and reopen) is ErrStaleMark and changes nothing.
+func (s *Store) MarkNotified(id string, reopenCount int, at time.Time) (Incident, error) {
 	if !usableTime(at) {
 		return Incident{}, fmt.Errorf("%w: notification time %v is zero or outside the years 1 to 9999", ErrInvalidSignal, at)
 	}
 	for i, in := range s.list {
 		if in.ID != id {
 			continue
+		}
+		if in.ReopenCount != reopenCount {
+			return Incident{}, fmt.Errorf("%w: %q was marked for generation %d, the stored one is %d", ErrStaleMark, id, reopenCount, in.ReopenCount)
 		}
 		list := append([]Incident(nil), s.list...)
 		list[i].NotifiedAt = at

@@ -74,7 +74,7 @@ func (d *Daemon) handleResult(r alert.Result) error {
 			return err
 		}
 		if id != "" {
-			return d.markNotified(id, r.At)
+			return d.markNotified(id, r.Job.ReopenCount, r.At)
 		}
 	case alert.Failed:
 		d.release(fp)
@@ -176,9 +176,10 @@ func (d *Daemon) noticeWaiting() bool {
 	return false
 }
 
-func (d *Daemon) markNotified(id string, at time.Time) error {
-	_, err := d.deps.Incidents.MarkNotified(id, at)
-	if err == nil || errors.Is(err, incident.ErrUnknownIncident) || errors.Is(err, incident.ErrInvalidSignal) {
+func (d *Daemon) markNotified(id string, reopenCount int, at time.Time) error {
+	_, err := d.deps.Incidents.MarkNotified(id, reopenCount, at)
+	if err == nil || errors.Is(err, incident.ErrUnknownIncident) || errors.Is(err, incident.ErrInvalidSignal) ||
+		errors.Is(err, incident.ErrStaleMark) {
 		return nil
 	}
 	return fmt.Errorf("watch: incident store: %w", err)
@@ -190,7 +191,8 @@ func (d *Daemon) markNotified(id string, at time.Time) error {
 // and when a rate limit drops the send, the incident counts as notified: the
 // limit already decided there will be no message for it now. While a daemon
 // notice waits, nothing is handed on and the incident stays unnotified for
-// the housekeeping retry.
+// the housekeeping retry. The job carries the incident's reopen count, so a
+// late result marks only the generation it was built for.
 func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error) {
 	now := d.now()
 	fp := string(in.Fingerprint)
@@ -198,7 +200,7 @@ func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error
 		if refused {
 			return false, nil
 		}
-		return false, d.markNotified(in.ID, now)
+		return false, d.markNotified(in.ID, in.ReopenCount, now)
 	}
 	if d.noticeWaiting() {
 		return false, nil
@@ -212,7 +214,7 @@ func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error
 		st := d.tries[fp]
 		st.notBefore = now.Add(d.gap(st.failures))
 		d.setTry(fp, st)
-		if reason = d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, Msg: alert.BuildMessage(in, alreadyClean)}); reason == alert.NotDropped {
+		if reason = d.enqueue(alert.Job{IncidentID: id, Fingerprint: fp, ReopenCount: in.ReopenCount, Msg: alert.BuildMessage(in, alreadyClean)}); reason == alert.NotDropped {
 			d.attempts = append(d.attempts, now)
 		}
 	} else if err := d.noise("notify_dropped:"+string(alert.DropGlobal), audit.NotifyDropped, "notification dropped: "+string(alert.DropGlobal)); err != nil {
@@ -226,7 +228,7 @@ func (d *Daemon) notifyIncident(in incident.Incident, refused bool) (bool, error
 			// The limit decided there is no message now: the incident counts as
 			// notified and its pacing entry goes.
 			delete(d.tries, fp)
-			return false, d.markNotified(in.ID, now)
+			return false, d.markNotified(in.ID, in.ReopenCount, now)
 		}
 	}
 	return false, nil
