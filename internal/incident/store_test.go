@@ -1007,7 +1007,7 @@ func TestPendingAfterLostResult(t *testing.T) {
 	}
 	// Marking it as notified ends the pending state, and it is persisted.
 	at := t0.Add(time.Minute)
-	in, err := s.MarkNotified(r1.Incident.ID, at)
+	in, err := s.MarkNotified(r1.Incident.ID, r1.Incident.ReopenCount, at)
 	if err != nil || !in.NotifiedAt.Equal(at) {
 		t.Fatalf("MarkNotified = %+v, %v", in, err)
 	}
@@ -1034,7 +1034,7 @@ func TestPendingCases(t *testing.T) {
 			s, _, _ := newStore(t)
 			id := mustApply(t, s, sig(fp(1), c.notify, t0), disp).Incident.ID
 			if c.mark {
-				if _, err := s.MarkNotified(id, t0); err != nil {
+				if _, err := s.MarkNotified(id, 0, t0); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1050,7 +1050,7 @@ func TestPendingCases(t *testing.T) {
 func TestReopenClearsNotifiedAt(t *testing.T) {
 	s, d, _ := newStore(t)
 	id := mustApply(t, s, sig(fp(1), true, t0), disp).Incident.ID
-	if _, err := s.MarkNotified(id, t0); err != nil {
+	if _, err := s.MarkNotified(id, 0, t0); err != nil {
 		t.Fatal(err)
 	}
 	setState(t, s, id, StateClosed)
@@ -1074,16 +1074,19 @@ func TestReopenClearsNotifiedAt(t *testing.T) {
 func TestMarkNotifiedErrors(t *testing.T) {
 	s, d, _ := newStore(t)
 	id := mustApply(t, s, sig(fp(1), true, t0), disp).Incident.ID
-	if _, err := s.MarkNotified("nope", t0); !errors.Is(err, ErrUnknownIncident) {
+	if _, err := s.MarkNotified("nope", 0, t0); !errors.Is(err, ErrUnknownIncident) {
 		t.Fatalf("unknown: %v", err)
 	}
-	if _, err := s.MarkNotified(id, time.Time{}); !errors.Is(err, ErrInvalidSignal) {
+	if _, err := s.MarkNotified(id, 0, time.Time{}); !errors.Is(err, ErrInvalidSignal) {
 		t.Fatalf("zero time: %v", err)
+	}
+	if _, err := s.MarkNotified(id, 1, t0); !errors.Is(err, ErrStaleMark) {
+		t.Fatalf("other generation: %v", err)
 	}
 	if in, _ := s.Get(id); !in.NotifiedAt.IsZero() {
 		t.Fatal("a refused mark changed the incident")
 	}
-	if _, err := s.MarkNotified(id, t0); err != nil {
+	if _, err := s.MarkNotified(id, 0, t0); err != nil {
 		t.Fatal(err)
 	}
 	s2, err := Open(d)
@@ -1094,11 +1097,61 @@ func TestMarkNotifiedErrors(t *testing.T) {
 		t.Fatalf("not persisted: %+v", in)
 	}
 	d.Close()
-	if _, err := s.MarkNotified(id, t0.Add(time.Hour)); err == nil {
+	if _, err := s.MarkNotified(id, 0, t0.Add(time.Hour)); err == nil {
 		t.Fatal("no error on a failed save")
 	}
 	if in, _ := s.Get(id); !in.NotifiedAt.Equal(t0) {
 		t.Fatal("failed save changed the store")
+	}
+}
+
+// The mark names the generation it refers to: the result of the first
+// notification, arriving after a close and reopen, is stale and changes
+// nothing; only a mark of the stored generation is written.
+func TestStaleMarkAfterReopenChangesNothing(t *testing.T) {
+	s, d, p := newStore(t)
+	r1 := mustApply(t, s, sig(fp(1), true, t0), disp)
+	id := r1.Incident.ID
+	if _, err := s.MarkNotified(id, r1.Incident.ReopenCount, t0); err != nil {
+		t.Fatal(err)
+	}
+	setState(t, s, id, StateClosed)
+	r2 := mustApply(t, s, sig(fp(1), true, t0.Add(time.Hour)), disp)
+	if r2.Outcome != Reopened || r2.Incident.ReopenCount != 1 || !r2.Incident.NotifiedAt.IsZero() {
+		t.Fatalf("reopen = %+v", r2)
+	}
+	before, err := os.ReadFile(filepath.Join(p, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeList := s.List()
+	if _, err := s.MarkNotified(id, r1.Incident.ReopenCount, t0.Add(2*time.Hour)); !errors.Is(err, ErrStaleMark) {
+		t.Fatalf("stale mark: err = %v, want ErrStaleMark", err)
+	}
+	after, err := os.ReadFile(filepath.Join(p, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a stale mark changed the file")
+	}
+	if !reflect.DeepEqual(s.List(), beforeList) {
+		t.Fatalf("a stale mark changed the store: %+v", s.List())
+	}
+	// The reopen notification is still owed: the next update is pending.
+	if r := mustApply(t, s, sig(fp(1), true, t0.Add(2*time.Hour)), disp); !r.Pending {
+		t.Fatalf("after a stale mark Pending = %v, want true", r.Pending)
+	}
+	// The mark of the stored generation is written and persisted.
+	if in, err := s.MarkNotified(id, r2.Incident.ReopenCount, t0.Add(3*time.Hour)); err != nil || in.NotifiedAt.IsZero() {
+		t.Fatalf("current mark = %+v, %v", in, err)
+	}
+	s2, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := s2.Get(id); in.NotifiedAt.IsZero() {
+		t.Fatal("the mark of the current generation was not persisted")
 	}
 }
 
@@ -1285,7 +1338,7 @@ func TestMarkNotifiedRejectsUnusableTime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.MarkNotified(id, at); !errors.Is(err, ErrInvalidSignal) {
+		if _, err := s.MarkNotified(id, 0, at); !errors.Is(err, ErrInvalidSignal) {
 			t.Fatalf("MarkNotified(%v): err = %v, want ErrInvalidSignal", at, err)
 		}
 		after, err := os.ReadFile(filepath.Join(p, FileName))

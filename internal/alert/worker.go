@@ -26,6 +26,11 @@ type Job struct {
 	IncidentID  string
 	Fingerprint string
 	Msg         notify.Message
+	// ReopenCount is the incident's reopen count captured when the job was
+	// built, so that a late result of an earlier notification cannot mark a
+	// reopened incident notified. Zero for a daemon notice, which marks
+	// nothing.
+	ReopenCount int
 }
 
 // Status is the outcome of a Job.
